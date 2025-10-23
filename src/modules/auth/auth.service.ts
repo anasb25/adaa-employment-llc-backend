@@ -219,6 +219,18 @@ export class AuthService {
     return this.userRepository.findOne({ where: { id, isActive: true } });
   }
 
+  async getCurrentUser(id: number): Promise<Omit<User, 'password'>> {
+    const user = await this.userRepository.findOne({
+      where: { id, isActive: true },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    return this.sanitizeUser(user);
+  }
+
   private async hashPassword(password: string): Promise<string> {
     const rounds = this.configService.get<number>('auth.bcryptRounds') || 12;
     return await bcrypt.hash(password, rounds);
@@ -312,7 +324,7 @@ export class AuthService {
     token: string,
   ): Promise<void> {
     const baseUrl =
-      this.configService.get('app.frontendUrl') || 'http://localhost:3000';
+      this.configService.get('app.frontendUrl') || 'http://localhost:5173';
     const resetUrl = `${baseUrl}/reset-password?token=${token}`;
 
     const html = passwordResetEmailTemplate(resetUrl);

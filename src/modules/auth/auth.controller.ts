@@ -1,4 +1,4 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { AuthService, AuthResponse } from './auth.service';
 import {
   LoginDto,
@@ -8,6 +8,8 @@ import {
   ResetPasswordDto,
 } from './dto/auth.dto';
 import { Public } from '../../common/decorators/public.decorator';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AcceptInvitationDto } from '../invitations/dto/invitation.dto';
 
 @Controller('auth')
@@ -64,5 +66,11 @@ export class AuthController {
       },
       acceptInvitationDto.token,
     );
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get('me')
+  async getCurrentUser(@CurrentUser() user: any) {
+    return this.authService.getCurrentUser(user.id);
   }
 }
