@@ -7,6 +7,7 @@ import {
   ForgotPasswordDto,
 } from './dto/auth.dto';
 import { Public } from '../../common/decorators/public.decorator';
+import { AcceptInvitationDto } from '../invitations/dto/invitation.dto';
 
 @Controller('auth')
 export class AuthController {
@@ -38,5 +39,21 @@ export class AuthController {
     @Body() forgotPasswordDto: ForgotPasswordDto,
   ): Promise<{ message: string }> {
     return this.authService.forgotPassword(forgotPasswordDto);
+  }
+
+  @Public()
+  @Post('register-with-invitation')
+  async registerWithInvitation(
+    @Body() acceptInvitationDto: AcceptInvitationDto,
+  ): Promise<AuthResponse> {
+    return this.authService.registerWithInvitation(
+      {
+        email: acceptInvitationDto.email,
+        password: acceptInvitationDto.password,
+        firstName: acceptInvitationDto.firstName,
+        lastName: acceptInvitationDto.lastName,
+      },
+      acceptInvitationDto.token,
+    );
   }
 }

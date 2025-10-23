@@ -6,6 +6,7 @@ import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
 import { UsersModule } from './modules/users/users.module.js';
 import { AuthModule } from './modules/auth/auth.module.js';
+import { InvitationModule } from './modules/invitations/invitation.module.js';
 import appConfig from './config/app.config.js';
 import databaseConfig from './config/database.config.js';
 import authConfig from './config/auth.config.js';
@@ -44,6 +45,7 @@ import mailConfig from './config/mail.config.js';
     // Feature Modules
     UsersModule,
     AuthModule,
+    InvitationModule,
   ],
   controllers: [AppController],
   providers: [
@@ -62,5 +64,6 @@ import mailConfig from './config/mail.config.js';
       useClass: PermissionsGuard,
     },
   ],
+  exports: [EmailService],
 })
 export class AppModule {}

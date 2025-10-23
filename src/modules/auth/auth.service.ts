@@ -10,6 +10,7 @@ import { ILike, Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { User } from '../users/entities/user.entity';
 import { LoginDto, RegisterDto, ForgotPasswordDto } from './dto/auth.dto';
+import { InvitationService } from '../invitations/invitation.service';
 
 export interface JwtPayload {
   sub: number;
@@ -33,17 +34,28 @@ export class AuthService {
     private readonly userRepository: Repository<User>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly invitationService: InvitationService,
   ) {}
 
   async register(registerDto: RegisterDto): Promise<AuthResponse> {
-    const {
-      email,
-      password,
-      firstName,
-      lastName,
-      role = 'user',
-      permissions = [],
-    } = registerDto;
+    // Public registration is disabled - users must be invited
+    throw new UnauthorizedException(
+      'Public registration is disabled. Please use an invitation link to register.',
+    );
+  }
+
+  async registerWithInvitation(
+    registerDto: RegisterDto,
+    invitationToken: string,
+  ): Promise<AuthResponse> {
+    const { email, password, firstName, lastName } = registerDto;
+
+    // Validate invitation token
+    const invitation = await this.validateInvitationToken(invitationToken);
+
+    if (invitation.email !== email) {
+      throw new UnauthorizedException('Email does not match invitation');
+    }
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
@@ -56,14 +68,15 @@ export class AuthService {
     // Hash password
     const hashedPassword = await this.hashPassword(password);
 
-    // Create user
+    // Create user with invitation details
     const user = this.userRepository.create({
       email,
       password: hashedPassword,
       firstName,
       lastName,
-      role,
-      permissions,
+      role: invitation.role,
+      permissions: invitation.permissions,
+      isActive: true,
     });
 
     const savedUser = await this.userRepository.save(user);
@@ -219,5 +232,9 @@ export class AuthService {
   private sanitizeUser(user: User): Omit<User, 'password'> {
     const { password, ...sanitizedUser } = user;
     return sanitizedUser;
+  }
+
+  private async validateInvitationToken(token: string) {
+    return this.invitationService.validateInvitationToken(token);
   }
 }
