@@ -12,13 +12,15 @@ import authConfig from './config/auth.config.js';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
 import { RolesGuard } from './common/guards/authorization.guard.js';
 import { PermissionsGuard } from './common/guards/authorization.guard.js';
+import { EmailService } from './email/email.service.js';
+import mailConfig from './config/mail.config.js';
 
 @Module({
   imports: [
     // Configuration Module
     ConfigModule.forRoot({
       isGlobal: true,
-      load: [appConfig, databaseConfig, authConfig],
+      load: [appConfig, databaseConfig, authConfig, mailConfig],
       envFilePath: ['.env.local', '.env'],
     }),
 
@@ -46,6 +48,7 @@ import { PermissionsGuard } from './common/guards/authorization.guard.js';
   controllers: [AppController],
   providers: [
     AppService,
+    EmailService,
     {
       provide: APP_GUARD,
       useClass: JwtAuthGuard,
