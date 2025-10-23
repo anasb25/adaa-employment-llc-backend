@@ -9,6 +9,7 @@ import { User } from '../users/entities/user.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { LocalStrategy } from './strategies/local.strategy';
 import { InvitationModule } from '../invitations/invitation.module';
+import { EmailService } from '../../email/email.service';
 
 @Module({
   imports: [
@@ -28,7 +29,7 @@ import { InvitationModule } from '../invitations/invitation.module';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, LocalStrategy],
+  providers: [AuthService, JwtStrategy, LocalStrategy, EmailService],
   exports: [AuthService],
 })
 export class AuthModule {}

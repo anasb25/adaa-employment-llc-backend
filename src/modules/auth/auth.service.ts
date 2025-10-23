@@ -9,8 +9,15 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { ILike, Repository } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { User } from '../users/entities/user.entity';
-import { LoginDto, RegisterDto, ForgotPasswordDto } from './dto/auth.dto';
+import {
+  LoginDto,
+  RegisterDto,
+  ForgotPasswordDto,
+  ResetPasswordDto,
+} from './dto/auth.dto';
 import { InvitationService } from '../invitations/invitation.service';
+import { EmailService } from '../../email/email.service';
+import { passwordResetEmailTemplate } from '../../email/templates/password-reset.template';
 
 export interface JwtPayload {
   sub: number;
@@ -35,6 +42,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly invitationService: InvitationService,
+    private readonly emailService: EmailService,
   ) {}
 
   async register(registerDto: RegisterDto): Promise<AuthResponse> {
@@ -135,20 +143,42 @@ export class AuthService {
   async forgotPassword(
     forgotPasswordDto: ForgotPasswordDto,
   ): Promise<{ message: string }> {
-    const { email, oldPassword, newPassword } = forgotPasswordDto;
+    const { email } = forgotPasswordDto;
 
     // Find user by email
-    const user = await this.getUserWithPassword(email);
+    const user = await this.userRepository.findOne({
+      where: { email: ILike(email) },
+    });
+
     if (!user || !user.isActive) {
-      throw new UnauthorizedException('Invalid email or user not found');
+      // Don't reveal if user exists or not for security
+      return {
+        message:
+          'If the email exists in our system, you will receive a password reset link.',
+      };
     }
-    // Verify old password
-    const isOldPasswordValid = await this.comparePassword(
-      oldPassword,
-      user.password,
-    );
-    if (!isOldPasswordValid) {
-      throw new UnauthorizedException('Invalid old password');
+
+    // Generate password reset token
+    const resetToken = this.generatePasswordResetToken(user.email);
+
+    // Send password reset email
+    await this.sendPasswordResetEmail(user.email, resetToken);
+
+    return {
+      message:
+        'If the email exists in our system, you will receive a password reset link.',
+    };
+  }
+
+  async resetPassword(
+    resetPasswordDto: ResetPasswordDto,
+  ): Promise<{ message: string }> {
+    const { token, newPassword } = resetPasswordDto;
+
+    // Validate token and get user
+    const user = await this.validatePasswordResetToken(token);
+    if (!user) {
+      throw new UnauthorizedException('Invalid or expired reset token');
     }
 
     // Hash new password
@@ -160,7 +190,7 @@ export class AuthService {
     });
 
     return {
-      message: 'Password updated successfully',
+      message: 'Password has been reset successfully',
     };
   }
 
@@ -236,5 +266,61 @@ export class AuthService {
 
   private async validateInvitationToken(token: string) {
     return this.invitationService.validateInvitationToken(token);
+  }
+
+  private generatePasswordResetToken(email: string): string {
+    // Generate a JWT token with user email and expiry
+    const payload = {
+      type: 'password_reset',
+      email: email,
+      timestamp: Date.now(),
+    };
+
+    return this.jwtService.sign(payload, {
+      secret:
+        this.configService.get<string>('auth.jwtSecret') || 'default-secret',
+      expiresIn: '1h', // Token expires in 1 hour
+    });
+  }
+
+  private async validatePasswordResetToken(
+    token: string,
+  ): Promise<User | null> {
+    try {
+      const payload = this.jwtService.verify(token, {
+        secret:
+          this.configService.get<string>('auth.jwtSecret') || 'default-secret',
+      });
+
+      if (payload.type !== 'password_reset' || !payload.email) {
+        return null;
+      }
+
+      // Find user by email from token
+      const user = await this.userRepository.findOne({
+        where: { email: payload.email, isActive: true },
+      });
+
+      return user;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  private async sendPasswordResetEmail(
+    email: string,
+    token: string,
+  ): Promise<void> {
+    const baseUrl =
+      this.configService.get('app.frontendUrl') || 'http://localhost:3000';
+    const resetUrl = `${baseUrl}/reset-password?token=${token}`;
+
+    const html = passwordResetEmailTemplate(resetUrl);
+
+    await this.emailService.sendMail({
+      to: email,
+      subject: 'Password Reset Request - ADAA Employment LLC',
+      html,
+    });
   }
 }

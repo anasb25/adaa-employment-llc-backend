@@ -5,6 +5,7 @@ import {
   RegisterDto,
   RefreshTokenDto,
   ForgotPasswordDto,
+  ResetPasswordDto,
 } from './dto/auth.dto';
 import { Public } from '../../common/decorators/public.decorator';
 import { AcceptInvitationDto } from '../invitations/dto/invitation.dto';
@@ -39,6 +40,14 @@ export class AuthController {
     @Body() forgotPasswordDto: ForgotPasswordDto,
   ): Promise<{ message: string }> {
     return this.authService.forgotPassword(forgotPasswordDto);
+  }
+
+  @Public()
+  @Post('reset-password')
+  async resetPassword(
+    @Body() resetPasswordDto: ResetPasswordDto,
+  ): Promise<{ message: string }> {
+    return this.authService.resetPassword(resetPasswordDto);
   }
 
   @Public()
