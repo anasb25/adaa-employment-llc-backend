@@ -31,7 +31,7 @@ import authConfig from './config/auth.config.js';
         password: configService.get('database.password'),
         database: configService.get('database.database'),
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
-        synchronize: configService.get('app.nodeEnv') === 'development',
+        synchronize: false,
         logging: configService.get('app.nodeEnv') === 'development',
       }),
       inject: [ConfigService],
