@@ -7,55 +7,49 @@ import {
   Delete,
   Put,
 } from '@nestjs/common';
-import { Auth, RequireRoles } from '@rovinghut/nestjs-auth';
-import { UsersService } from './users.service.js';
-import { User } from './entities/user.entity.js';
-import { CurrentUser } from '../../common/decorators/current-user.decorator.js';
-import type { User as AuthUser } from '@rovinghut/nestjs-auth';
+import { UsersService } from './users.service';
+import { User } from './entities/user.entity';
+import { CurrentUser, Roles, Permissions } from '../../common/decorators';
 
 @Controller('users')
-@Auth()
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
-  @Get('me')
-  getCurrentUser(@CurrentUser() user: AuthUser) {
-    return {
-      sub: user.sub,
-      role: user.role,
-      permissions: user.permissions,
-    };
+  @Get('profile')
+  getProfile(@CurrentUser() user: User) {
+    return user;
   }
 
+  @Roles('admin')
   @Get()
-  @RequireRoles(['admin', 'manager'], 'any')
-  findAll(): Promise<User[]> {
+  findAll() {
     return this.usersService.findAll();
   }
 
+  @Roles('admin', 'manager')
   @Get(':id')
-  findOne(@Param('id') id: string): Promise<User | null> {
+  findOne(@Param('id') id: string) {
     return this.usersService.findOne(+id);
   }
 
+  @Roles('admin')
+  @Permissions('user:create')
   @Post()
-  @RequireRoles(['admin'])
-  create(@Body() userData: Partial<User>): Promise<User> {
-    return this.usersService.create(userData);
+  create(@Body() createUserDto: any) {
+    return this.usersService.create(createUserDto);
   }
 
+  @Roles('admin')
+  @Permissions('user:update')
   @Put(':id')
-  @RequireRoles(['admin'])
-  update(
-    @Param('id') id: string,
-    @Body() userData: Partial<User>,
-  ): Promise<User> {
-    return this.usersService.update(+id, userData);
+  update(@Param('id') id: string, @Body() updateUserDto: any) {
+    return this.usersService.update(+id, updateUserDto);
   }
 
+  @Roles('admin')
+  @Permissions('user:delete')
   @Delete(':id')
-  @RequireRoles(['admin'])
-  remove(@Param('id') id: string): Promise<void> {
-    return this.usersService.remove(+id);
+  remove(@Param('id') id: string) {
+    return this.usersService.remove(Number(id));
   }
 }

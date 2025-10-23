@@ -1,15 +1,17 @@
 import { Module } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { NestJSAuthModule } from '@rovinghut/nestjs-auth';
 import { AppController } from './app.controller.js';
 import { AppService } from './app.service.js';
-import { ProtectedController } from './protected.controller.js';
 import { UsersModule } from './modules/users/users.module.js';
-import { ResourcesModule } from './modules/resources/resources.module.js';
+import { AuthModule } from './modules/auth/auth.module.js';
 import appConfig from './config/app.config.js';
 import databaseConfig from './config/database.config.js';
 import authConfig from './config/auth.config.js';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
+import { RolesGuard } from './common/guards/authorization.guard.js';
+import { PermissionsGuard } from './common/guards/authorization.guard.js';
 
 @Module({
   imports: [
@@ -37,14 +39,25 @@ import authConfig from './config/auth.config.js';
       inject: [ConfigService],
     }),
 
-    // Auth Module (Global)
-    NestJSAuthModule.forRoot(),
-
     // Feature Modules
     UsersModule,
-    ResourcesModule,
+    AuthModule,
   ],
-  controllers: [AppController, ProtectedController],
-  providers: [AppService],
+  controllers: [AppController],
+  providers: [
+    AppService,
+    {
+      provide: APP_GUARD,
+      useClass: JwtAuthGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: RolesGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: PermissionsGuard,
+    },
+  ],
 })
 export class AppModule {}
