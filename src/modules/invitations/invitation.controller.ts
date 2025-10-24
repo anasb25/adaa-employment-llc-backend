@@ -15,6 +15,7 @@ import { CreateInvitationDto, AcceptInvitationDto } from './dto/invitation.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
+import { Public } from '../../common/decorators/public.decorator';
 
 @Controller('invitations')
 @UseGuards(JwtAuthGuard)
@@ -35,13 +36,21 @@ export class InvitationController {
   }
 
   @Post('accept')
+  @Public()
   async acceptInvitation(@Body() acceptInvitationDto: AcceptInvitationDto) {
     return this.invitationService.acceptInvitation(acceptInvitationDto);
   }
 
   @Get('validate/:token')
+  @Public()
   async validateInvitation(@Param('token') token: string) {
     return this.invitationService.validateInvitationToken(token);
+  }
+
+  @Post('complete-signup')
+  @Public()
+  async completeSignup(@Body() acceptInvitationDto: AcceptInvitationDto) {
+    return this.invitationService.acceptInvitation(acceptInvitationDto);
   }
 
   @Get('my-invitations')

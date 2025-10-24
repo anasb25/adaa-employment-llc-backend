@@ -59,7 +59,14 @@ export class AuthService {
     const { email, password, firstName, lastName } = registerDto;
 
     // Validate invitation token
-    const invitation = await this.validateInvitationToken(invitationToken);
+    const validationResult =
+      await this.validateInvitationToken(invitationToken);
+
+    if (!validationResult.isValid || !validationResult.invitation) {
+      throw new UnauthorizedException('Invalid or expired invitation');
+    }
+
+    const invitation = validationResult.invitation;
 
     if (invitation.email !== email) {
       throw new UnauthorizedException('Email does not match invitation');

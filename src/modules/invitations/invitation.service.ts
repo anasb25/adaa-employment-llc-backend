@@ -67,7 +67,28 @@ export class InvitationService {
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
-    // Create invitation
+    // First, get the inviter data for the email
+    const inviter = await this.userRepository.findOne({
+      where: { id: inviterId },
+    });
+
+    if (!inviter) {
+      throw new BadRequestException('Inviter not found');
+    }
+
+    // Create invitation object for email (not saved to DB yet)
+    const invitationForEmail = {
+      email,
+      token,
+      expiresAt,
+      inviter,
+      role,
+    };
+
+    // Send invitation email FIRST
+    await this.sendInvitationEmail(invitationForEmail);
+
+    // Only save to database AFTER email is sent successfully
     const invitation = this.invitationRepository.create({
       email,
       roleId,
@@ -78,9 +99,6 @@ export class InvitationService {
     });
 
     const savedInvitation = await this.invitationRepository.save(invitation);
-
-    // Send invitation email
-    await this.sendInvitationEmail(savedInvitation);
 
     return savedInvitation;
   }
@@ -206,10 +224,16 @@ export class InvitationService {
     return crypto.randomBytes(32).toString('hex');
   }
 
-  private async sendInvitationEmail(invitation: Invitation): Promise<void> {
+  private async sendInvitationEmail(invitation: {
+    email: string;
+    token: string;
+    expiresAt: Date;
+    inviter: User;
+    role: Role;
+  }): Promise<void> {
     const html = invitationEmailTemplate({
       inviter: invitation.inviter,
-      role: invitation.role?.name || 'Unknown',
+      role: invitation.role.name,
       expiresAt: invitation.expiresAt,
       token: invitation.token,
     });
@@ -221,23 +245,60 @@ export class InvitationService {
     });
   }
 
-  async validateInvitationToken(token: string): Promise<Invitation> {
+  async validateInvitationToken(token: string): Promise<{
+    invitation: Invitation | null;
+    isValid: boolean;
+    message?: string;
+  }> {
     const invitation = await this.invitationRepository.findOne({
       where: { token },
+      relations: ['inviter', 'role'],
     });
 
     if (!invitation) {
-      throw new NotFoundException('Invalid invitation token');
+      return {
+        invitation: null,
+        isValid: false,
+        message: 'Invalid invitation token',
+      };
     }
 
+    // Check if invitation is still valid
     if (invitation.status !== InvitationStatus.PENDING) {
-      throw new BadRequestException('Invitation has already been used');
+      return {
+        invitation,
+        isValid: false,
+        message: 'Invitation has already been used or expired',
+      };
     }
 
     if (new Date() > invitation.expiresAt) {
-      throw new BadRequestException('Invitation has expired');
+      // Mark as expired
+      invitation.status = InvitationStatus.EXPIRED;
+      await this.invitationRepository.save(invitation);
+      return {
+        invitation,
+        isValid: false,
+        message: 'Invitation has expired',
+      };
     }
 
-    return invitation;
+    // Check if user already exists
+    const existingUser = await this.userRepository.findOne({
+      where: { email: invitation.email },
+    });
+
+    if (existingUser) {
+      return {
+        invitation,
+        isValid: false,
+        message: 'User with this email already exists',
+      };
+    }
+
+    return {
+      invitation,
+      isValid: true,
+    };
   }
 }

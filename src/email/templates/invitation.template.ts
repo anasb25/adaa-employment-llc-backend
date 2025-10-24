@@ -6,7 +6,7 @@ export const invitationEmailTemplate = (invitation: {
   expiresAt: Date;
   token: string;
 }) => {
-  const invitationUrl = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/accept-invitation?token=${invitation.token}`;
+  const invitationUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/accept-invitation?token=${invitation.token}`;
 
   const content = `
     <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #111827; background-color: #ffffff; padding: 24px 32px; border-radius: 8px;">
