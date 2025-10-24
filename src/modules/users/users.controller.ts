@@ -6,10 +6,15 @@ import {
   Param,
   Delete,
   Put,
+  Query,
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { User } from './entities/user.entity';
 import { CurrentUser, Roles, Permissions } from '../../common/decorators';
+import {
+  PaginationUtil,
+  PaginatedResponse,
+} from '../../common/utils/pagination.util';
 
 @Controller('users')
 export class UsersController {
@@ -22,8 +27,15 @@ export class UsersController {
 
   @Roles('admin')
   @Get()
-  findAll() {
-    return this.usersService.findAll();
+  async findAll(
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ): Promise<PaginatedResponse<User>> {
+    const paginationOptions = PaginationUtil.validatePaginationParams(
+      page,
+      limit,
+    );
+    return await this.usersService.findAllPaginated(paginationOptions);
   }
 
   @Roles('admin', 'manager')
@@ -40,10 +52,28 @@ export class UsersController {
   }
 
   @Roles('admin')
+  @Get('actions/search')
+  async searchUsers(
+    @Query('q') query: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ): Promise<PaginatedResponse<User>> {
+    const paginationOptions = PaginationUtil.validatePaginationParams(
+      page,
+      limit,
+    );
+
+    return await this.usersService.searchUsers(query, paginationOptions);
+  }
+
+  @Roles('admin')
   @Permissions('user:update')
-  @Put(':id')
-  update(@Param('id') id: string, @Body() updateUserDto: any) {
-    return this.usersService.update(+id, updateUserDto);
+  @Put(':id/status')
+  async updateUserStatus(
+    @Param('id') id: string,
+    @Body() body: { isActive: boolean },
+  ) {
+    return await this.usersService.updateUserStatus(+id, body.isActive);
   }
 
   @Roles('admin')

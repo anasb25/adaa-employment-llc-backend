@@ -1,8 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, ILike } from 'typeorm';
 import { User } from './entities/user.entity';
 import { Role } from '../roles/entities/role.entity';
+import {
+  PaginationUtil,
+  PaginationOptions,
+  PaginatedResponse,
+} from '../../common/utils/pagination.util';
 
 @Injectable()
 export class UsersService {
@@ -13,10 +18,48 @@ export class UsersService {
     private readonly roleRepository: Repository<Role>,
   ) {}
 
-  async findAll(): Promise<User[]> {
-    return await this.userRepository.find({
+  async findAllPaginated(
+    options: PaginationOptions,
+  ): Promise<PaginatedResponse<User>> {
+    return await PaginationUtil.paginate(this.userRepository, options, {
       relations: ['role', 'role.permissions'],
+      order: { createdAt: 'DESC' },
     });
+  }
+
+  async searchUsers(
+    query: string,
+    options: PaginationOptions,
+  ): Promise<PaginatedResponse<User>> {
+    const searchTerm = `%${query}%`;
+
+    return await PaginationUtil.paginate(this.userRepository, options, {
+      relations: ['role', 'role.permissions'],
+      where: [
+        { firstName: ILike(searchTerm) },
+        { lastName: ILike(searchTerm) },
+        { email: ILike(searchTerm) },
+      ],
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  async updateUserStatus(
+    id: number,
+    isActive: boolean,
+  ): Promise<{ message: string; user: User }> {
+    const user = await this.findOne(id);
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    user.isActive = isActive;
+    const updatedUser = await this.userRepository.save(user);
+
+    return {
+      message: `User ${isActive ? 'activated' : 'deactivated'} successfully`,
+      user: updatedUser,
+    };
   }
 
   async findOne(id: number): Promise<User | null> {
