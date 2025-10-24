@@ -25,4 +25,7 @@ export class User extends BaseEntity {
 
   @Column({ default: true })
   isActive: boolean;
+
+  @Column({ type: 'timestamp', nullable: true })
+  lastActivity: Date;
 }

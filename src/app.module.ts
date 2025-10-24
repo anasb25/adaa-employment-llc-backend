@@ -1,5 +1,5 @@
 import { Module } from '@nestjs/common';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AppController } from './app.controller';
@@ -15,6 +15,7 @@ import authConfig from './config/auth.config';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/authorization.guard';
 import { PermissionsGuard } from './common/guards/authorization.guard';
+import { ActivityTrackingInterceptor } from './common/interceptors/activity-tracking.interceptor';
 import { EmailService } from './email/email.service';
 import mailConfig from './config/mail.config';
 
@@ -66,6 +67,10 @@ import mailConfig from './config/mail.config';
     {
       provide: APP_GUARD,
       useClass: PermissionsGuard,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: ActivityTrackingInterceptor,
     },
   ],
   exports: [EmailService],
