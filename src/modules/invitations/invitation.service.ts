@@ -231,11 +231,15 @@ export class InvitationService {
     inviter: User;
     role: Role;
   }): Promise<void> {
+    const baseUrl =
+      this.configService.get('app.frontendUrl') || 'http://localhost:5173';
+    const invitationUrl = `${baseUrl}/accept-invitation?token=${invitation.token}`;
+
     const html = invitationEmailTemplate({
       inviter: invitation.inviter,
       role: invitation.role.name,
       expiresAt: invitation.expiresAt,
-      token: invitation.token,
+      invitationUrl,
     });
 
     await this.emailService.sendMail({

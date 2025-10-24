@@ -4,10 +4,8 @@ export const invitationEmailTemplate = (invitation: {
   inviter: { firstName: string; lastName: string };
   role: string;
   expiresAt: Date;
-  token: string;
+  invitationUrl: string;
 }) => {
-  const invitationUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/accept-invitation?token=${invitation.token}`;
-
   const content = `
     <div style="font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #111827; background-color: #ffffff; padding: 24px 32px; border-radius: 8px;">
   
@@ -47,7 +45,7 @@ export const invitationEmailTemplate = (invitation: {
 
   <!-- Call to Action -->
   <div style="text-align: center; margin-bottom: 8px;">
-    <a href="${invitationUrl}"
+    <a href="${invitation.invitationUrl}"
        style="background-color: #161950; color: #ffffff; padding: 14px 36px; text-decoration: none; border-radius: 6px; display: inline-block; font-weight: 600; font-size: 16px; letter-spacing: 0.3px;">
       Accept Invitation
     </a>
