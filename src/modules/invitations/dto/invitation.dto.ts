@@ -1,7 +1,7 @@
 import {
   IsEmail,
   IsString,
-  IsArray,
+  IsNumber,
   IsOptional,
   IsEnum,
 } from 'class-validator';
@@ -11,13 +11,8 @@ export class CreateInvitationDto {
   @IsEmail()
   email: string;
 
-  @IsString()
-  role: string;
-
-  @IsArray()
-  @IsString({ each: true })
-  @IsOptional()
-  permissions?: string[];
+  @IsNumber()
+  roleId: number;
 }
 
 export class AcceptInvitationDto {
@@ -40,8 +35,11 @@ export class AcceptInvitationDto {
 export class InvitationResponseDto {
   id: string;
   email: string;
-  role: string;
-  permissions: string[];
+  role: {
+    id: number;
+    name: string;
+    description: string;
+  };
   status: InvitationStatus;
   expiresAt: Date;
   inviter: {

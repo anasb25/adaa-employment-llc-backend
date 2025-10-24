@@ -1,5 +1,6 @@
-import { Entity, Column } from 'typeorm';
+import { Entity, Column, ManyToOne, JoinColumn } from 'typeorm';
 import { BaseEntity } from '../../../common/entities/base.entity';
+import { Role } from '../../roles/entities/role.entity';
 
 @Entity('users')
 export class User extends BaseEntity {
@@ -15,11 +16,12 @@ export class User extends BaseEntity {
   @Column({ nullable: true, select: false })
   password: string;
 
-  @Column({ default: 'user' })
-  role: string;
+  @Column({ nullable: true })
+  roleId: number;
 
-  @Column('simple-array', { nullable: true })
-  permissions: string[];
+  @ManyToOne(() => Role, { eager: true })
+  @JoinColumn({ name: 'roleId' })
+  role: Role;
 
   @Column({ default: true })
   isActive: boolean;

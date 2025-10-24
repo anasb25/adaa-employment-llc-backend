@@ -1,13 +1,7 @@
-import { User } from 'src/modules/users/entities/user.entity';
-import {
-  Entity,
-  Column,
-  ManyToOne,
-  JoinColumn,
-  CreateDateColumn,
-  UpdateDateColumn,
-} from 'typeorm';
-import { BaseEntity } from 'src/common/entities';
+import { User } from '../../users/entities/user.entity';
+import { Role } from '../../roles/entities/role.entity';
+import { Entity, Column, ManyToOne, JoinColumn } from 'typeorm';
+import { BaseEntity } from '../../../common/entities';
 
 export enum InvitationStatus {
   PENDING = 'pending',
@@ -34,11 +28,12 @@ export class Invitation extends BaseEntity {
   @Column({ type: 'timestamp' })
   expiresAt: Date;
 
-  @Column({ type: 'json', nullable: true })
-  permissions: string[];
+  @Column({ nullable: true })
+  roleId: number;
 
-  @Column()
-  role: string;
+  @ManyToOne(() => Role, { eager: true })
+  @JoinColumn({ name: 'roleId' })
+  role: Role;
 
   @ManyToOne(() => User, { eager: true })
   @JoinColumn({ name: 'inviterId' })

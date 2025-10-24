@@ -82,8 +82,6 @@ export class AuthService {
       password: hashedPassword,
       firstName,
       lastName,
-      role: invitation.role,
-      permissions: invitation.permissions,
       isActive: true,
     });
 
@@ -123,6 +121,7 @@ export class AuthService {
 
       const user = await this.userRepository.findOne({
         where: { id: payload.sub },
+        relations: ['role', 'role.permissions'],
       });
       if (!user || !user.isActive) {
         throw new UnauthorizedException('Invalid refresh token');
@@ -197,7 +196,8 @@ export class AuthService {
   async getUserWithPassword(email: string): Promise<User | null> {
     return this.userRepository.findOne({
       where: { email: ILike(email) },
-      select: ['id', 'email', 'password', 'isActive', 'role', 'permissions'],
+      select: ['id', 'email', 'password', 'isActive'],
+      relations: ['role', 'role.permissions'],
     });
   }
 
@@ -216,12 +216,16 @@ export class AuthService {
   }
 
   async validateUserById(id: number): Promise<User | null> {
-    return this.userRepository.findOne({ where: { id, isActive: true } });
+    return this.userRepository.findOne({
+      where: { id, isActive: true },
+      relations: ['role', 'role.permissions'],
+    });
   }
 
   async getCurrentUser(id: number): Promise<Omit<User, 'password'>> {
     const user = await this.userRepository.findOne({
       where: { id, isActive: true },
+      relations: ['role', 'role.permissions'],
     });
 
     if (!user) {
@@ -246,11 +250,16 @@ export class AuthService {
   private async generateTokens(
     user: User,
   ): Promise<{ accessToken: string; refreshToken: string }> {
+    // Extract role and permissions from user's role
+    const role = user.role?.name || '';
+    const permissions =
+      user.role?.permissions?.map((permission) => permission.name) || [];
+
     const payload = {
       sub: user.id,
       email: user.email,
-      role: user.role,
-      permissions: user.permissions || [],
+      role,
+      permissions,
     };
 
     const accessToken = this.jwtService.sign(payload, {

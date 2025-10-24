@@ -29,7 +29,7 @@ export class RolesGuard implements CanActivate {
       throw new ForbiddenException('User not authenticated');
     }
 
-    const hasRole = requiredRoles.some((role) => user.role === role);
+    const hasRole = requiredRoles.some((role) => user.role?.name === role);
 
     if (!hasRole) {
       throw new ForbiddenException(
@@ -61,10 +61,34 @@ export class PermissionsGuard implements CanActivate {
       throw new ForbiddenException('User not authenticated');
     }
 
-    const userPermissions = user.permissions || [];
-    const hasPermission = requiredPermissions.some((permission) =>
-      userPermissions.includes(permission),
-    );
+    const userPermissions = user.role?.permissions?.map((p) => p.name) || [];
+
+    // Check for wildcard permissions and specific permissions
+    const hasPermission = requiredPermissions.some((requiredPermission) => {
+      // Check for exact match
+      if (userPermissions.includes(requiredPermission)) {
+        return true;
+      }
+
+      // Check for wildcard permissions
+      const permissionParts = requiredPermission.split(':');
+      if (permissionParts.length >= 2) {
+        const resource = permissionParts[0];
+        const action = permissionParts[1];
+
+        // Check for resource:all permission
+        if (userPermissions.includes(`${resource}:all`)) {
+          return true;
+        }
+
+        // Check for global:all permission
+        if (userPermissions.includes('global:all')) {
+          return true;
+        }
+      }
+
+      return false;
+    });
 
     if (!hasPermission) {
       throw new ForbiddenException(

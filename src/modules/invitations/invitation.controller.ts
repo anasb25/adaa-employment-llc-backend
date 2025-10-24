@@ -23,7 +23,7 @@ export class InvitationController {
 
   @Post()
   @Roles('admin', 'manager')
-  @Permissions('invite_users')
+  @Permissions('user:create')
   async createInvitation(
     @Body() createInvitationDto: CreateInvitationDto,
     @Request() req: any,
@@ -51,7 +51,7 @@ export class InvitationController {
 
   @Patch(':id/cancel')
   @Roles('admin', 'manager')
-  @Permissions('invite_users')
+  @Permissions('user:create')
   async cancelInvitation(
     @Param('id') invitationId: string,
     @Request() req: any,
@@ -62,7 +62,7 @@ export class InvitationController {
 
   @Post(':id/resend')
   @Roles('admin', 'manager')
-  @Permissions('invite_users')
+  @Permissions('user:create')
   async resendInvitation(
     @Param('id') invitationId: string,
     @Request() req: any,

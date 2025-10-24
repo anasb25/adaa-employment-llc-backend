@@ -8,6 +8,7 @@ import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Invitation, InvitationStatus } from './entities/invitation.entity';
 import { User } from '../users/entities/user.entity';
+import { Role } from '../roles/entities/role.entity';
 import { CreateInvitationDto, AcceptInvitationDto } from './dto/invitation.dto';
 import { EmailService } from '../../email/email.service';
 import { invitationEmailTemplate } from '../../email/templates/invitation.template';
@@ -20,6 +21,8 @@ export class InvitationService {
     private invitationRepository: Repository<Invitation>,
     @InjectRepository(User)
     private userRepository: Repository<User>,
+    @InjectRepository(Role)
+    private roleRepository: Repository<Role>,
     private configService: ConfigService,
     private emailService: EmailService,
   ) {}
@@ -28,7 +31,7 @@ export class InvitationService {
     createInvitationDto: CreateInvitationDto,
     inviterId: number,
   ): Promise<Invitation> {
-    const { email, role, permissions = [] } = createInvitationDto;
+    const { email, roleId } = createInvitationDto;
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
@@ -48,6 +51,15 @@ export class InvitationService {
       throw new BadRequestException('Invitation already sent to this email');
     }
 
+    // Verify role exists
+    const role = await this.roleRepository.findOne({
+      where: { id: roleId },
+    });
+
+    if (!role) {
+      throw new BadRequestException('Invalid role specified');
+    }
+
     // Generate invitation token
     const token = this.generateInvitationToken();
 
@@ -58,8 +70,7 @@ export class InvitationService {
     // Create invitation
     const invitation = this.invitationRepository.create({
       email,
-      role,
-      permissions,
+      roleId,
       token,
       expiresAt,
       inviterId,
@@ -82,7 +93,7 @@ export class InvitationService {
     // Find invitation by token
     const invitation = await this.invitationRepository.findOne({
       where: { token },
-      relations: ['inviter'],
+      relations: ['inviter', 'role'],
     });
 
     if (!invitation) {
@@ -118,8 +129,7 @@ export class InvitationService {
       firstName,
       lastName,
       password, // Password will be hashed by the user entity
-      role: invitation.role,
-      permissions: invitation.permissions,
+      roleId: invitation.roleId,
       isActive: true,
     });
 
@@ -199,7 +209,7 @@ export class InvitationService {
   private async sendInvitationEmail(invitation: Invitation): Promise<void> {
     const html = invitationEmailTemplate({
       inviter: invitation.inviter,
-      role: invitation.role,
+      role: invitation.role?.name || 'Unknown',
       expiresAt: invitation.expiresAt,
       token: invitation.token,
     });

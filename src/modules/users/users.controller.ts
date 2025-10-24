@@ -52,4 +52,17 @@ export class UsersController {
   remove(@Param('id') id: string) {
     return this.usersService.remove(Number(id));
   }
+
+  @Roles('admin')
+  @Permissions('user:assign-roles')
+  @Post(':id/role')
+  assignRole(@Param('id') id: string, @Body() body: { roleId: number }) {
+    return this.usersService.assignRole(+id, body.roleId);
+  }
+
+  @Roles('admin', 'manager')
+  @Get(':id/permissions')
+  getUserPermissions(@Param('id') id: string) {
+    return this.usersService.getUserPermissions(+id);
+  }
 }

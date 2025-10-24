@@ -2,19 +2,21 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { AppController } from './app.controller.js';
-import { AppService } from './app.service.js';
-import { UsersModule } from './modules/users/users.module.js';
-import { AuthModule } from './modules/auth/auth.module.js';
-import { InvitationModule } from './modules/invitations/invitation.module.js';
-import appConfig from './config/app.config.js';
-import databaseConfig from './config/database.config.js';
-import authConfig from './config/auth.config.js';
-import { JwtAuthGuard } from './common/guards/jwt-auth.guard.js';
-import { RolesGuard } from './common/guards/authorization.guard.js';
-import { PermissionsGuard } from './common/guards/authorization.guard.js';
-import { EmailService } from './email/email.service.js';
-import mailConfig from './config/mail.config.js';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+import { UsersModule } from './modules/users/users.module';
+import { AuthModule } from './modules/auth/auth.module';
+import { InvitationModule } from './modules/invitations/invitation.module';
+import { RolesModule } from './modules/roles/roles.module';
+import { PermissionsModule } from './modules/permissions/permissions.module';
+import appConfig from './config/app.config';
+import databaseConfig from './config/database.config';
+import authConfig from './config/auth.config';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { RolesGuard } from './common/guards/authorization.guard';
+import { PermissionsGuard } from './common/guards/authorization.guard';
+import { EmailService } from './email/email.service';
+import mailConfig from './config/mail.config';
 
 @Module({
   imports: [
@@ -46,6 +48,8 @@ import mailConfig from './config/mail.config.js';
     UsersModule,
     AuthModule,
     InvitationModule,
+    RolesModule,
+    PermissionsModule,
   ],
   controllers: [AppController],
   providers: [
