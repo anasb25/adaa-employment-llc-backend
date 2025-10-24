@@ -8,6 +8,8 @@ import {
   PaginationOptions,
   PaginatedResponse,
 } from '../../common/utils/pagination.util';
+import * as bcrypt from 'bcrypt';
+import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class UsersService {
@@ -16,6 +18,7 @@ export class UsersService {
     private readonly userRepository: Repository<User>,
     @InjectRepository(Role)
     private readonly roleRepository: Repository<Role>,
+    private readonly configService: ConfigService,
   ) {}
 
   async findAllPaginated(
@@ -77,8 +80,18 @@ export class UsersService {
   }
 
   async create(userData: Partial<User>): Promise<User> {
+    // Hash password if provided
+    if (userData.password) {
+      userData.password = await this.hashPassword(userData.password);
+    }
+
     const user = this.userRepository.create(userData);
     return await this.userRepository.save(user);
+  }
+
+  private async hashPassword(password: string): Promise<string> {
+    const rounds = this.configService.get<number>('auth.bcryptRounds') || 12;
+    return await bcrypt.hash(password, rounds);
   }
 
   async update(id: number, userData: Partial<User>): Promise<User> {

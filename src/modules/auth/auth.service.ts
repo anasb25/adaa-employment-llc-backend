@@ -241,13 +241,19 @@ export class AuthService {
 
   async validateUser(email: string, password: string): Promise<User | null> {
     const user = await this.getUserWithPassword(email);
-    if (!user || !user.isActive) {
+    if (!user) {
       return null;
     }
 
     const isPasswordValid = await this.comparePassword(password, user.password);
     if (!isPasswordValid) {
       return null;
+    }
+
+    if (!user.isActive) {
+      throw new UnauthorizedException(
+        'Your account has been deactivated. Please contact an administrator.',
+      );
     }
 
     return user;

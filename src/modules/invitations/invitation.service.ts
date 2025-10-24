@@ -13,6 +13,7 @@ import { CreateInvitationDto, AcceptInvitationDto } from './dto/invitation.dto';
 import { EmailService } from '../../email/email.service';
 import { invitationEmailTemplate } from '../../email/templates/invitation.template';
 import * as crypto from 'crypto';
+import * as bcrypt from 'bcrypt';
 
 @Injectable()
 export class InvitationService {
@@ -103,6 +104,11 @@ export class InvitationService {
     return savedInvitation;
   }
 
+  private async hashPassword(password: string): Promise<string> {
+    const rounds = this.configService.get<number>('auth.bcryptRounds') || 12;
+    return await bcrypt.hash(password, rounds);
+  }
+
   async acceptInvitation(
     acceptInvitationDto: AcceptInvitationDto,
   ): Promise<{ user: User; invitation: Invitation }> {
@@ -142,11 +148,12 @@ export class InvitationService {
     }
 
     // Create new user
+    const hashedPassword = await this.hashPassword(password);
     const user = this.userRepository.create({
       email: invitation.email,
       firstName,
       lastName,
-      password, // Password will be hashed by the user entity
+      password: hashedPassword,
       roleId: invitation.roleId,
       isActive: true,
     });
