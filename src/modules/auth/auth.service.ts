@@ -14,6 +14,7 @@ import {
   RegisterDto,
   ForgotPasswordDto,
   ResetPasswordDto,
+  ChangePasswordDto,
 } from './dto/auth.dto';
 import { InvitationService } from '../invitations/invitation.service';
 import { EmailService } from '../../email/email.service';
@@ -198,6 +199,36 @@ export class AuthService {
     return {
       message: 'Password has been reset successfully',
     };
+  }
+
+  async changePassword(
+    email: string,
+    changePasswordDto: ChangePasswordDto,
+  ): Promise<{ message: string }> {
+    const { currentPassword, newPassword } = changePasswordDto;
+
+    const user = await this.getUserWithPassword(email);
+
+    if (!user) {
+      throw new UnauthorizedException('User not found');
+    }
+
+    // Verify current password
+    const isCurrentPasswordValid = await this.comparePassword(
+      currentPassword,
+      user.password,
+    );
+
+    if (!isCurrentPasswordValid) {
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+
+    // Hash new password
+    const hashedNewPassword = await this.hashPassword(newPassword);
+    user.password = hashedNewPassword;
+    await this.userRepository.save(user);
+
+    return { message: 'Password changed successfully' };
   }
 
   async getUserWithPassword(email: string): Promise<User | null> {
