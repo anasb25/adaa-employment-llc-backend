@@ -9,6 +9,7 @@ import { AuthModule } from './modules/auth/auth.module';
 import { InvitationModule } from './modules/invitations/invitation.module';
 import { RolesModule } from './modules/roles/roles.module';
 import { PermissionsModule } from './modules/permissions/permissions.module';
+import { EmployeesModule } from './modules/employees/employees.module';
 import appConfig from './config/app.config';
 import databaseConfig from './config/database.config';
 import authConfig from './config/auth.config';
@@ -51,6 +52,7 @@ import mailConfig from './config/mail.config';
     InvitationModule,
     RolesModule,
     PermissionsModule,
+    EmployeesModule,
   ],
   controllers: [AppController],
   providers: [
