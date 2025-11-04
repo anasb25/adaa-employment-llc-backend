@@ -19,6 +19,7 @@ export class EmployeesService {
     options: PaginationOptions,
   ): Promise<PaginatedResponse<Employee>> {
     return await PaginationUtil.paginate(this.employeeRepository, options, {
+      relations: ['employeeSkills', 'employeeSkills.skill'],
       order: { createdAt: 'DESC' },
     });
   }
@@ -30,6 +31,7 @@ export class EmployeesService {
     const searchTerm = `%${query}%`;
 
     return await PaginationUtil.paginate(this.employeeRepository, options, {
+      relations: ['employeeSkills', 'employeeSkills.skill'],
       where: [
         { name: ILike(searchTerm) },
         { adaa_emp_code: ILike(searchTerm) },
@@ -45,6 +47,7 @@ export class EmployeesService {
   async findOne(id: number): Promise<Employee | null> {
     return await this.employeeRepository.findOne({
       where: { id },
+      relations: ['employeeSkills', 'employeeSkills.skill'],
     });
   }
 

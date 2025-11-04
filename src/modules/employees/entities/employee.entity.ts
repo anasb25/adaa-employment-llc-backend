@@ -1,5 +1,6 @@
-import { Entity, Column } from 'typeorm';
+import { Entity, Column, OneToMany } from 'typeorm';
 import { BaseEntity } from '../../../common/entities';
+import { EmployeeSkill } from '../../employee-skills/entities/employee-skill.entity';
 
 export enum EmployeeStatus {
   ACTIVE = 'active',
@@ -59,4 +60,7 @@ export class Employee extends BaseEntity {
 
   @Column({ type: 'date', nullable: true })
   date_of_arrival: Date;
+
+  @OneToMany(() => EmployeeSkill, (employeeSkill) => employeeSkill.employee)
+  employeeSkills: EmployeeSkill[];
 }
