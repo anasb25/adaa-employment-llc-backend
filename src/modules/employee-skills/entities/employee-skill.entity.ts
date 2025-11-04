@@ -23,4 +23,3 @@ export class EmployeeSkill extends BaseEntity {
   @Column({ type: 'int', default: 0 })
   rating: number;
 }
-

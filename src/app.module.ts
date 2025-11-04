@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { UsersModule } from './modules/users/users.module';
@@ -20,6 +21,7 @@ import { RolesGuard } from './common/guards/authorization.guard';
 import { PermissionsGuard } from './common/guards/authorization.guard';
 import { ActivityTrackingInterceptor } from './common/interceptors/activity-tracking.interceptor';
 import { EmailService } from './email/email.service';
+import { CronjobsService } from './shared/cronjobs.service';
 import mailConfig from './config/mail.config';
 
 @Module({
@@ -30,6 +32,9 @@ import mailConfig from './config/mail.config';
       load: [appConfig, databaseConfig, authConfig, mailConfig],
       envFilePath: ['.env.local', '.env'],
     }),
+
+    // Scheduler Module
+    ScheduleModule.forRoot(),
 
     // TypeORM Module
     TypeOrmModule.forRootAsync({
@@ -62,6 +67,7 @@ import mailConfig from './config/mail.config';
   providers: [
     AppService,
     EmailService,
+    CronjobsService,
     {
       provide: APP_GUARD,
       useClass: JwtAuthGuard,

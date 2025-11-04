@@ -60,10 +60,7 @@ export class SkillsController {
   @Roles('admin', 'manager')
   @Permissions('skill:create')
   @Post()
-  create(
-    @Body() createSkillDto: CreateSkillDto,
-    @CurrentUser() user: User,
-  ) {
+  create(@Body() createSkillDto: CreateSkillDto, @CurrentUser() user: User) {
     return this.skillsService.create({
       ...createSkillDto,
       createdBy: user.id,
@@ -107,4 +104,3 @@ export class SkillsController {
     return this.skillsService.remove(+id);
   }
 }
-
