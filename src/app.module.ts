@@ -13,6 +13,8 @@ import { PermissionsModule } from './modules/permissions/permissions.module';
 import { EmployeesModule } from './modules/employees/employees.module';
 import { SkillsModule } from './modules/skills/skills.module';
 import { EmployeeSkillsModule } from './modules/employee-skills/employee-skills.module';
+import { ClientsModule } from './modules/clients/clients.module';
+import { ProjectsModule } from './modules/projects/projects.module';
 import appConfig from './config/app.config';
 import databaseConfig from './config/database.config';
 import authConfig from './config/auth.config';
@@ -62,6 +64,8 @@ import mailConfig from './config/mail.config';
     EmployeesModule,
     SkillsModule,
     EmployeeSkillsModule,
+    ClientsModule,
+    ProjectsModule,
   ],
   controllers: [AppController],
   providers: [
