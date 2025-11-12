@@ -1,12 +1,11 @@
-import { IsString, IsNotEmpty } from 'class-validator';
+import { IsString, IsNotEmpty, IsInt } from 'class-validator';
 
 export class CreateSkillDto {
-  @IsString()
+  @IsInt()
   @IsNotEmpty()
-  type: string;
+  skillTypeId: number;
 
   @IsString()
   @IsNotEmpty()
   skill: string;
 }
-

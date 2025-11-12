@@ -72,8 +72,17 @@ export class UsersController {
   async updateUserStatus(
     @Param('id') id: string,
     @Body() body: { isActive: boolean },
+    @CurrentUser() currentUser: User,
   ) {
-    return await this.usersService.updateUserStatus(+id, body.isActive);
+    // Prevent users from deactivating themselves
+    if (+id === currentUser.id && !body.isActive) {
+      throw new Error('You cannot deactivate your own account');
+    }
+    return await this.usersService.updateUserStatus(
+      +id,
+      body.isActive,
+      currentUser.id,
+    );
   }
 
   @Roles('admin')

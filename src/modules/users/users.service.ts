@@ -50,10 +50,16 @@ export class UsersService {
   async updateUserStatus(
     id: number,
     isActive: boolean,
+    currentUserId?: number,
   ): Promise<{ message: string; user: User }> {
     const user = await this.findOne(id);
     if (!user) {
       throw new Error('User not found');
+    }
+
+    // Prevent users from deactivating themselves
+    if (currentUserId && id === currentUserId && !isActive) {
+      throw new Error('You cannot deactivate your own account');
     }
 
     user.isActive = isActive;
