@@ -1,17 +1,17 @@
 import { Entity, Column, ManyToOne, JoinColumn, Unique } from 'typeorm';
 import { BaseEntity } from '../../../common/entities';
-import { Employee } from '../../employees/entities/employee.entity';
+import { Project } from '../../projects/entities/project.entity';
 import { Skill } from '../../skills/entities/skill.entity';
 
-@Entity('employee_skills')
-@Unique(['employeeId', 'skillId'])
-export class EmployeeSkill extends BaseEntity {
+@Entity('project_skills')
+@Unique(['projectId', 'skillId'])
+export class ProjectSkill extends BaseEntity {
   @Column()
-  employeeId: number;
+  projectId: number;
 
-  @ManyToOne(() => Employee, { onDelete: 'CASCADE' })
-  @JoinColumn({ name: 'employeeId' })
-  employee: Employee;
+  @ManyToOne(() => Project, { onDelete: 'CASCADE' })
+  @JoinColumn({ name: 'projectId' })
+  project: Project;
 
   @Column()
   skillId: number;
@@ -20,9 +20,6 @@ export class EmployeeSkill extends BaseEntity {
   @JoinColumn({ name: 'skillId' })
   skill: Skill;
 
-  @Column({ type: 'int', default: 0 })
-  rating: number;
-
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
-  cost_price: number;
+  sale_price: number;
 }

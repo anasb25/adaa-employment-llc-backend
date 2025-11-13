@@ -13,9 +13,7 @@ import { CurrentUser, Roles, Permissions } from '../../common/decorators';
 
 @Controller('employees/:employeeId/skills')
 export class EmployeeSkillsController {
-  constructor(
-    private readonly employeeSkillsService: EmployeeSkillsService,
-  ) {}
+  constructor(private readonly employeeSkillsService: EmployeeSkillsService) {}
 
   @Roles('admin', 'manager')
   @Permissions('employee:read')
@@ -35,6 +33,7 @@ export class EmployeeSkillsController {
       +employeeId,
       assignSkillDto.skillId,
       assignSkillDto.rating,
+      assignSkillDto.cost_price,
     );
   }
 
@@ -67,4 +66,3 @@ export class EmployeeSkillsController {
     return { message: 'Skill removed from employee successfully' };
   }
 }
-

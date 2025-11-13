@@ -1,4 +1,4 @@
-import { IsNumber, IsInt, Min, Max } from 'class-validator';
+import { IsNumber, IsInt, Min, Max, IsOptional } from 'class-validator';
 
 export class AssignSkillDto {
   @IsNumber()
@@ -8,5 +8,8 @@ export class AssignSkillDto {
   @Min(0)
   @Max(10)
   rating: number;
-}
 
+  @IsOptional()
+  @IsNumber()
+  cost_price?: number;
+}

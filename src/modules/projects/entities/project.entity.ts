@@ -1,6 +1,7 @@
-import { Entity, Column, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, Column, ManyToOne, OneToMany, JoinColumn } from 'typeorm';
 import { BaseEntity } from '../../../common/entities';
 import { Client } from '../../clients/entities/client.entity';
+import { ProjectSkill } from '../../project-skills/entities/project-skill.entity';
 
 export enum ProjectStatus {
   PLANNED = 'planned',
@@ -34,6 +35,7 @@ export class Project extends BaseEntity {
 
   @Column()
   clientId: number;
+
+  @OneToMany(() => ProjectSkill, (projectSkill) => projectSkill.project)
+  projectSkills: ProjectSkill[];
 }
-
-

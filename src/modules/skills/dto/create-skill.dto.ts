@@ -1,4 +1,10 @@
-import { IsString, IsNotEmpty, IsInt } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsInt,
+  IsNumber,
+  IsOptional,
+} from 'class-validator';
 
 export class CreateSkillDto {
   @IsInt()
@@ -8,4 +14,12 @@ export class CreateSkillDto {
   @IsString()
   @IsNotEmpty()
   skill: string;
+
+  @IsOptional()
+  @IsNumber()
+  cost_price?: number;
+
+  @IsOptional()
+  @IsNumber()
+  sale_price?: number;
 }

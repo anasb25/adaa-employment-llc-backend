@@ -22,14 +22,24 @@ export class ProjectsService {
     options: PaginationOptions,
   ): Promise<PaginatedResponse<Project>> {
     return await PaginationUtil.paginate(this.projectRepository, options, {
-      relations: ['client'],
+      relations: [
+        'client',
+        'projectSkills',
+        'projectSkills.skill',
+        'projectSkills.skill.skillType',
+      ],
       order: { createdAt: 'DESC' },
     });
   }
 
   async findAll(): Promise<Project[]> {
     return await this.projectRepository.find({
-      relations: ['client'],
+      relations: [
+        'client',
+        'projectSkills',
+        'projectSkills.skill',
+        'projectSkills.skill.skillType',
+      ],
       order: { createdAt: 'DESC' },
     });
   }
@@ -40,7 +50,12 @@ export class ProjectsService {
   ): Promise<PaginatedResponse<Project>> {
     const searchTerm = `%${query}%`;
     return await PaginationUtil.paginate(this.projectRepository, options, {
-      relations: ['client'],
+      relations: [
+        'client',
+        'projectSkills',
+        'projectSkills.skill',
+        'projectSkills.skill.skillType',
+      ],
       where: [{ name: ILike(searchTerm) }, { location: ILike(searchTerm) }],
       order: { createdAt: 'DESC' },
     });
@@ -49,7 +64,12 @@ export class ProjectsService {
   async findOne(id: number): Promise<Project | null> {
     return await this.projectRepository.findOne({
       where: { id },
-      relations: ['client'],
+      relations: [
+        'client',
+        'projectSkills',
+        'projectSkills.skill',
+        'projectSkills.skill.skillType',
+      ],
     });
   }
 

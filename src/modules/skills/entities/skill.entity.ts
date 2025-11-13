@@ -15,6 +15,12 @@ export class Skill extends BaseEntity {
   @Column({ nullable: true })
   skillTypeId: number;
 
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  cost_price: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  sale_price: number;
+
   @OneToMany(() => EmployeeSkill, (employeeSkill) => employeeSkill.skill)
   employeeSkills: EmployeeSkill[];
 }
