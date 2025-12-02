@@ -1,5 +1,5 @@
 import { IsString, IsOptional, IsNotEmpty, IsInt, IsIn } from 'class-validator';
-import { ProjectStatus } from '../entities/project.entity';
+import { ProjectStatus, ProjectFAT } from '../entities/project.entity';
 
 export class CreateProjectDto {
   @IsString()
@@ -24,6 +24,11 @@ export class CreateProjectDto {
   @IsString()
   @IsOptional()
   notes?: string;
+
+  @IsString()
+  @IsOptional()
+  @IsIn([ProjectFAT.ADAA, ProjectFAT.CLIENT])
+  fat?: ProjectFAT;
 
   @IsInt()
   clientId: number;

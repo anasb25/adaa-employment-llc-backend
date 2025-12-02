@@ -11,6 +11,11 @@ export enum ProjectStatus {
   CANCELLED = 'cancelled',
 }
 
+export enum ProjectFAT {
+  ADAA = 'ADAA',
+  CLIENT = 'CLIENT',
+}
+
 @Entity('projects')
 export class Project extends BaseEntity {
   @Column()
@@ -28,6 +33,13 @@ export class Project extends BaseEntity {
 
   @Column({ type: 'text', nullable: true })
   notes: string;
+
+  @Column({
+    type: 'enum',
+    enum: ProjectFAT,
+    nullable: true,
+  })
+  fat: ProjectFAT;
 
   @ManyToOne(() => Client, (client) => client.projects, { eager: false })
   @JoinColumn({ name: 'clientId' })
