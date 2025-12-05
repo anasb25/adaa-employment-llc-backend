@@ -96,6 +96,27 @@ export class EmployeesController {
   }
 
   @Roles('admin', 'manager')
+  @Permissions('employee:read')
+  @Get('actions/with-timesheet-status')
+  async getEmployeesWithTimesheetStatus(
+    @Query('date') date: string,
+    @Query('status') status?: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ) {
+    const paginationOptions = PaginationUtil.validatePaginationParams(
+      page,
+      limit,
+    );
+
+    return await this.employeesService.getEmployeesWithTimesheetStatus(
+      date,
+      status,
+      paginationOptions,
+    );
+  }
+
+  @Roles('admin', 'manager')
   @Permissions('employee:update')
   @Put(':id')
   async update(

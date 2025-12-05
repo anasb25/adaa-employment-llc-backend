@@ -1,9 +1,20 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import { Injectable, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, ILike, In } from 'typeorm';
+import {
+  Repository,
+  ILike,
+  In,
+  Between,
+  LessThanOrEqual,
+  MoreThanOrEqual,
+} from 'typeorm';
 import { ProjectAllocation } from './entities/project-allocation.entity';
 import { Employee } from '../employees/entities/employee.entity';
 import { Project } from '../projects/entities/project.entity';
+import {
+  Timesheet,
+  AttendanceStatus,
+} from '../timesheets/entities/timesheet.entity';
 import { CreateAllocationDto } from './dto/create-allocation.dto';
 import { UpdateAllocationDto } from './dto/update-allocation.dto';
 import {
@@ -14,6 +25,8 @@ import {
 
 @Injectable()
 export class ProjectAllocationsService {
+  private readonly logger = new Logger(ProjectAllocationsService.name);
+
   constructor(
     @InjectRepository(ProjectAllocation)
     private readonly allocationRepository: Repository<ProjectAllocation>,
@@ -21,6 +34,8 @@ export class ProjectAllocationsService {
     private readonly employeeRepository: Repository<Employee>,
     @InjectRepository(Project)
     private readonly projectRepository: Repository<Project>,
+    @InjectRepository(Timesheet)
+    private readonly timesheetRepository: Repository<Timesheet>,
   ) {}
 
   async findAllPaginated(
@@ -184,6 +199,54 @@ export class ProjectAllocationsService {
     );
 
     const saved = await this.allocationRepository.save(entities);
+
+    // Update existing timesheets for these employees on the allocation date range
+    // If a timesheet exists for an employee on a date within the allocation period,
+    // and the timesheet doesn't have an allocation yet, assign this allocation to it
+    try {
+      for (const allocation of saved) {
+        // Get date range to update
+        const allocationStartDate = new Date(allocation.startDate);
+        const allocationEndDate = allocation.endDate
+          ? new Date(allocation.endDate)
+          : new Date('2099-12-31'); // Far future if no end date
+
+        // Find timesheets for this employee in the date range that don't have an allocation
+        const timesheetsToUpdate = await this.timesheetRepository
+          .createQueryBuilder('timesheet')
+          .where('timesheet.employeeId = :employeeId', {
+            employeeId: allocation.employeeId,
+          })
+          .andWhere('timesheet.date >= :startDate', {
+            startDate: allocationStartDate,
+          })
+          .andWhere('timesheet.date <= :endDate', {
+            endDate: allocationEndDate,
+          })
+          .andWhere('timesheet.allocationId IS NULL')
+          .getMany();
+
+        // Update these timesheets with the allocation
+        for (const timesheet of timesheetsToUpdate) {
+          await this.timesheetRepository.update(timesheet.id, {
+            allocationId: allocation.id,
+            status: AttendanceStatus.ACTIVE,
+            hoursWorked: 10, // Change from idle 8h to active 10h
+          });
+        }
+
+        if (timesheetsToUpdate.length > 0) {
+          this.logger.log(
+            `Updated ${timesheetsToUpdate.length} timesheet(s) for employee ${allocation.employeeId} with allocation ${allocation.id}`,
+          );
+        }
+      }
+    } catch (error) {
+      // Log error but don't fail the allocation creation
+      this.logger.error(
+        `Failed to update timesheets after allocation: ${error.message}`,
+      );
+    }
 
     // Fetch with relations
     return await this.allocationRepository.find({
