@@ -1,14 +1,20 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import { Employee } from './entities/employee.entity';
 import { Timesheet } from '../timesheets/entities/timesheet.entity';
 import { ProjectAllocation } from '../project-allocations/entities/project-allocation.entity';
+import { Skill } from '../skills/entities/skill.entity';
+import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
 import {
   PaginationUtil,
   PaginationOptions,
   PaginatedResponse,
 } from '../../common/utils/pagination.util';
+import { ExcelValidatorUtil } from './utils/excel-validator.util';
+import { ImportResult } from './dto/import-employee.dto';
+import { validate } from 'class-validator';
+import { plainToClass } from 'class-transformer';
 
 @Injectable()
 export class EmployeesService {
@@ -19,6 +25,10 @@ export class EmployeesService {
     private readonly timesheetRepository: Repository<Timesheet>,
     @InjectRepository(ProjectAllocation)
     private readonly allocationRepository: Repository<ProjectAllocation>,
+    @InjectRepository(Skill)
+    private readonly skillRepository: Repository<Skill>,
+    @InjectRepository(EmployeeSkill)
+    private readonly employeeSkillRepository: Repository<EmployeeSkill>,
   ) {}
 
   async findAllPaginated(
@@ -71,7 +81,7 @@ export class EmployeesService {
 
   async create(employeeData: Partial<Employee>): Promise<Employee> {
     const employee = this.employeeRepository.create(employeeData);
-    return await this.employeeRepository.save(employee);
+    return this.employeeRepository.save(employee);
   }
 
   async update(id: number, employeeData: Partial<Employee>): Promise<Employee> {
@@ -152,5 +162,160 @@ export class EmployeesService {
       hasNext: false,
       hasPrev: false,
     };
+  }
+
+  /**
+   * Import employees from Excel file
+   * @param fileBuffer Excel file buffer
+   * @returns Import result with success/failure counts
+   */
+  async importEmployees(fileBuffer: Buffer): Promise<ImportResult> {
+    // Validate the Excel file structure
+    const validation = ExcelValidatorUtil.validateExcelFile(fileBuffer);
+
+    if (!validation.isValid) {
+      throw new BadRequestException(validation.errors.join(', '));
+    }
+
+    const result: ImportResult = {
+      success: 0,
+      failed: 0,
+      errors: [],
+      imported: [],
+    };
+
+    // Process each row
+    if (!validation.data) {
+      throw new BadRequestException('No data found in Excel file');
+    }
+
+    for (let i = 0; i < validation.data.length; i++) {
+      const row = validation.data[i];
+      const rowNumber = i + 2; // +2 because Excel is 1-indexed and has header row
+
+      try {
+        // Map Excel row to employee data
+        const mappedData = ExcelValidatorUtil.mapRowToEmployee(row);
+
+        // Extract trade and additional data
+        const { trade, _additionalData, ...employeeData } = mappedData;
+
+        // Validate required fields
+        if (!employeeData.adaa_emp_code || !employeeData.name) {
+          result.failed++;
+          result.errors.push({
+            row: rowNumber,
+            employee: employeeData.name || 'Unknown',
+            errors: ['ADAA EMP CODE and NAME are required fields'],
+          });
+          continue;
+        }
+
+        // Check if employee already exists
+        const existingEmployee = await this.employeeRepository.findOne({
+          where: { adaa_emp_code: employeeData.adaa_emp_code },
+        });
+
+        let employee: Employee;
+
+        if (existingEmployee) {
+          // Update existing employee
+          await this.employeeRepository.update(
+            existingEmployee.id,
+            employeeData,
+          );
+          const updatedEmployee = await this.employeeRepository.findOne({
+            where: { id: existingEmployee.id },
+          });
+          if (!updatedEmployee) {
+            throw new Error('Failed to retrieve updated employee');
+          }
+          employee = updatedEmployee;
+        } else {
+          // Create new employee
+          employee = await this.create(employeeData);
+        }
+
+        // Handle TRADE - link to skill or create new one
+        if (trade && employee) {
+          await this.handleEmployeeTrade(employee.id, trade);
+        }
+
+        result.success++;
+        result.imported.push({
+          ...employee,
+          updated: !!existingEmployee,
+        });
+      } catch (error) {
+        result.failed++;
+        result.errors.push({
+          row: rowNumber,
+          employee: row['NAME'] || 'Unknown',
+          errors: [error.message || 'Failed to import employee'],
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Handle employee trade - find existing skill or create new one and link
+   * @param employeeId Employee ID
+   * @param tradeName Trade/Skill name
+   */
+  private async handleEmployeeTrade(
+    employeeId: number,
+    tradeName: string,
+  ): Promise<void> {
+    // Find existing skill by name (case-insensitive)
+    let skill = await this.skillRepository.findOne({
+      where: { skill: ILike(tradeName) },
+    });
+
+    // If skill doesn't exist, create it
+    if (!skill) {
+      const newSkill = this.skillRepository.create({
+        skill: tradeName,
+        // skillTypeId is optional and will be undefined
+      });
+      skill = await this.skillRepository.save(newSkill);
+    }
+
+    // Check if employee already has this skill
+    const existingEmployeeSkill = await this.employeeSkillRepository.findOne({
+      where: { employeeId, skillId: skill.id },
+    });
+
+    // If not already linked, create the link
+    if (!existingEmployeeSkill) {
+      const employeeSkill = this.employeeSkillRepository.create({
+        employeeId,
+        skillId: skill.id,
+        rating: 0, // Default rating
+        // cost_price is optional and will be undefined
+      });
+      await this.employeeSkillRepository.save(employeeSkill);
+    }
+  }
+
+  /**
+   * Export all employees to Excel format
+   * @returns Excel buffer
+   */
+  async exportEmployees(): Promise<Buffer> {
+    const employees = await this.employeeRepository.find({
+      order: { adaa_emp_code: 'ASC' },
+    });
+
+    return ExcelValidatorUtil.generateExport(employees);
+  }
+
+  /**
+   * Generate Excel template for import
+   * @returns Excel buffer
+   */
+  generateImportTemplate(): Buffer {
+    return ExcelValidatorUtil.generateTemplate();
   }
 }

@@ -7,7 +7,13 @@ import {
   Delete,
   Put,
   Query,
+  UseInterceptors,
+  UploadedFile,
+  BadRequestException,
+  Res,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import { EmployeesService } from './employees.service';
 import { Employee } from './entities/employee.entity';
 import { CreateEmployeeDto } from './dto/create-employee.dto';
@@ -18,6 +24,7 @@ import {
   PaginationUtil,
   PaginatedResponse,
 } from '../../common/utils/pagination.util';
+import { ImportResult } from './dto/import-employee.dto';
 
 @Controller('employees')
 export class EmployeesController {
@@ -35,6 +42,66 @@ export class EmployeesController {
       limit,
     );
     return await this.employeesService.findAllPaginated(paginationOptions);
+  }
+
+  @Roles('admin', 'manager')
+  @Permissions('employee:read')
+  @Get('actions/export')
+  async exportEmployees(@Res() res: Response) {
+    const buffer = await this.employeesService.exportEmployees();
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=employees_export_${new Date().toISOString().split('T')[0]}.xlsx`,
+    );
+
+    res.send(buffer);
+  }
+
+  @Roles('admin', 'manager')
+  @Permissions('employee:read')
+  @Get('actions/import-template')
+  getImportTemplate(@Res() res: Response) {
+    const buffer = this.employeesService.generateImportTemplate();
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=employee_import_template.xlsx',
+    );
+
+    res.send(buffer);
+  }
+
+  @Roles('admin', 'manager')
+  @Permissions('employee:create')
+  @Post('actions/import')
+  @UseInterceptors(FileInterceptor('file'))
+  async importEmployees(
+    @UploadedFile() file: Express.Multer.File,
+  ): Promise<ImportResult> {
+    if (!file) {
+      throw new BadRequestException('No file uploaded');
+    }
+
+    if (
+      !file.mimetype.includes('spreadsheet') &&
+      !file.mimetype.includes('excel') &&
+      !file.originalname.endsWith('.xlsx')
+    ) {
+      throw new BadRequestException(
+        'Invalid file type. Please upload an Excel file (.xlsx)',
+      );
+    }
+
+    return await this.employeesService.importEmployees(file.buffer);
   }
 
   @Roles('admin', 'manager')

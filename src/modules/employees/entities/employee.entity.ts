@@ -18,7 +18,7 @@ export class Employee extends BaseEntity {
   @Column({ type: 'date', nullable: true })
   dob: Date;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, unique: true })
   pp_no: string;
 
   @Column({ type: 'date', nullable: true })
@@ -27,7 +27,7 @@ export class Employee extends BaseEntity {
   @Column({ nullable: true })
   nationality: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, unique: true })
   emirates_id: string;
 
   @Column({ type: 'date', nullable: true })
@@ -36,13 +36,13 @@ export class Employee extends BaseEntity {
   @Column({ type: 'date', nullable: true })
   visa_expiry: Date;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, unique: true })
   work_permit_no: string;
 
   @Column({ type: 'date', nullable: true })
   work_permit_expiry: Date;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, unique: true })
   personal_code: string;
 
   @Column({ nullable: true })
