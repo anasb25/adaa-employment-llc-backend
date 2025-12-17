@@ -23,8 +23,10 @@ export class CreateTimesheetDto {
   @IsDateString()
   date: string;
 
-  @IsEnum(AttendanceStatus)
-  status: AttendanceStatus;
+  // Status removed - use mobilization data instead
+  // @IsOptional()
+  // @IsEnum(AttendanceStatus)
+  // status?: AttendanceStatus;
 
   @IsOptional()
   @IsNumber()

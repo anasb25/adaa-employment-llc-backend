@@ -230,7 +230,6 @@ export class ProjectAllocationsService {
         for (const timesheet of timesheetsToUpdate) {
           await this.timesheetRepository.update(timesheet.id, {
             allocationId: allocation.id,
-            status: AttendanceStatus.ACTIVE,
             hoursWorked: 10, // Change from idle 8h to active 10h
           });
         }

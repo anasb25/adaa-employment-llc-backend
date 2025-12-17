@@ -8,9 +8,10 @@ import {
 import { AttendanceStatus } from '../entities/timesheet.entity';
 
 export class UpdateTimesheetDto {
-  @IsOptional()
-  @IsEnum(AttendanceStatus)
-  status?: AttendanceStatus;
+  // Status removed - use mobilization data instead
+  // @IsOptional()
+  // @IsEnum(AttendanceStatus)
+  // status?: AttendanceStatus;
 
   @IsOptional()
   @IsNumber()

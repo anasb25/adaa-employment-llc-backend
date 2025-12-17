@@ -80,13 +80,23 @@ export class EmployeesService {
   }
 
   async create(employeeData: Partial<Employee>): Promise<Employee> {
-    const employee = this.employeeRepository.create(employeeData);
-    return this.employeeRepository.save(employee);
+    try {
+      const employee = this.employeeRepository.create(employeeData);
+      return await this.employeeRepository.save(employee);
+    } catch (error) {
+      const userFriendlyError = this.translateDatabaseError(error);
+      throw new BadRequestException(userFriendlyError);
+    }
   }
 
   async update(id: number, employeeData: Partial<Employee>): Promise<Employee> {
-    await this.employeeRepository.update(id, employeeData);
-    return (await this.findOne(id)) as Employee;
+    try {
+      await this.employeeRepository.update(id, employeeData);
+      return (await this.findOne(id)) as Employee;
+    } catch (error) {
+      const userFriendlyError = this.translateDatabaseError(error);
+      throw new BadRequestException(userFriendlyError);
+    }
   }
 
   async remove(id: number): Promise<void> {
@@ -121,7 +131,7 @@ export class EmployeesService {
       .leftJoinAndSelect('allocation.project', 'project')
       .addSelect([
         'timesheet.id',
-        'timesheet.status',
+        // 'timesheet.status', // Status removed - use mobilization data instead
         'timesheet.hoursWorked',
         'timesheet.notes',
         'timesheet.date',
@@ -132,9 +142,10 @@ export class EmployeesService {
       .orderBy('employee.name', 'ASC');
 
     // Filter by status if provided
-    if (status) {
-      queryBuilder.andWhere('timesheet.status = :status', { status });
-    }
+    // Note: Status filtering disabled - use mobilization data instead
+    // if (status) {
+    //   queryBuilder.andWhere('timesheet.status = :status', { status });
+    // }
 
     // Apply pagination if provided
     if (options) {
@@ -162,6 +173,49 @@ export class EmployeesService {
       hasNext: false,
       hasPrev: false,
     };
+  }
+
+  /**
+   * Translate database errors to user-friendly messages
+   */
+  private translateDatabaseError(error: any): string {
+    const message = error.message || '';
+    const code = error.code || '';
+
+    // Handle duplicate key errors
+    if (code === '23505' || message.includes('duplicate key')) {
+      if (message.includes('UQ_a8de3ddfd53ca6daf6ba8dd6b93')) {
+        return 'Employee with this ADAA Employee Code already exists';
+      }
+      if (message.includes('adaa_emp_code')) {
+        return 'Employee with this ADAA Employee Code already exists';
+      }
+      if (message.includes('emirates_id')) {
+        return 'Employee with this Emirates ID already exists';
+      }
+      if (message.includes('pp_no') || message.includes('passport')) {
+        return 'Employee with this Passport Number already exists';
+      }
+      return 'This employee record already exists in the system';
+    }
+
+    // Handle foreign key constraint errors
+    if (code === '23503' || message.includes('foreign key')) {
+      return 'Referenced data not found. Please check related information.';
+    }
+
+    // Handle null constraint errors
+    if (code === '23502' || message.includes('null value')) {
+      return 'Required field is missing';
+    }
+
+    // Handle check constraint errors
+    if (code === '23514' || message.includes('check constraint')) {
+      return 'Invalid data format or value';
+    }
+
+    // Default to original message if not a known database error
+    return message || 'Failed to import employee';
   }
 
   /**
@@ -248,10 +302,11 @@ export class EmployeesService {
         });
       } catch (error) {
         result.failed++;
+        const userFriendlyError = this.translateDatabaseError(error);
         result.errors.push({
           row: rowNumber,
           employee: row['NAME'] || 'Unknown',
-          errors: [error.message || 'Failed to import employee'],
+          errors: [userFriendlyError],
         });
       }
     }

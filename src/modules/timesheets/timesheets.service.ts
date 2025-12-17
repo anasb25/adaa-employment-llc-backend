@@ -10,6 +10,7 @@ import {
 } from 'typeorm';
 import { Timesheet, AttendanceStatus } from './entities/timesheet.entity';
 import { ProjectAllocation } from '../project-allocations/entities/project-allocation.entity';
+import { Mobilization } from '../mobilizations/entities/mobilization.entity';
 import { Employee } from '../employees/entities/employee.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { Project } from '../projects/entities/project.entity';
@@ -42,6 +43,8 @@ export class TimesheetsService {
     private readonly timesheetRepository: Repository<Timesheet>,
     @InjectRepository(ProjectAllocation)
     private readonly allocationRepository: Repository<ProjectAllocation>,
+    @InjectRepository(Mobilization)
+    private readonly mobilizationRepository: Repository<Mobilization>,
     @InjectRepository(Employee)
     private readonly employeeRepository: Repository<Employee>,
     @InjectRepository(Skill)
@@ -258,13 +261,14 @@ export class TimesheetsService {
       totalHours += Number(ts.hoursWorked);
       uniqueDays.add(new Date(ts.date).toISOString().split('T')[0]);
 
-      if (ts.status === AttendanceStatus.ACTIVE) {
-        activeCount++;
-      } else if (ts.status === AttendanceStatus.ON_HOLD) {
-        onHoldCount++;
-      } else if (ts.status === AttendanceStatus.IDLE) {
-        idleCount++;
-      }
+      // Status removed from timesheets - use mobilization data instead
+      // if (ts.status === AttendanceStatus.ACTIVE) {
+      //   activeCount++;
+      // } else if (ts.status === AttendanceStatus.ON_HOLD) {
+      //   onHoldCount++;
+      // } else if (ts.status === AttendanceStatus.IDLE) {
+      //   idleCount++;
+      // }
     });
 
     return {
@@ -283,17 +287,10 @@ export class TimesheetsService {
     createDto: CreateTimesheetDto,
     createdBy: number,
   ): Promise<Timesheet> {
-    // For idle employees, must provide employeeId
-    if (createDto.status === AttendanceStatus.IDLE && !createDto.employeeId) {
+    // Must provide either employeeId or allocationId
+    if (!createDto.employeeId && !createDto.allocationId) {
       throw new BadRequestException(
-        'Employee ID is required for idle status timesheets',
-      );
-    }
-
-    // For active/on-hold employees, must provide allocationId
-    if (createDto.status !== AttendanceStatus.IDLE && !createDto.allocationId) {
-      throw new BadRequestException(
-        'Allocation ID is required for non-idle timesheets',
+        'Either employee ID or allocation ID is required',
       );
     }
 
@@ -319,13 +316,9 @@ export class TimesheetsService {
       }
     }
 
-    // Validate hours for active status
-    if (createDto.status === AttendanceStatus.ACTIVE) {
-      if (!createDto.hoursWorked || createDto.hoursWorked < 0) {
-        throw new BadRequestException(
-          'Hours worked must be provided for active status',
-        );
-      }
+    // Validate hours
+    if (createDto.hoursWorked < 0) {
+      throw new BadRequestException('Hours worked cannot be negative');
     }
 
     // Check if timesheet already exists
@@ -401,12 +394,8 @@ export class TimesheetsService {
 
     // Validate each entry
     for (const dto of bulkDto.timesheets) {
-      if (dto.status === AttendanceStatus.ACTIVE) {
-        if (!dto.hoursWorked || dto.hoursWorked < 0) {
-          throw new BadRequestException(
-            'Hours worked must be provided for active entries',
-          );
-        }
+      if (dto.hoursWorked < 0) {
+        throw new BadRequestException('Hours worked cannot be negative');
       }
     }
 
@@ -481,16 +470,10 @@ export class TimesheetsService {
       }
     }
 
-    // Validate hours for active status
-    const newStatus = updateDto.status || existing.status;
-    if (newStatus === AttendanceStatus.ACTIVE) {
-      const hours = updateDto.hoursWorked ?? existing.hoursWorked;
-
-      if (!hours || hours < 0) {
-        throw new BadRequestException(
-          'Hours worked must be provided for active status',
-        );
-      }
+    // Validate hours
+    const hours = updateDto.hoursWorked ?? existing.hoursWorked;
+    if (hours && hours < 0) {
+      throw new BadRequestException('Hours worked cannot be negative');
     }
 
     await this.timesheetRepository.update(id, {
@@ -516,8 +499,7 @@ export class TimesheetsService {
   /**
    * Generate daily timesheets for all employees
    * Creates timesheets for all employees for a given date
-   * If employee has an allocation, creates with that allocation
-   * Otherwise creates as IDLE
+   * Uses latest active mobilization data to populate fields
    */
   async generateDailyTimesheets(
     date: string,
@@ -531,29 +513,26 @@ export class TimesheetsService {
 
     const targetDate = new Date(date);
 
-    // Get all active allocations for this date with employee skills
-    const allocations = await this.allocationRepository
-      .createQueryBuilder('allocation')
-      .leftJoinAndSelect('allocation.employee', 'employee')
-      .leftJoinAndSelect('employee.employeeSkills', 'employeeSkills')
-      .leftJoinAndSelect('employeeSkills.skill', 'skill')
-      .where('allocation.startDate <= :date', { date })
-      .andWhere('(allocation.endDate IS NULL OR allocation.endDate >= :date)', {
-        date,
-      })
+    // Get all active mobilizations (latest for each employee)
+    const mobilizations = await this.mobilizationRepository
+      .createQueryBuilder('mobilization')
+      .leftJoinAndSelect('mobilization.employee', 'employee')
+      .leftJoinAndSelect('mobilization.project', 'project')
+      .leftJoinAndSelect('mobilization.mobilizedTrade', 'mobilizedTrade')
+      .where('mobilization.status = :status', { status: 'active' })
+      .andWhere('mobilization.actionDate <= :date', { date: targetDate })
+      .orderBy('mobilization.actionDate', 'DESC')
+      .addOrderBy('mobilization.createdAt', 'DESC')
       .getMany();
 
-    // Create a map of employeeId -> allocation for quick lookup
-    const allocationMap = new Map<number, ProjectAllocation>();
-    for (const allocation of allocations) {
-      // Ensure one employee is not on multiple projects (shouldn't happen, but safety check)
-      if (allocationMap.has(allocation.employeeId)) {
-        this.logger?.warn?.(
-          `Employee ${allocation.employeeId} has multiple allocations for date ${date}. Using first allocation.`,
-        );
+    // Create a map of employeeId -> latest mobilization for quick lookup
+    const mobilizationMap = new Map<number, Mobilization>();
+    for (const mobilization of mobilizations) {
+      // Only keep the latest (first) mobilization for each employee
+      if (mobilizationMap.has(mobilization.employeeId)) {
         continue;
       }
-      allocationMap.set(allocation.employeeId, allocation);
+      mobilizationMap.set(mobilization.employeeId, mobilization);
     }
 
     for (const employee of employees) {
@@ -570,36 +549,34 @@ export class TimesheetsService {
         continue;
       }
 
-      // Check if employee has an allocation for this date
-      const allocation = allocationMap.get(employee.id);
+      // Get employee's latest active mobilization
+      const mobilization = mobilizationMap.get(employee.id);
 
       let timesheetData: any;
 
-      if (allocation) {
-        // Employee is allocated to a project - create with allocation
-        // Set default trade in site to employee's first skill
-        const defaultSkillId =
-          allocation.employee?.employeeSkills?.[0]?.skillId || null;
-
+      if (
+        mobilization &&
+        mobilization.projectId &&
+        mobilization.mobStatus === 'mobilized'
+      ) {
+        // Employee is mobilized to a project
         timesheetData = {
           employeeId: employee.id,
-          allocationId: allocation.id,
+          allocationId: null, // No longer using allocations
           date: targetDate,
-          status: AttendanceStatus.ACTIVE,
-          hoursWorked: 10, // Default 10 hours for active
-          tradeInSiteId: defaultSkillId, // Default to employee's first skill
+          hoursWorked: 10, // Default 10 hours for mobilized
+          tradeInSiteId: mobilization.mobilizedTradeId, // From mobilization
           notes: null,
           createdBy,
         };
       } else {
-        // Employee not allocated - create as IDLE
+        // Employee is not mobilized or demobilized
         timesheetData = {
           employeeId: employee.id,
           allocationId: null,
           date: targetDate,
-          status: AttendanceStatus.IDLE,
-          hoursWorked: 8, // Default 8 hours for idle
-          tradeInSiteId: null,
+          hoursWorked: 8, // Default 8 hours for idle/demobilized
+          tradeInSiteId: mobilization?.mobilizedTradeId || null,
           notes: null,
           createdBy,
         };
@@ -650,19 +627,19 @@ export class TimesheetsService {
     // Helper to get project from timesheet
     const getProject = (ts: Timesheet) => ts.allocation?.project;
 
-    // Helper to map status
-    const mapStatus = (status: AttendanceStatus): string => {
-      switch (status) {
-        case AttendanceStatus.ACTIVE:
-          return 'ACTIVE';
-        case AttendanceStatus.ON_HOLD:
-          return 'HOLD';
-        case AttendanceStatus.IDLE:
-          return 'IDLE';
-        default:
-          return String(status).toUpperCase();
-      }
-    };
+    // Status removed from timesheets - analytics need to be redesigned with mobilization data
+    // const mapStatus = (status: AttendanceStatus): string => {
+    //   switch (status) {
+    //     case AttendanceStatus.ACTIVE:
+    //       return 'ACTIVE';
+    //     case AttendanceStatus.ON_HOLD:
+    //       return 'HOLD';
+    //     case AttendanceStatus.IDLE:
+    //       return 'IDLE';
+    //     default:
+    //       return String(status).toUpperCase();
+    //   }
+    // };
 
     // 1. Project Wise
     const projectWise = new Map<
@@ -683,23 +660,24 @@ export class TimesheetsService {
       }
     });
 
-    // 2. Status Wise
+    // 2. Status Wise (Disabled - status removed from timesheets)
     const statusWise = new Map<
       string,
       { headCount: Set<number>; totalHours: number }
     >();
-    timesheets.forEach((ts) => {
-      const employee = getEmployee(ts);
-      if (employee) {
-        const status = mapStatus(ts.status);
-        if (!statusWise.has(status)) {
-          statusWise.set(status, { headCount: new Set(), totalHours: 0 });
-        }
-        const data = statusWise.get(status)!;
-        data.headCount.add(employee.id);
-        data.totalHours += Number(ts.hoursWorked) || 0;
-      }
-    });
+    // Status-based analytics disabled - need to use mobilization data
+    // timesheets.forEach((ts) => {
+    //   const employee = getEmployee(ts);
+    //   if (employee) {
+    //     const status = mapStatus(ts.status);
+    //     if (!statusWise.has(status)) {
+    //       statusWise.set(status, { headCount: new Set(), totalHours: 0 });
+    //     }
+    //     const data = statusWise.get(status)!;
+    //     data.headCount.add(employee.id);
+    //     data.totalHours += Number(ts.hoursWorked) || 0;
+    //   }
+    // });
 
     // 3. FAT Status Wise
     const fatStatusWise = new Map<
@@ -720,29 +698,30 @@ export class TimesheetsService {
       }
     });
 
-    // 4. FAT sub-status Wise
+    // 4. FAT sub-status Wise (Disabled - status removed from timesheets)
     const fatSubStatusWise = new Map<
       string,
       Map<string, { headCount: Set<number>; totalHours: number }>
     >();
-    timesheets.forEach((ts) => {
-      const project = getProject(ts);
-      const employee = getEmployee(ts);
-      if (project?.fat && employee) {
-        const fat = project.fat;
-        const status = mapStatus(ts.status);
-        if (!fatSubStatusWise.has(fat)) {
-          fatSubStatusWise.set(fat, new Map());
-        }
-        const fatMap = fatSubStatusWise.get(fat)!;
-        if (!fatMap.has(status)) {
-          fatMap.set(status, { headCount: new Set(), totalHours: 0 });
-        }
-        const data = fatMap.get(status)!;
-        data.headCount.add(employee.id);
-        data.totalHours += Number(ts.hoursWorked) || 0;
-      }
-    });
+    // Status-based analytics disabled - need to use mobilization data
+    // timesheets.forEach((ts) => {
+    //   const project = getProject(ts);
+    //   const employee = getEmployee(ts);
+    //   if (project?.fat && employee) {
+    //     const fat = project.fat;
+    //     const status = mapStatus(ts.status);
+    //     if (!fatSubStatusWise.has(fat)) {
+    //       fatSubStatusWise.set(fat, new Map());
+    //     }
+    //     const fatMap = fatSubStatusWise.get(fat)!;
+    //     if (!fatMap.has(status)) {
+    //       fatMap.set(status, { headCount: new Set(), totalHours: 0 });
+    //     }
+    //     const data = fatMap.get(status)!;
+    //     data.headCount.add(employee.id);
+    //     data.totalHours += Number(ts.hoursWorked) || 0;
+    //   }
+    // });
 
     // 5. Project and Location Wise
     const projectLocationWise = new Map<

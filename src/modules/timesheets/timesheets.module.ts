@@ -5,6 +5,7 @@ import { TimesheetsService } from './timesheets.service';
 import { TimesheetsCronService } from './timesheets-cron.service';
 import { Timesheet } from './entities/timesheet.entity';
 import { ProjectAllocation } from '../project-allocations/entities/project-allocation.entity';
+import { Mobilization } from '../mobilizations/entities/mobilization.entity';
 import { Employee } from '../employees/entities/employee.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { Project } from '../projects/entities/project.entity';
@@ -14,6 +15,7 @@ import { Project } from '../projects/entities/project.entity';
     TypeOrmModule.forFeature([
       Timesheet,
       ProjectAllocation,
+      Mobilization,
       Employee,
       Skill,
       Project,
