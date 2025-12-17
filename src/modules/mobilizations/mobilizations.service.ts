@@ -5,25 +5,28 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, ILike } from 'typeorm';
 import {
   Mobilization,
   MobilizationStatus,
   MobStatus,
 } from './entities/mobilization.entity';
 import { Employee } from '../employees/entities/employee.entity';
-import { Project } from '../projects/entities/project.entity';
+import { Project, ProjectStatus } from '../projects/entities/project.entity';
 import { Skill } from '../skills/entities/skill.entity';
+import { Client } from '../clients/entities/client.entity';
 import {
   CreateMobilizationDto,
   BulkCreateMobilizationDto,
 } from './dto/create-mobilization.dto';
 import { UpdateMobilizationDto } from './dto/update-mobilization.dto';
 import { MobilizationFiltersDto } from './dto/mobilization-filters.dto';
+import { ImportMobilizationResult } from './dto/import-mobilization.dto';
 import {
   PaginationOptions,
   PaginationUtil,
 } from '../../common/utils/pagination.util';
+import { MobilizationExcelUtil } from './utils/mobilization-excel.util';
 
 @Injectable()
 export class MobilizationsService {
@@ -38,6 +41,8 @@ export class MobilizationsService {
     private projectRepository: Repository<Project>,
     @InjectRepository(Skill)
     private skillRepository: Repository<Skill>,
+    @InjectRepository(Client)
+    private clientRepository: Repository<Client>,
   ) {}
 
   /**
@@ -423,5 +428,237 @@ export class MobilizationsService {
         count,
       })),
     };
+  }
+
+  /**
+   * Import mobilizations from Excel file
+   * @param fileBuffer Excel file buffer
+   * @returns Import result
+   */
+  async importMobilizations(
+    fileBuffer: Buffer,
+    createdBy: number,
+  ): Promise<ImportMobilizationResult> {
+    // Validate the Excel file structure
+    const validation = MobilizationExcelUtil.validateExcelFile(fileBuffer);
+
+    if (!validation.isValid) {
+      throw new BadRequestException(validation.errors.join(', '));
+    }
+
+    const result: ImportMobilizationResult = {
+      success: 0,
+      failed: 0,
+      errors: [],
+      imported: [],
+    };
+
+    // Process each row
+    if (!validation.data) {
+      throw new BadRequestException('No data found in Excel file');
+    }
+
+    for (let i = 0; i < validation.data.length; i++) {
+      const row = validation.data[i];
+      const rowNumber = i + 2; // +2 because Excel is 1-indexed and has header row
+
+      try {
+        // Map Excel row to mobilization data
+        const mappedData = MobilizationExcelUtil.mapRowToMobilization(row);
+
+        // Validate required fields
+        if (
+          !mappedData.employeeIdNo ||
+          !mappedData.mobilizedTradeName ||
+          !mappedData.actionDate
+        ) {
+          result.failed++;
+          result.errors.push({
+            row: rowNumber,
+            employee: mappedData.employeeName || 'Unknown',
+            errors: ['ID NO, MOBILIZED TRADE, and DATE are required fields'],
+          });
+          continue;
+        }
+
+        // Find employee by adaa_emp_code
+        const employee = await this.employeeRepository.findOne({
+          where: { adaa_emp_code: mappedData.employeeIdNo },
+        });
+
+        if (!employee) {
+          result.failed++;
+          result.errors.push({
+            row: rowNumber,
+            employee: mappedData.employeeName || 'Unknown',
+            errors: [
+              `Employee with ID NO '${mappedData.employeeIdNo}' not found`,
+            ],
+          });
+          continue;
+        }
+
+        // Find or create mobilized trade (skill)
+        let mobilizedTrade = await this.skillRepository.findOne({
+          where: { skill: ILike(mappedData.mobilizedTradeName) },
+        });
+
+        if (!mobilizedTrade) {
+          // Create the skill if it doesn't exist
+          mobilizedTrade = this.skillRepository.create({
+            skill: mappedData.mobilizedTradeName,
+          });
+          mobilizedTrade = await this.skillRepository.save(mobilizedTrade);
+        }
+
+        // Find or create project if site name is provided
+        let project: Project | null = null;
+        if (mappedData.siteName) {
+          // Try to find project by name
+          project = await this.projectRepository.findOne({
+            where: { name: ILike(mappedData.siteName) },
+            relations: ['client'],
+          });
+
+          // If project not found and client name is provided, try to create it
+          if (!project && mappedData.clientName) {
+            // Find or create client
+            let client = await this.clientRepository.findOne({
+              where: { name: ILike(mappedData.clientName) },
+            });
+
+            if (!client) {
+              client = this.clientRepository.create({
+                name: mappedData.clientName,
+              });
+              client = await this.clientRepository.save(client);
+            }
+
+            // Create project
+            project = this.projectRepository.create({
+              name: mappedData.siteName,
+              clientId: client.id,
+              status: ProjectStatus.ONGOING,
+            });
+            project = await this.projectRepository.save(project);
+          }
+        }
+
+        // Check if mobilization already exists for this employee on this date
+        const existingMobilization = await this.mobilizationRepository.findOne({
+          where: {
+            employeeId: employee.id,
+            actionDate: new Date(mappedData.actionDate),
+          },
+        });
+
+        let mobilization: Mobilization;
+
+        if (existingMobilization) {
+          // Update existing mobilization
+          await this.mobilizationRepository.update(existingMobilization.id, {
+            mobilizedTradeId: mobilizedTrade.id,
+            projectId: project?.id || null,
+            status: mappedData.status as MobilizationStatus,
+            mobStatus: mappedData.mobStatus as MobStatus,
+            jobStatus: mappedData.jobStatus,
+            notes: mappedData.notes,
+            updatedBy: createdBy,
+          });
+
+          const updated = await this.mobilizationRepository.findOne({
+            where: { id: existingMobilization.id },
+            relations: ['employee', 'project', 'mobilizedTrade'],
+          });
+
+          if (!updated) {
+            throw new Error('Failed to retrieve updated mobilization');
+          }
+          mobilization = updated;
+        } else {
+          // Deactivate any existing active mobilization for this employee
+          await this.mobilizationRepository.update(
+            {
+              employeeId: employee.id,
+              status: MobilizationStatus.ACTIVE,
+            },
+            {
+              status: MobilizationStatus.INACTIVE,
+              updatedBy: createdBy,
+            },
+          );
+
+          // Create new mobilization
+          const newMobilization = this.mobilizationRepository.create({
+            employeeId: employee.id,
+            mobilizedTradeId: mobilizedTrade.id,
+            projectId: project?.id || null,
+            status: mappedData.status as MobilizationStatus,
+            mobStatus: mappedData.mobStatus as MobStatus,
+            jobStatus: mappedData.jobStatus,
+            actionDate: new Date(mappedData.actionDate),
+            notes: mappedData.notes,
+            createdBy,
+          });
+
+          mobilization =
+            await this.mobilizationRepository.save(newMobilization);
+
+          // Fetch with relations
+          const saved = await this.mobilizationRepository.findOne({
+            where: { id: mobilization.id },
+            relations: ['employee', 'project', 'mobilizedTrade'],
+          });
+
+          if (!saved) {
+            throw new Error('Failed to retrieve saved mobilization');
+          }
+          mobilization = saved;
+        }
+
+        result.success++;
+        result.imported.push({
+          ...mobilization,
+          updated: !!existingMobilization,
+        });
+      } catch (error) {
+        result.failed++;
+        result.errors.push({
+          row: rowNumber,
+          employee: row['NAME'] || 'Unknown',
+          errors: [error.message || 'Unknown error occurred'],
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Export all mobilizations to Excel format
+   * @returns Excel buffer
+   */
+  async exportMobilizations(): Promise<Buffer> {
+    const mobilizations = await this.mobilizationRepository.find({
+      relations: [
+        'employee',
+        'employee.employeeSkills',
+        'employee.employeeSkills.skill',
+        'project',
+        'project.client',
+        'mobilizedTrade',
+      ],
+      order: { actionDate: 'DESC' },
+    });
+
+    return MobilizationExcelUtil.generateExport(mobilizations);
+  }
+
+  /**
+   * Generate Excel template for import
+   * @returns Excel buffer
+   */
+  generateImportTemplate(): Buffer {
+    return MobilizationExcelUtil.generateTemplate();
   }
 }

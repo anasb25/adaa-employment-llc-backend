@@ -8,11 +8,21 @@ import {
   Delete,
   Query,
   UseGuards,
+  UseInterceptors,
+  UploadedFile,
+  BadRequestException,
+  Res,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import { MobilizationsService } from './mobilizations.service';
-import { CreateMobilizationDto, BulkCreateMobilizationDto } from './dto/create-mobilization.dto';
+import {
+  CreateMobilizationDto,
+  BulkCreateMobilizationDto,
+} from './dto/create-mobilization.dto';
 import { UpdateMobilizationDto } from './dto/update-mobilization.dto';
 import { MobilizationFiltersDto } from './dto/mobilization-filters.dto';
+import { ImportMobilizationResult } from './dto/import-mobilization.dto';
 import { CurrentUser, Roles, Permissions } from '../../common/decorators';
 import { User } from '../users/entities/user.entity';
 import { PaginationUtil } from '../../common/utils/pagination.util';
@@ -97,6 +107,70 @@ export class MobilizationsController {
   @Permissions('employee:delete')
   async remove(@Param('id') id: string, @CurrentUser() user: User) {
     return await this.mobilizationsService.remove(+id, user.id);
+  }
+
+  @Roles('admin', 'manager')
+  @Permissions('employee:read')
+  @Get('actions/export')
+  async exportMobilizations(@Res() res: Response) {
+    const buffer = await this.mobilizationsService.exportMobilizations();
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=mobilizations_export_${new Date().toISOString().split('T')[0]}.xlsx`,
+    );
+
+    res.send(buffer);
+  }
+
+  @Roles('admin', 'manager')
+  @Permissions('employee:read')
+  @Get('actions/import-template')
+  getImportTemplate(@Res() res: Response) {
+    const buffer = this.mobilizationsService.generateImportTemplate();
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=mobilization_import_template.xlsx',
+    );
+
+    res.send(buffer);
+  }
+
+  @Roles('admin', 'manager')
+  @Permissions('employee:create')
+  @Post('actions/import')
+  @UseInterceptors(FileInterceptor('file'))
+  async importMobilizations(
+    @UploadedFile() file: Express.Multer.File,
+    @CurrentUser() user: User,
+  ): Promise<ImportMobilizationResult> {
+    if (!file) {
+      throw new BadRequestException('No file uploaded');
+    }
+
+    if (
+      !file.mimetype.includes('spreadsheet') &&
+      !file.mimetype.includes('excel') &&
+      !file.originalname.endsWith('.xlsx')
+    ) {
+      throw new BadRequestException(
+        'Invalid file type. Please upload an Excel file (.xlsx)',
+      );
+    }
+
+    return await this.mobilizationsService.importMobilizations(
+      file.buffer,
+      user.id,
+    );
   }
 }
 
