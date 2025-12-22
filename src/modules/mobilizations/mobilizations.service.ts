@@ -550,16 +550,42 @@ export class MobilizationsService {
         const mappedData = MobilizationExcelUtil.mapRowToMobilization(row);
 
         // Validate required fields
-        if (
-          !mappedData.employeeIdNo ||
-          !mappedData.mobilizedTradeName ||
-          !mappedData.actionDate
-        ) {
+        const validationErrors: string[] = [];
+
+        if (!mappedData.employeeIdNo) {
+          validationErrors.push('ID NO is required');
+        }
+        if (!mappedData.actionDate) {
+          validationErrors.push('DATE is required');
+        }
+        if (!mappedData.mobStatus) {
+          validationErrors.push('MOB-DEM is required');
+        }
+        if (!mappedData.jobStatus) {
+          validationErrors.push('STATUS is required');
+        }
+
+        // Validate CLIENT and SITE when MOB-DEM is "Mobilized"
+        if (mappedData.mobStatus === 'mobilized') {
+          if (!mappedData.clientName) {
+            validationErrors.push(
+              'CLIENT is required when MOB-DEM is "Mobilized"',
+            );
+          }
+          if (!mappedData.siteName) {
+            validationErrors.push(
+              'SITE is required when MOB-DEM is "Mobilized"',
+            );
+          }
+        }
+
+        if (validationErrors.length > 0) {
           result.failed++;
           result.errors.push({
             row: rowNumber,
-            employee: mappedData.employeeName || 'Unknown',
-            errors: ['ID NO, MOBILIZED TRADE, and DATE are required fields'],
+            employee:
+              mappedData.employeeName || mappedData.employeeIdNo || 'Unknown',
+            errors: validationErrors,
           });
           continue;
         }
@@ -582,16 +608,45 @@ export class MobilizationsService {
         }
 
         // Find or create mobilized trade (skill)
-        let mobilizedTrade = await this.skillRepository.findOne({
-          where: { skill: ILike(mappedData.mobilizedTradeName) },
-        });
+        let mobilizedTrade: any = null;
 
-        if (!mobilizedTrade) {
-          // Create the skill if it doesn't exist
-          mobilizedTrade = this.skillRepository.create({
-            skill: mappedData.mobilizedTradeName,
+        // If mobilized trade is provided, use it
+        if (mappedData.mobilizedTradeName) {
+          mobilizedTrade = await this.skillRepository.findOne({
+            where: { skill: ILike(mappedData.mobilizedTradeName) },
           });
-          mobilizedTrade = await this.skillRepository.save(mobilizedTrade);
+
+          if (!mobilizedTrade) {
+            // Create the skill if it doesn't exist
+            mobilizedTrade = this.skillRepository.create({
+              skill: mappedData.mobilizedTradeName,
+            });
+            mobilizedTrade = await this.skillRepository.save(mobilizedTrade);
+          }
+        } else {
+          // If mobilized trade is not provided, use employee's first actual trade
+          const employeeWithSkills = await this.employeeRepository.findOne({
+            where: { id: employee.id },
+            relations: ['employeeSkills', 'employeeSkills.skill'],
+          });
+
+          if (
+            employeeWithSkills?.employeeSkills &&
+            employeeWithSkills.employeeSkills.length > 0
+          ) {
+            mobilizedTrade = employeeWithSkills.employeeSkills[0].skill;
+          } else {
+            result.failed++;
+            result.errors.push({
+              row: rowNumber,
+              employee:
+                mappedData.employeeName || mappedData.employeeIdNo || 'Unknown',
+              errors: [
+                'MOBILIZED TRADE is missing and employee has no skills defined',
+              ],
+            });
+            continue;
+          }
         }
 
         // Find or create project if site name is provided

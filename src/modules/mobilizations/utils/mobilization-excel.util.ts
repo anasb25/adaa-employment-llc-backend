@@ -6,19 +6,9 @@ export interface ExcelValidationResult {
   data?: any[];
 }
 
-export const REQUIRED_HEADERS = [
-  'ID NO',
-  'NAME',
-  'ACTUAL TRADE',
-  'PP NO',
-  'NATIONALITY',
-  'MOBILIZED TRADE',
-  'CLIENT',
-  'SITE',
-  'REASON',
-  'MOB-DEM',
-  'DATE',
-];
+export const REQUIRED_HEADERS = ['ID NO', 'STATUS', 'MOB-DEM', 'DATE'];
+
+export const CONDITIONALLY_REQUIRED_HEADERS = ['CLIENT', 'SITE'];
 
 export class MobilizationExcelUtil {
   /**
@@ -78,6 +68,7 @@ export class MobilizationExcelUtil {
       const firstRow = data[0] as any;
       const actualHeaders = Object.keys(firstRow);
 
+      // Check for required headers
       const missingHeaders = REQUIRED_HEADERS.filter(
         (header) => !actualHeaders.includes(header),
       );
@@ -87,6 +78,34 @@ export class MobilizationExcelUtil {
           `Missing required columns: ${missingHeaders.join(', ')}. Please ensure all required columns are present.`,
         );
         return { isValid: false, errors };
+      }
+
+      // Validate conditionally required headers (CLIENT and SITE) for mobilized records
+      // Only check if headers exist, not values (row-level validation happens during import)
+      // Check if there are any mobilized records in the file
+      const hasMobilizedRecords = data.some((row: any) => {
+        const mobDemValue =
+          row['MOB-DEM']?.toString().trim().toLowerCase() || '';
+        // Use exact match to avoid "demobilized" matching "mobilized"
+        return mobDemValue === 'mobilized';
+      });
+
+      // If there are mobilized records, CLIENT and SITE headers must exist
+      if (hasMobilizedRecords) {
+        const missingConditionalHeaders: string[] = [];
+        if (!actualHeaders.includes('CLIENT')) {
+          missingConditionalHeaders.push('CLIENT');
+        }
+        if (!actualHeaders.includes('SITE')) {
+          missingConditionalHeaders.push('SITE');
+        }
+
+        if (missingConditionalHeaders.length > 0) {
+          errors.push(
+            `Missing required columns: ${missingConditionalHeaders.join(', ')}. CLIENT and SITE columns are required when importing mobilized records.`,
+          );
+          return { isValid: false, errors };
+        }
       }
 
       return { isValid: true, errors: [], data };
@@ -130,60 +149,54 @@ export class MobilizationExcelUtil {
   static mapRowToMobilization(row: any): any {
     // Map MOB-DEM to mobStatus
     const mobDemValue = row['MOB-DEM']?.toString().trim().toLowerCase() || '';
+    // Use exact match to avoid "demobilized" matching "mobilized"
     const mobStatus = mobDemValue === 'mobilized' ? 'mobilized' : 'demobilized';
 
-    // Map REASON to jobStatus
-    const reasonValue = row['REASON']?.toString().trim().toLowerCase() || '';
+    // Map STATUS to jobStatus
+    const statusValue = row['STATUS']?.toString().trim().toLowerCase() || '';
     let jobStatus = 'active'; // Default
 
     if (
-      reasonValue.includes('vacation') ||
-      reasonValue.includes('on vacation')
+      statusValue.includes('vacation') ||
+      statusValue.includes('on vacation')
     ) {
       jobStatus = 'on_vacation';
-    } else if (reasonValue.includes('cancel')) {
+    } else if (statusValue.includes('cancel')) {
       jobStatus = 'cancelled';
-    } else if (reasonValue.includes('abscond')) {
+    } else if (statusValue.includes('abscond')) {
       jobStatus = 'absconded';
-    } else if (reasonValue.includes('absent')) {
+    } else if (statusValue.includes('absent')) {
       jobStatus = 'absent';
-    } else if (reasonValue.includes('sick')) {
+    } else if (statusValue.includes('sick')) {
       jobStatus = 'sick_leave';
-    } else if (reasonValue.includes('casual')) {
+    } else if (statusValue.includes('casual')) {
       jobStatus = 'casual_leave';
-    } else if (reasonValue.includes('notice')) {
+    } else if (statusValue.includes('notice')) {
       jobStatus = 'notice_period';
-    } else if (reasonValue.includes('resign')) {
+    } else if (statusValue.includes('resign')) {
       jobStatus = 'resigned';
-    } else if (reasonValue.includes('idle')) {
+    } else if (statusValue.includes('idle')) {
       jobStatus = 'idle';
+    } else if (statusValue.includes('active')) {
+      jobStatus = 'active';
     }
 
-    // Get mobilized trade - use ACTUAL TRADE if MOBILIZED TRADE is empty
+    // Get mobilized trade
     const mobilizedTradeValue = row['MOBILIZED TRADE']?.toString().trim() || '';
-    const actualTradeValue = row['ACTUAL TRADE']?.toString().trim() || '';
-    const finalMobilizedTrade = mobilizedTradeValue || actualTradeValue;
 
     return {
       // Employee identification
       employeeIdNo: row['ID NO']?.toString().trim() || null,
       employeeName: row['NAME']?.toString().trim() || '',
-      employeeActualTrade: actualTradeValue || null,
-      employeePpNo: row['PP NO']?.toString().trim() || null,
-      employeeNationality: row['NATIONALITY']?.toString().trim() || null,
 
       // Mobilization fields
-      mobilizedTradeName: finalMobilizedTrade || null,
+      mobilizedTradeName: mobilizedTradeValue || null,
       clientName: row['CLIENT']?.toString().trim() || null,
       siteName: row['SITE']?.toString().trim() || null,
       mobStatus,
       jobStatus,
       actionDate: this.excelDateToISO(row['DATE']),
       notes: null,
-
-      // Optional fields
-      bookingForClient: row['BOOKING FOR CLIENT']?.toString().trim() || null,
-      categories: row['CATEGORIES']?.toString().trim() || null,
     };
   }
 
@@ -194,35 +207,21 @@ export class MobilizationExcelUtil {
   static generateTemplate(): Buffer {
     const templateData = [
       {
-        'S.R NO': 1,
         'ID NO': 'EMP001',
-        NAME: 'John Doe',
-        'ACTUAL TRADE': 'Mason',
-        'PP NO': 'A12345678',
-        NATIONALITY: 'Indian',
         'MOBILIZED TRADE': 'Mason',
         CLIENT: 'ABC Company',
         SITE: 'Dubai Marina Project',
-        REASON: 'Active',
-        'BOOKING FOR CLIENT': '',
-        CATEGORIES: '',
-        'MOB-DEM': 'mobilized',
+        STATUS: 'Active',
+        'MOB-DEM': 'Mobilized',
         DATE: '2024-01-15',
       },
       {
-        'S.R NO': 2,
         'ID NO': 'EMP002',
-        NAME: 'Jane Smith',
-        'ACTUAL TRADE': 'Carpenter',
-        'PP NO': 'B98765432',
-        NATIONALITY: 'Pakistani',
-        'MOBILIZED TRADE': 'Carpenter',
-        CLIENT: 'XYZ Corporation',
-        SITE: 'Business Bay Tower',
-        REASON: 'On Vacation',
-        'BOOKING FOR CLIENT': '',
-        CATEGORIES: '',
-        'MOB-DEM': 'demobilized',
+        'MOBILIZED TRADE': '',
+        CLIENT: '',
+        SITE: '',
+        STATUS: 'On Vacation',
+        'MOB-DEM': 'Demobilized',
         DATE: '2024-01-20',
       },
     ];
