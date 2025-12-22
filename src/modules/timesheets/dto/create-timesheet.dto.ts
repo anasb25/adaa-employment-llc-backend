@@ -1,50 +1,43 @@
-import {
-  IsNumber,
-  IsString,
-  IsOptional,
-  IsDateString,
-  IsEnum,
-  Min,
-  IsArray,
-  ValidateNested,
-} from 'class-validator';
+import { IsNumber, IsString, IsOptional, IsArray, ValidateNested } from 'class-validator';
 import { Type } from 'class-transformer';
-import { AttendanceStatus } from '../entities/timesheet.entity';
 
-export class CreateTimesheetDto {
-  @IsOptional()
+export class TimesheetEntryDto {
   @IsNumber()
-  allocationId?: number; // Optional for idle employees
+  employeeId: number;
 
-  @IsOptional()
-  @IsNumber()
-  employeeId?: number; // Required for idle employees (when no allocation)
-
-  @IsDateString()
+  @IsString()
   date: string;
-
-  // Status removed - use mobilization data instead
-  // @IsOptional()
-  // @IsEnum(AttendanceStatus)
-  // status?: AttendanceStatus;
 
   @IsOptional()
   @IsNumber()
   tradeInSiteId?: number;
 
   @IsNumber()
-  @Min(0)
   hoursWorked: number;
+
+  @IsString()
+  jobStatus: string;
 
   @IsOptional()
   @IsString()
   notes?: string;
 }
 
-export class BulkCreateTimesheetDto {
-  @IsArray()
-  @ValidateNested({ each: true })
-  @Type(() => CreateTimesheetDto)
-  timesheets: CreateTimesheetDto[];
+export class CreateTimesheetDto {
+  @IsNumber()
+  projectId: number;
+
+  @IsString()
+  month: string; // Format: YYYY-MM
+
+  @IsOptional()
+  @IsString()
+  notes?: string;
 }
 
+export class SaveTimesheetEntriesDto {
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => TimesheetEntryDto)
+  entries: TimesheetEntryDto[];
+}

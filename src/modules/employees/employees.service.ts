@@ -3,7 +3,6 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
 import { Employee } from './entities/employee.entity';
 import { Timesheet } from '../timesheets/entities/timesheet.entity';
-import { ProjectAllocation } from '../project-allocations/entities/project-allocation.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
 import {
@@ -23,8 +22,6 @@ export class EmployeesService {
     private readonly employeeRepository: Repository<Employee>,
     @InjectRepository(Timesheet)
     private readonly timesheetRepository: Repository<Timesheet>,
-    @InjectRepository(ProjectAllocation)
-    private readonly allocationRepository: Repository<ProjectAllocation>,
     @InjectRepository(Skill)
     private readonly skillRepository: Repository<Skill>,
     @InjectRepository(EmployeeSkill)
@@ -117,35 +114,28 @@ export class EmployeesService {
       .leftJoinAndSelect('employeeSkills.skill', 'skill')
       .leftJoinAndSelect('skill.skillType', 'skillType')
       .leftJoin(
-        ProjectAllocation,
-        'allocation',
-        'allocation.employeeId = employee.id',
-      )
-      .leftJoin(
         Timesheet,
         'timesheet',
-        'timesheet.allocationId = allocation.id AND timesheet.date = :date',
+        'timesheet.employeeId = employee.id AND timesheet.date = :date',
         { date: targetDate },
       )
+      .leftJoinAndSelect('timesheet.project', 'project')
       .leftJoinAndSelect('timesheet.tradeInSite', 'tradeInSite')
-      .leftJoinAndSelect('allocation.project', 'project')
       .addSelect([
         'timesheet.id',
-        // 'timesheet.status', // Status removed - use mobilization data instead
+        'timesheet.jobStatus',
         'timesheet.hoursWorked',
         'timesheet.notes',
         'timesheet.date',
-        'allocation.id',
         'project.id',
         'project.name',
       ])
       .orderBy('employee.name', 'ASC');
 
-    // Filter by status if provided
-    // Note: Status filtering disabled - use mobilization data instead
-    // if (status) {
-    //   queryBuilder.andWhere('timesheet.status = :status', { status });
-    // }
+    // Filter by job status if provided
+    if (status) {
+      queryBuilder.andWhere('timesheet.jobStatus = :status', { status });
+    }
 
     // Apply pagination if provided
     if (options) {

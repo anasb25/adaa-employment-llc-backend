@@ -1,29 +1,23 @@
-import {
-  IsNumber,
-  IsString,
-  IsOptional,
-  IsEnum,
-  Min,
-} from 'class-validator';
-import { AttendanceStatus } from '../entities/timesheet.entity';
+import { IsString, IsOptional, IsEnum } from 'class-validator';
+import { TimesheetStatus } from '../entities/timesheet.entity';
 
 export class UpdateTimesheetDto {
-  // Status removed - use mobilization data instead
-  // @IsOptional()
-  // @IsEnum(AttendanceStatus)
-  // status?: AttendanceStatus;
-
-  @IsOptional()
-  @IsNumber()
-  tradeInSiteId?: number;
-
-  @IsOptional()
-  @IsNumber()
-  @Min(0)
-  hoursWorked?: number;
-
   @IsOptional()
   @IsString()
   notes?: string;
 }
 
+export class SubmitTimesheetDto {
+  @IsOptional()
+  @IsString()
+  notes?: string;
+}
+
+export class ApproveTimesheetDto {
+  @IsEnum(TimesheetStatus)
+  status: TimesheetStatus.APPROVED | TimesheetStatus.REJECTED;
+
+  @IsOptional()
+  @IsString()
+  notes?: string;
+}

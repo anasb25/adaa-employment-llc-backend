@@ -4,7 +4,6 @@ import { EmployeesController } from './employees.controller';
 import { EmployeesService } from './employees.service';
 import { Employee } from './entities/employee.entity';
 import { Timesheet } from '../timesheets/entities/timesheet.entity';
-import { ProjectAllocation } from '../project-allocations/entities/project-allocation.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
 
@@ -13,7 +12,6 @@ import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity
     TypeOrmModule.forFeature([
       Employee,
       Timesheet,
-      ProjectAllocation,
       Skill,
       EmployeeSkill,
     ]),

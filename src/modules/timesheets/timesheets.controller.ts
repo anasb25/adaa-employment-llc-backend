@@ -2,154 +2,140 @@ import {
   Controller,
   Get,
   Post,
-  Patch,
+  Put,
   Delete,
   Body,
   Param,
   Query,
+  UseGuards,
+  Request,
+  ParseIntPipe,
 } from '@nestjs/common';
+import { JwtAuthGuard } from 'src/common/guards/jwt-auth.guard';
 import { TimesheetsService } from './timesheets.service';
-import { Timesheet } from './entities/timesheet.entity';
 import {
   CreateTimesheetDto,
-  BulkCreateTimesheetDto,
+  SaveTimesheetEntriesDto,
 } from './dto/create-timesheet.dto';
-import { UpdateTimesheetDto } from './dto/update-timesheet.dto';
-import { TimesheetFiltersDto } from './dto/timesheet-filters.dto';
-import { GenerateDailyTimesheetsDto } from './dto/generate-daily-timesheets.dto';
-import { DashboardFiltersDto } from './dto/dashboard-filters.dto';
-import { CurrentUser, Roles, Permissions } from '../../common/decorators';
-import { User } from '../users/entities/user.entity';
 import {
-  PaginationUtil,
-  PaginatedResponse,
-} from '../../common/utils/pagination.util';
+  UpdateTimesheetDto,
+  SubmitTimesheetDto,
+  ApproveTimesheetDto,
+} from './dto/update-timesheet.dto';
+import { TimesheetFiltersDto } from './dto/timesheet-filters.dto';
 
 @Controller('timesheets')
+@UseGuards(JwtAuthGuard)
 export class TimesheetsController {
   constructor(private readonly timesheetsService: TimesheetsService) {}
 
-  @Roles('admin', 'manager')
-  @Permissions('employee:read')
-  @Get()
-  async findAll(
-    @Query() filters: TimesheetFiltersDto,
-    @Query('page') page?: number,
-    @Query('limit') limit?: number,
-  ): Promise<PaginatedResponse<Timesheet>> {
-    if (page !== undefined || limit !== undefined) {
-      const paginationOptions = PaginationUtil.validatePaginationParams(
-        page,
-        limit,
-      );
-      return await this.timesheetsService.findAllPaginated(
-        paginationOptions,
-        filters,
-      );
-    }
-
-    const all = await this.timesheetsService.findAll(filters);
-    return {
-      data: all,
-      total: all.length,
-      page: 1,
-      limit: all.length,
-      totalPages: 1,
-      hasNext: false,
-      hasPrev: false,
-    };
-  }
-
-  @Roles('admin', 'manager')
-  @Permissions('employee:read')
-  @Get('stats')
-  async getStats(@Query() filters: TimesheetFiltersDto) {
-    return await this.timesheetsService.getStats(filters);
-  }
-
-  @Roles('admin', 'manager')
-  @Permissions('employee:read')
-  @Get('dashboard/analytics')
-  async getDashboardAnalytics(@Query() filters: DashboardFiltersDto) {
-    return await this.timesheetsService.getDashboardAnalytics(filters);
-  }
-
-  @Roles('admin', 'manager')
-  @Permissions('employee:read')
-  @Get('by-date/:date')
-  async findByDate(@Param('date') date: string): Promise<Timesheet[]> {
-    return await this.timesheetsService.findByDate(date);
-  }
-
-  @Roles('admin', 'manager')
-  @Permissions('employee:read')
-  @Get(':id')
-  async findOne(@Param('id') id: string): Promise<Timesheet | null> {
-    return await this.timesheetsService.findOne(+id);
-  }
-
-  @Roles('admin', 'manager')
-  @Permissions('employee:read')
-  @Get('allocation/:allocationId')
-  async findByAllocation(
-    @Param('allocationId') allocationId: string,
-  ): Promise<Timesheet[]> {
-    return await this.timesheetsService.findByAllocation(+allocationId);
-  }
-
-  @Roles('admin', 'manager')
-  @Permissions('employee:create')
-  @Post()
-  async create(
-    @Body() createDto: CreateTimesheetDto,
-    @CurrentUser() user: User,
-  ): Promise<Timesheet> {
-    return await this.timesheetsService.create(createDto, user.id);
-  }
-
-  @Roles('admin', 'manager')
-  @Permissions('employee:create')
-  @Post('bulk')
-  async bulkCreate(
-    @Body() bulkDto: BulkCreateTimesheetDto,
-    @CurrentUser() user: User,
-  ): Promise<Timesheet[]> {
-    return await this.timesheetsService.bulkCreate(bulkDto, user.id);
-  }
-
-  @Roles('admin', 'manager')
-  @Permissions('employee:update')
-  @Patch(':id')
-  async update(
-    @Param('id') id: string,
-    @Body() updateDto: UpdateTimesheetDto,
-    @CurrentUser() user: User,
-  ): Promise<Timesheet> {
-    return await this.timesheetsService.update(+id, updateDto, user.id);
-  }
-
-  @Roles('admin')
-  @Permissions('employee:delete')
-  @Delete(':id')
-  async remove(@Param('id') id: string): Promise<void> {
-    return await this.timesheetsService.remove(+id);
-  }
-
-  @Roles('admin', 'manager')
-  @Permissions('employee:create')
-  @Post('generate-daily')
-  async generateDaily(
-    @Body() dto: GenerateDailyTimesheetsDto,
-    @CurrentUser() user: User,
-  ): Promise<{ created: number; existing: number; message: string }> {
-    const result = await this.timesheetsService.generateDailyTimesheets(
-      dto.date,
-      user.id,
+  /**
+   * Get monthly project timesheet with data
+   * GET /timesheets/project/:projectId/month/:month
+   * Example: /timesheets/project/1/month/2024-01
+   */
+  @Get('project/:projectId/month/:month')
+  async getMonthlyProjectTimesheet(
+    @Param('projectId', ParseIntPipe) projectId: number,
+    @Param('month') month: string,
+  ) {
+    return await this.timesheetsService.getMonthlyProjectTimesheet(
+      projectId,
+      month,
     );
-    return {
-      ...result,
-      message: `Generated ${result.created} new timesheets. ${result.existing} already existed.`,
-    };
+  }
+
+  /**
+   * Create or get timesheet
+   * POST /timesheets
+   */
+  @Post()
+  async createOrGetTimesheet(
+    @Body() createTimesheetDto: CreateTimesheetDto,
+    @Request() req,
+  ) {
+    return await this.timesheetsService.createOrGetTimesheet(
+      createTimesheetDto,
+      req.user.userId,
+    );
+  }
+
+  /**
+   * Save timesheet entries
+   * PUT /timesheets/:id/entries
+   */
+  @Put(':id/entries')
+  async saveTimesheetEntries(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() saveEntriesDto: SaveTimesheetEntriesDto,
+    @Request() req,
+  ) {
+    return await this.timesheetsService.saveTimesheetEntries(
+      id,
+      saveEntriesDto,
+      req.user.userId,
+    );
+  }
+
+  /**
+   * Submit timesheet for approval
+   * POST /timesheets/:id/submit
+   */
+  @Post(':id/submit')
+  async submitTimesheet(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() submitDto: SubmitTimesheetDto,
+    @Request() req,
+  ) {
+    return await this.timesheetsService.submitTimesheet(
+      id,
+      submitDto,
+      req.user.userId,
+    );
+  }
+
+  /**
+   * Approve or reject timesheet
+   * POST /timesheets/:id/approve
+   */
+  @Post(':id/approve')
+  async approveTimesheet(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() approveDto: ApproveTimesheetDto,
+    @Request() req,
+  ) {
+    return await this.timesheetsService.approveTimesheet(
+      id,
+      approveDto,
+      req.user.userId,
+    );
+  }
+
+  /**
+   * Get all timesheets with filters
+   * GET /timesheets
+   */
+  @Get()
+  async findAll(@Query() filters: TimesheetFiltersDto) {
+    return await this.timesheetsService.findAll(filters);
+  }
+
+  /**
+   * Get a single timesheet by ID
+   * GET /timesheets/:id
+   */
+  @Get(':id')
+  async findOne(@Param('id', ParseIntPipe) id: number) {
+    return await this.timesheetsService.findOne(id);
+  }
+
+  /**
+   * Delete a timesheet
+   * DELETE /timesheets/:id
+   */
+  @Delete(':id')
+  async remove(@Param('id', ParseIntPipe) id: number, @Request() req) {
+    await this.timesheetsService.remove(id, req.user.userId);
+    return { message: 'Timesheet deleted successfully' };
   }
 }
-

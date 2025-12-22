@@ -2,9 +2,8 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { TimesheetsController } from './timesheets.controller';
 import { TimesheetsService } from './timesheets.service';
-import { TimesheetsCronService } from './timesheets-cron.service';
 import { Timesheet } from './entities/timesheet.entity';
-import { ProjectAllocation } from '../project-allocations/entities/project-allocation.entity';
+import { TimesheetEntry } from './entities/timesheet-entry.entity';
 import { Mobilization } from '../mobilizations/entities/mobilization.entity';
 import { Employee } from '../employees/entities/employee.entity';
 import { Skill } from '../skills/entities/skill.entity';
@@ -14,7 +13,7 @@ import { Project } from '../projects/entities/project.entity';
   imports: [
     TypeOrmModule.forFeature([
       Timesheet,
-      ProjectAllocation,
+      TimesheetEntry,
       Mobilization,
       Employee,
       Skill,
@@ -22,8 +21,7 @@ import { Project } from '../projects/entities/project.entity';
     ]),
   ],
   controllers: [TimesheetsController],
-  providers: [TimesheetsService, TimesheetsCronService],
+  providers: [TimesheetsService],
   exports: [TimesheetsService],
 })
 export class TimesheetsModule {}
-

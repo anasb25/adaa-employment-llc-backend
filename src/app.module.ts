@@ -15,7 +15,6 @@ import { SkillsModule } from './modules/skills/skills.module';
 import { EmployeeSkillsModule } from './modules/employee-skills/employee-skills.module';
 import { ClientsModule } from './modules/clients/clients.module';
 import { ProjectsModule } from './modules/projects/projects.module';
-import { ProjectAllocationsModule } from './modules/project-allocations/project-allocations.module';
 import { ProjectSkillsModule } from './modules/project-skills/project-skills.module';
 import { TimesheetsModule } from './modules/timesheets/timesheets.module';
 import { MobilizationsModule } from './modules/mobilizations/mobilizations.module';
@@ -71,7 +70,6 @@ import mailConfig from './config/mail.config';
     EmployeeSkillsModule,
     ClientsModule,
     ProjectsModule,
-    ProjectAllocationsModule,
     ProjectSkillsModule,
     TimesheetsModule,
     MobilizationsModule,
