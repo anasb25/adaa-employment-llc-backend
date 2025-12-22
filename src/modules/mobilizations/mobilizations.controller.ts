@@ -70,11 +70,79 @@ export class MobilizationsController {
     return await this.mobilizationsService.getStatistics(projectId);
   }
 
+  @Get('current-status')
+  @Roles('admin', 'manager', 'supervisor')
+  @Permissions('employee:read')
+  async getCurrentStatusForAllEmployees() {
+    return await this.mobilizationsService.getCurrentStatusForAllEmployees();
+  }
+
+  @Get('effective-status-on-date')
+  @Roles('admin', 'manager', 'supervisor')
+  @Permissions('employee:read')
+  async getEffectiveStatusForAllEmployeesOnDate(@Query('date') date: string) {
+    if (!date) {
+      throw new BadRequestException('Date query parameter is required');
+    }
+    const targetDate = new Date(date);
+    if (isNaN(targetDate.getTime())) {
+      throw new BadRequestException('Invalid date format');
+    }
+    return await this.mobilizationsService.getEffectiveStatusForAllEmployeesOnDate(
+      targetDate,
+    );
+  }
+
   @Get('employee/:employeeId/latest')
   @Roles('admin', 'manager', 'supervisor')
   @Permissions('employee:read')
   async getLatestForEmployee(@Param('employeeId') employeeId: string) {
     return await this.mobilizationsService.getLatestForEmployee(+employeeId);
+  }
+
+  @Get('employee/:employeeId/status-on-date')
+  @Roles('admin', 'manager', 'supervisor')
+  @Permissions('employee:read')
+  async getEffectiveStatusOnDate(
+    @Param('employeeId') employeeId: string,
+    @Query('date') date: string,
+  ) {
+    if (!date) {
+      throw new BadRequestException('Date query parameter is required');
+    }
+    const targetDate = new Date(date);
+    if (isNaN(targetDate.getTime())) {
+      throw new BadRequestException('Invalid date format');
+    }
+    return await this.mobilizationsService.getEffectiveStatusOnDate(
+      +employeeId,
+      targetDate,
+    );
+  }
+
+  @Get('employee/:employeeId/history')
+  @Roles('admin', 'manager', 'supervisor')
+  @Permissions('employee:read')
+  async getEmployeeHistory(
+    @Param('employeeId') employeeId: string,
+    @Query('startDate') startDate?: string,
+    @Query('endDate') endDate?: string,
+  ) {
+    const start = startDate ? new Date(startDate) : undefined;
+    const end = endDate ? new Date(endDate) : undefined;
+
+    if (start && isNaN(start.getTime())) {
+      throw new BadRequestException('Invalid startDate format');
+    }
+    if (end && isNaN(end.getTime())) {
+      throw new BadRequestException('Invalid endDate format');
+    }
+
+    return await this.mobilizationsService.getEmployeeHistory(
+      +employeeId,
+      start,
+      end,
+    );
   }
 
   @Get('project/:projectId/employees')
@@ -173,4 +241,3 @@ export class MobilizationsController {
     );
   }
 }
-

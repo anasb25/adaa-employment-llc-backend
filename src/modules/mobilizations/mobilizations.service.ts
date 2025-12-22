@@ -5,7 +5,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, ILike } from 'typeorm';
+import { Repository, ILike, LessThanOrEqual } from 'typeorm';
 import { Mobilization, MobStatus } from './entities/mobilization.entity';
 import { Employee } from '../employees/entities/employee.entity';
 import { Project, ProjectStatus } from '../projects/entities/project.entity';
@@ -274,6 +274,107 @@ export class MobilizationsService {
   }
 
   /**
+   * Get employee's effective mobilization status on a specific date
+   * Returns the most recent mobilization record on or before the given date
+   * This implements the "carry forward" logic - status remains until explicitly changed
+   */
+  async getEffectiveStatusOnDate(
+    employeeId: number,
+    date: Date,
+  ): Promise<Mobilization | null> {
+    return await this.mobilizationRepository.findOne({
+      where: {
+        employeeId,
+        actionDate: LessThanOrEqual(date),
+      },
+      relations: ['employee', 'project', 'project.client', 'mobilizedTrade'],
+      order: { actionDate: 'DESC', createdAt: 'DESC' },
+    });
+  }
+
+  /**
+   * Get current mobilization status for all employees
+   * Returns the most recent mobilization for each employee
+   * Useful for dashboard/reporting views
+   */
+  async getCurrentStatusForAllEmployees(): Promise<Mobilization[]> {
+    return this.getEffectiveStatusForAllEmployeesOnDate(new Date());
+  }
+
+  /**
+   * Get effective status for all employees on a specific date (carry-forward logic)
+   * Returns the most recent mobilization for each employee on or before the given date
+   */
+  async getEffectiveStatusForAllEmployeesOnDate(
+    date: Date,
+  ): Promise<Mobilization[]> {
+    // Fetch all mobilizations up to and including the specified date
+    const allMobilizations = await this.mobilizationRepository.find({
+      where: {
+        actionDate: LessThanOrEqual(date),
+      },
+      relations: ['employee', 'project', 'project.client', 'mobilizedTrade'],
+      order: {
+        actionDate: 'DESC',
+        createdAt: 'DESC',
+      },
+    });
+
+    // Group by employee and keep only the most recent one for each (carry-forward)
+    const employeeLatestMap = new Map<number, Mobilization>();
+
+    for (const mobilization of allMobilizations) {
+      if (!employeeLatestMap.has(mobilization.employeeId)) {
+        employeeLatestMap.set(mobilization.employeeId, mobilization);
+      }
+    }
+
+    // Convert back to array and sort by employee name
+    const result = Array.from(employeeLatestMap.values()).sort((a, b) => {
+      const nameA = a.employee?.name || '';
+      const nameB = b.employee?.name || '';
+      return nameA.localeCompare(nameB);
+    });
+
+    return result;
+  }
+
+  /**
+   * Get mobilization history for an employee within a date range
+   * Shows all status changes that occurred during the period
+   */
+  async getEmployeeHistory(
+    employeeId: number,
+    startDate?: Date,
+    endDate?: Date,
+  ): Promise<Mobilization[]> {
+    const queryBuilder = this.mobilizationRepository
+      .createQueryBuilder('mobilization')
+      .leftJoinAndSelect('mobilization.employee', 'employee')
+      .leftJoinAndSelect('mobilization.project', 'project')
+      .leftJoinAndSelect('project.client', 'client')
+      .leftJoinAndSelect('mobilization.mobilizedTrade', 'mobilizedTrade')
+      .where('mobilization.employeeId = :employeeId', { employeeId })
+      .orderBy('mobilization.actionDate', 'DESC')
+      .addOrderBy('mobilization.createdAt', 'DESC');
+
+    if (startDate && endDate) {
+      queryBuilder.andWhere(
+        'mobilization.actionDate BETWEEN :startDate AND :endDate',
+        { startDate, endDate },
+      );
+    } else if (startDate) {
+      queryBuilder.andWhere('mobilization.actionDate >= :startDate', {
+        startDate,
+      });
+    } else if (endDate) {
+      queryBuilder.andWhere('mobilization.actionDate <= :endDate', { endDate });
+    }
+
+    return await queryBuilder.getMany();
+  }
+
+  /**
    * Get all employees currently mobilized to a project
    */
   async getEmployeesOnProject(projectId: number): Promise<Mobilization[]> {
@@ -537,51 +638,94 @@ export class MobilizationsService {
         let mobilization: Mobilization;
 
         if (existingMobilization) {
-          // Update existing mobilization
-          await this.mobilizationRepository.update(existingMobilization.id, {
-            mobilizedTradeId: mobilizedTrade.id,
-            projectId: project?.id || null,
-            mobStatus: mappedData.mobStatus as MobStatus,
-            jobStatus: mappedData.jobStatus,
-            notes: mappedData.notes,
-            updatedBy: createdBy,
-          });
+          // Check if data has actually changed to avoid unnecessary updates
+          const hasChanged =
+            existingMobilization.mobilizedTradeId !== mobilizedTrade.id ||
+            existingMobilization.projectId !== (project?.id || null) ||
+            existingMobilization.mobStatus !== mappedData.mobStatus ||
+            existingMobilization.jobStatus !== mappedData.jobStatus ||
+            existingMobilization.notes !== mappedData.notes;
 
-          const updated = await this.mobilizationRepository.findOne({
-            where: { id: existingMobilization.id },
-            relations: ['employee', 'project', 'mobilizedTrade'],
-          });
+          if (hasChanged) {
+            // Update existing mobilization
+            await this.mobilizationRepository.update(existingMobilization.id, {
+              mobilizedTradeId: mobilizedTrade.id,
+              projectId: project?.id || null,
+              mobStatus: mappedData.mobStatus as MobStatus,
+              jobStatus: mappedData.jobStatus,
+              notes: mappedData.notes,
+              updatedBy: createdBy,
+            });
 
-          if (!updated) {
-            throw new Error('Failed to retrieve updated mobilization');
+            const updated = await this.mobilizationRepository.findOne({
+              where: { id: existingMobilization.id },
+              relations: ['employee', 'project', 'mobilizedTrade'],
+            });
+
+            if (!updated) {
+              throw new Error('Failed to retrieve updated mobilization');
+            }
+            mobilization = updated;
+          } else {
+            // No changes, use existing record
+            const existing = await this.mobilizationRepository.findOne({
+              where: { id: existingMobilization.id },
+              relations: ['employee', 'project', 'mobilizedTrade'],
+            });
+
+            if (!existing) {
+              throw new Error('Failed to retrieve existing mobilization');
+            }
+            mobilization = existing;
           }
-          mobilization = updated;
         } else {
-          // Create new mobilization
-          const newMobilization = this.mobilizationRepository.create({
-            employeeId: employee.id,
-            mobilizedTradeId: mobilizedTrade.id,
-            projectId: project?.id || null,
-            mobStatus: mappedData.mobStatus as MobStatus,
-            jobStatus: mappedData.jobStatus,
-            actionDate: new Date(mappedData.actionDate),
-            notes: mappedData.notes,
-            createdBy,
-          });
+          // Check if this is actually a change from previous status
+          // (Optimization: Don't create a record if it's the same as the last one)
+          const previousMobilization = await this.getEffectiveStatusOnDate(
+            employee.id,
+            new Date(
+              new Date(mappedData.actionDate).getTime() - 24 * 60 * 60 * 1000,
+            ),
+          );
 
-          mobilization =
-            await this.mobilizationRepository.save(newMobilization);
+          const isDifferentFromPrevious =
+            !previousMobilization ||
+            previousMobilization.mobilizedTradeId !== mobilizedTrade.id ||
+            previousMobilization.projectId !== (project?.id || null) ||
+            previousMobilization.mobStatus !== mappedData.mobStatus ||
+            previousMobilization.jobStatus !== mappedData.jobStatus;
 
-          // Fetch with relations
-          const saved = await this.mobilizationRepository.findOne({
-            where: { id: mobilization.id },
-            relations: ['employee', 'project', 'mobilizedTrade'],
-          });
+          if (isDifferentFromPrevious) {
+            // Create new mobilization (actual change occurred)
+            const newMobilization = this.mobilizationRepository.create({
+              employeeId: employee.id,
+              mobilizedTradeId: mobilizedTrade.id,
+              projectId: project?.id || null,
+              mobStatus: mappedData.mobStatus as MobStatus,
+              jobStatus: mappedData.jobStatus,
+              actionDate: new Date(mappedData.actionDate),
+              notes: mappedData.notes,
+              createdBy,
+            });
 
-          if (!saved) {
-            throw new Error('Failed to retrieve saved mobilization');
+            mobilization =
+              await this.mobilizationRepository.save(newMobilization);
+
+            // Fetch with relations
+            const saved = await this.mobilizationRepository.findOne({
+              where: { id: mobilization.id },
+              relations: ['employee', 'project', 'mobilizedTrade'],
+            });
+
+            if (!saved) {
+              throw new Error('Failed to retrieve saved mobilization');
+            }
+            mobilization = saved;
+          } else {
+            // Status unchanged, skip creation (carried forward from previous)
+            result.success++;
+            continue;
           }
-          mobilization = saved;
         }
 
         result.success++;

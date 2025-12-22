@@ -1,4 +1,4 @@
-import { Entity, Column, ManyToOne, JoinColumn } from 'typeorm';
+import { Entity, Column, ManyToOne, JoinColumn, Index } from 'typeorm';
 import { BaseEntity } from '../../../common/entities';
 import { Employee } from '../../employees/entities/employee.entity';
 import { Project } from '../../projects/entities/project.entity';
@@ -23,6 +23,7 @@ export enum JobStatus {
 }
 
 @Entity('mobilizations')
+@Index(['employeeId', 'actionDate'], { unique: true })
 export class Mobilization extends BaseEntity {
   @Column()
   employeeId: number;
@@ -66,5 +67,3 @@ export class Mobilization extends BaseEntity {
   @JoinColumn({ name: 'mobilizedTradeId' })
   mobilizedTrade: Skill;
 }
-
-
