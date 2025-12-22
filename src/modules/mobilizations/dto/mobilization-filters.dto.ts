@@ -1,7 +1,6 @@
 import { IsOptional, IsEnum, IsNumber, IsDateString } from 'class-validator';
 import { Type } from 'class-transformer';
 import {
-  MobilizationStatus,
   MobStatus,
   JobStatus,
 } from '../entities/mobilization.entity';
@@ -23,10 +22,6 @@ export class MobilizationFiltersDto {
   mobilizedTradeId?: number;
 
   @IsOptional()
-  @IsEnum(MobilizationStatus)
-  status?: MobilizationStatus;
-
-  @IsOptional()
   @IsEnum(MobStatus)
   mobStatus?: MobStatus;
 
@@ -46,4 +41,5 @@ export class MobilizationFiltersDto {
   @IsDateString()
   actionDate?: string;
 }
+
 

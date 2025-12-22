@@ -3,3 +3,4 @@ import { CreateMobilizationDto } from './create-mobilization.dto';
 
 export class UpdateMobilizationDto extends PartialType(CreateMobilizationDto) {}
 
+

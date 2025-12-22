@@ -6,11 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
-import {
-  Mobilization,
-  MobilizationStatus,
-  MobStatus,
-} from './entities/mobilization.entity';
+import { Mobilization, MobStatus } from './entities/mobilization.entity';
 import { Employee } from '../employees/entities/employee.entity';
 import { Project, ProjectStatus } from '../projects/entities/project.entity';
 import { Skill } from '../skills/entities/skill.entity';
@@ -78,20 +74,8 @@ export class MobilizationsService {
       throw new BadRequestException('Skill/Trade not found');
     }
 
-    // Check if employee already has an active mobilization
-    const existingActive = await this.mobilizationRepository.findOne({
-      where: {
-        employeeId: createDto.employeeId,
-        status: MobilizationStatus.ACTIVE,
-      },
-      order: { actionDate: 'DESC' },
-    });
-
-    if (existingActive) {
-      this.logger.warn(
-        `Employee ${createDto.employeeId} already has an active mobilization. Creating new record anyway.`,
-      );
-    }
+    // Note: Multiple mobilization records can exist for the same employee
+    // This allows tracking mobilization history over time
 
     const mobilization = this.mobilizationRepository.create({
       ...createDto,
@@ -146,7 +130,6 @@ export class MobilizationsService {
       employeeId,
       mobilizedTradeId: createDto.mobilizedTradeId,
       projectId: createDto.projectId,
-      status: createDto.status || MobilizationStatus.ACTIVE,
       mobStatus: createDto.mobStatus,
       jobStatus: createDto.jobStatus,
       actionDate: createDto.actionDate,
@@ -230,12 +213,6 @@ export class MobilizationsService {
       );
     }
 
-    if (filters.status) {
-      queryBuilder.andWhere('mobilization.status = :status', {
-        status: filters.status,
-      });
-    }
-
     if (filters.mobStatus) {
       queryBuilder.andWhere('mobilization.mobStatus = :mobStatus', {
         mobStatus: filters.mobStatus,
@@ -290,7 +267,6 @@ export class MobilizationsService {
     return await this.mobilizationRepository.findOne({
       where: {
         employeeId,
-        status: MobilizationStatus.ACTIVE,
       },
       relations: ['employee', 'project', 'project.client', 'mobilizedTrade'],
       order: { actionDate: 'DESC', createdAt: 'DESC' },
@@ -304,7 +280,6 @@ export class MobilizationsService {
     return await this.mobilizationRepository.find({
       where: {
         projectId,
-        status: MobilizationStatus.ACTIVE,
         mobStatus: MobStatus.MOBILIZED,
       },
       relations: ['employee', 'mobilizedTrade'],
@@ -378,10 +353,7 @@ export class MobilizationsService {
       .createQueryBuilder('mobilization')
       .leftJoinAndSelect('mobilization.employee', 'employee')
       .leftJoinAndSelect('mobilization.project', 'project')
-      .leftJoinAndSelect('mobilization.mobilizedTrade', 'mobilizedTrade')
-      .where('mobilization.status = :status', {
-        status: MobilizationStatus.ACTIVE,
-      });
+      .leftJoinAndSelect('mobilization.mobilizedTrade', 'mobilizedTrade');
 
     if (projectId) {
       queryBuilder.andWhere('mobilization.projectId = :projectId', {
@@ -401,13 +373,23 @@ export class MobilizationsService {
 
     // Count by job status
     const byJobStatus = {
-      on_job: mobilizations.filter((m) => m.jobStatus === 'on_job').length,
+      active: mobilizations.filter((m) => m.jobStatus === 'active').length,
       cancelled: mobilizations.filter((m) => m.jobStatus === 'cancelled')
-        .length,
-      on_vacation: mobilizations.filter((m) => m.jobStatus === 'on_vacation')
         .length,
       absconded: mobilizations.filter((m) => m.jobStatus === 'absconded')
         .length,
+      on_vacation: mobilizations.filter((m) => m.jobStatus === 'on_vacation')
+        .length,
+      absent: mobilizations.filter((m) => m.jobStatus === 'absent').length,
+      sick_leave: mobilizations.filter((m) => m.jobStatus === 'sick_leave')
+        .length,
+      casual_leave: mobilizations.filter((m) => m.jobStatus === 'casual_leave')
+        .length,
+      notice_period: mobilizations.filter(
+        (m) => m.jobStatus === 'notice_period',
+      ).length,
+      resigned: mobilizations.filter((m) => m.jobStatus === 'resigned').length,
+      idle: mobilizations.filter((m) => m.jobStatus === 'idle').length,
     };
 
     // Count by project
@@ -559,7 +541,6 @@ export class MobilizationsService {
           await this.mobilizationRepository.update(existingMobilization.id, {
             mobilizedTradeId: mobilizedTrade.id,
             projectId: project?.id || null,
-            status: mappedData.status as MobilizationStatus,
             mobStatus: mappedData.mobStatus as MobStatus,
             jobStatus: mappedData.jobStatus,
             notes: mappedData.notes,
@@ -576,24 +557,11 @@ export class MobilizationsService {
           }
           mobilization = updated;
         } else {
-          // Deactivate any existing active mobilization for this employee
-          await this.mobilizationRepository.update(
-            {
-              employeeId: employee.id,
-              status: MobilizationStatus.ACTIVE,
-            },
-            {
-              status: MobilizationStatus.INACTIVE,
-              updatedBy: createdBy,
-            },
-          );
-
           // Create new mobilization
           const newMobilization = this.mobilizationRepository.create({
             employeeId: employee.id,
             mobilizedTradeId: mobilizedTrade.id,
             projectId: project?.id || null,
-            status: mappedData.status as MobilizationStatus,
             mobStatus: mappedData.mobStatus as MobStatus,
             jobStatus: mappedData.jobStatus,
             actionDate: new Date(mappedData.actionDate),

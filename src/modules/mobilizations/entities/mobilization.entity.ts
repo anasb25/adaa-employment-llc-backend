@@ -4,21 +4,22 @@ import { Employee } from '../../employees/entities/employee.entity';
 import { Project } from '../../projects/entities/project.entity';
 import { Skill } from '../../skills/entities/skill.entity';
 
-export enum MobilizationStatus {
-  ACTIVE = 'active',
-  INACTIVE = 'inactive',
-}
-
 export enum MobStatus {
   MOBILIZED = 'mobilized',
   DEMOBILIZED = 'demobilized',
 }
 
 export enum JobStatus {
-  ON_JOB = 'on_job',
+  ACTIVE = 'active',
   CANCELLED = 'cancelled',
-  ON_VACATION = 'on_vacation',
   ABSCONDED = 'absconded',
+  ON_VACATION = 'on_vacation',
+  ABSENT = 'absent',
+  SICK_LEAVE = 'sick_leave',
+  CASUAL_LEAVE = 'casual_leave',
+  NOTICE_PERIOD = 'notice_period',
+  RESIGNED = 'resigned',
+  IDLE = 'idle',
 }
 
 @Entity('mobilizations')
@@ -34,13 +35,6 @@ export class Mobilization extends BaseEntity {
 
   @Column({
     type: 'enum',
-    enum: MobilizationStatus,
-    default: MobilizationStatus.ACTIVE,
-  })
-  status: MobilizationStatus;
-
-  @Column({
-    type: 'enum',
     enum: MobStatus,
     default: MobStatus.DEMOBILIZED,
   })
@@ -49,7 +43,7 @@ export class Mobilization extends BaseEntity {
   @Column({
     type: 'enum',
     enum: JobStatus,
-    default: JobStatus.ON_JOB,
+    default: JobStatus.ACTIVE,
   })
   jobStatus: JobStatus;
 
@@ -72,4 +66,5 @@ export class Mobilization extends BaseEntity {
   @JoinColumn({ name: 'mobilizedTradeId' })
   mobilizedTrade: Skill;
 }
+
 

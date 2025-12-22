@@ -132,18 +132,31 @@ export class MobilizationExcelUtil {
     const mobDemValue = row['MOB-DEM']?.toString().trim().toLowerCase() || '';
     const mobStatus = mobDemValue === 'mobilized' ? 'mobilized' : 'demobilized';
 
-    // If mobStatus is mobilized, status is active; otherwise inactive
-    const status = mobStatus === 'mobilized' ? 'active' : 'inactive';
-
     // Map REASON to jobStatus
     const reasonValue = row['REASON']?.toString().trim().toLowerCase() || '';
-    let jobStatus = 'on_job'; // Default
-    if (reasonValue.includes('vacation')) {
+    let jobStatus = 'active'; // Default
+
+    if (
+      reasonValue.includes('vacation') ||
+      reasonValue.includes('on vacation')
+    ) {
       jobStatus = 'on_vacation';
     } else if (reasonValue.includes('cancel')) {
       jobStatus = 'cancelled';
     } else if (reasonValue.includes('abscond')) {
       jobStatus = 'absconded';
+    } else if (reasonValue.includes('absent')) {
+      jobStatus = 'absent';
+    } else if (reasonValue.includes('sick')) {
+      jobStatus = 'sick_leave';
+    } else if (reasonValue.includes('casual')) {
+      jobStatus = 'casual_leave';
+    } else if (reasonValue.includes('notice')) {
+      jobStatus = 'notice_period';
+    } else if (reasonValue.includes('resign')) {
+      jobStatus = 'resigned';
+    } else if (reasonValue.includes('idle')) {
+      jobStatus = 'idle';
     }
 
     // Get mobilized trade - use ACTUAL TRADE if MOBILIZED TRADE is empty
@@ -163,7 +176,6 @@ export class MobilizationExcelUtil {
       mobilizedTradeName: finalMobilizedTrade || null,
       clientName: row['CLIENT']?.toString().trim() || null,
       siteName: row['SITE']?.toString().trim() || null,
-      status,
       mobStatus,
       jobStatus,
       actionDate: this.excelDateToISO(row['DATE']),
@@ -191,7 +203,7 @@ export class MobilizationExcelUtil {
         'MOBILIZED TRADE': 'Mason',
         CLIENT: 'ABC Company',
         SITE: 'Dubai Marina Project',
-        REASON: 'On Job',
+        REASON: 'Active',
         'BOOKING FOR CLIENT': '',
         CATEGORIES: '',
         'MOB-DEM': 'mobilized',
@@ -237,13 +249,27 @@ export class MobilizationExcelUtil {
           : '';
 
       // Map jobStatus to REASON
-      let reason = 'On Job';
-      if (mob.jobStatus === 'on_vacation') {
+      let reason = 'Active';
+      if (mob.jobStatus === 'active') {
+        reason = 'Active';
+      } else if (mob.jobStatus === 'on_vacation') {
         reason = 'On Vacation';
       } else if (mob.jobStatus === 'cancelled') {
         reason = 'Cancelled';
       } else if (mob.jobStatus === 'absconded') {
         reason = 'Absconded';
+      } else if (mob.jobStatus === 'absent') {
+        reason = 'Absent';
+      } else if (mob.jobStatus === 'sick_leave') {
+        reason = 'Sick Leave';
+      } else if (mob.jobStatus === 'casual_leave') {
+        reason = 'Casual Leave';
+      } else if (mob.jobStatus === 'notice_period') {
+        reason = 'Notice Period';
+      } else if (mob.jobStatus === 'resigned') {
+        reason = 'Resigned';
+      } else if (mob.jobStatus === 'idle') {
+        reason = 'Idle';
       }
 
       // Map mobStatus to MOB-DEM

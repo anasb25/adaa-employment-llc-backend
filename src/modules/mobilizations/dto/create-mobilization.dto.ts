@@ -7,7 +7,6 @@ import {
   IsArray,
 } from 'class-validator';
 import {
-  MobilizationStatus,
   MobStatus,
   JobStatus,
 } from '../entities/mobilization.entity';
@@ -22,10 +21,6 @@ export class CreateMobilizationDto {
   @IsOptional()
   @IsNumber()
   projectId?: number | null; // Can be null if demobilized
-
-  @IsOptional()
-  @IsEnum(MobilizationStatus)
-  status?: MobilizationStatus;
 
   @IsEnum(MobStatus)
   mobStatus: MobStatus;
@@ -53,10 +48,6 @@ export class BulkCreateMobilizationDto {
   @IsNumber()
   projectId?: number | null;
 
-  @IsOptional()
-  @IsEnum(MobilizationStatus)
-  status?: MobilizationStatus;
-
   @IsEnum(MobStatus)
   mobStatus: MobStatus;
 
@@ -70,4 +61,5 @@ export class BulkCreateMobilizationDto {
   @IsString()
   notes?: string;
 }
+
 
