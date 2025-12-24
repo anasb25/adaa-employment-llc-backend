@@ -20,6 +20,7 @@ export enum JobStatus {
   NOTICE_PERIOD = 'notice_period',
   RESIGNED = 'resigned',
   IDLE = 'idle',
+  OFF = 'off',
 }
 
 @Entity('mobilizations')

@@ -151,6 +151,11 @@ export class TimesheetsService {
         const currentDate = new Date(year, monthNum - 1, day);
         const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 
+        // Get day of week name (e.g., 'Monday', 'Tuesday', etc.)
+        const dayOfWeekName = currentDate.toLocaleDateString('en-US', {
+          weekday: 'long',
+        });
+
         // Find effective mobilization for this date with smart carry-forward logic
         const effectiveMob = this.getEffectiveMobilizationForDate(
           employeeMobilizations,
@@ -171,15 +176,33 @@ export class TimesheetsService {
           effectiveMob.projectId === project.id
         ) {
           wasPreviouslyMobilized = true;
-          const hours = existingEntry
-            ? Number(existingEntry.hoursWorked)
-            : this.getDefaultHoursForStatus(effectiveMob.jobStatus);
+
+          // Check if this day is an off day for the project
+          const isProjectOffDay =
+            project.offDays &&
+            Array.isArray(project.offDays) &&
+            project.offDays.includes(dayOfWeekName);
+
+          let hours: number;
+          let jobStatus: string;
+
+          if (isProjectOffDay) {
+            // Set to "Off" status with 0 hours for project off days
+            hours = 0;
+            jobStatus = JobStatus.OFF;
+          } else {
+            // Use existing entry or default hours for status
+            hours = existingEntry
+              ? Number(existingEntry.hoursWorked)
+              : this.getDefaultHoursForStatus(effectiveMob.jobStatus);
+            jobStatus = effectiveMob.jobStatus;
+          }
 
           dailyHours.push({
             date: dateStr,
             day,
             hoursWorked: hours,
-            jobStatus: effectiveMob.jobStatus,
+            jobStatus: jobStatus,
             notes: existingEntry?.notes || null,
             entryId: existingEntry?.id || null,
           });
@@ -312,6 +335,7 @@ export class TimesheetsService {
       case 'sick_leave':
       case 'casual_leave':
       case 'resigned':
+      case 'off':
         return 0;
       case 'idle':
         return 8;

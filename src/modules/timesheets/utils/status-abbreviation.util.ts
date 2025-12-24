@@ -15,6 +15,7 @@ export class StatusAbbreviationUtil {
     [JobStatus.NOTICE_PERIOD]: 'NP',
     [JobStatus.RESIGNED]: 'RES',
     [JobStatus.IDLE]: 'IDL',
+    [JobStatus.OFF]: 'OFF',
   };
 
   /**

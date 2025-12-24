@@ -203,6 +203,9 @@ export class MobilizationExcelUtil {
     } else if (statusValue.includes('idle')) {
       jobStatus = 'idle';
       jobStatusValid = true;
+    } else if (statusValue.includes('off')) {
+      jobStatus = 'off';
+      jobStatusValid = true;
     }
 
     // Get mobilized trade
@@ -344,6 +347,8 @@ export class MobilizationExcelUtil {
         reason = 'Resigned';
       } else if (mob.jobStatus === 'idle') {
         reason = 'Idle';
+      } else if (mob.jobStatus === 'off') {
+        reason = 'Off';
       }
 
       // Map mobStatus to MOB-DEM
