@@ -18,6 +18,7 @@ import { ProjectsModule } from './modules/projects/projects.module';
 import { ProjectSkillsModule } from './modules/project-skills/project-skills.module';
 import { TimesheetsModule } from './modules/timesheets/timesheets.module';
 import { MobilizationsModule } from './modules/mobilizations/mobilizations.module';
+import { SpecialDaysModule } from './modules/special-days/special-days.module';
 import appConfig from './config/app.config';
 import databaseConfig from './config/database.config';
 import authConfig from './config/auth.config';
@@ -73,6 +74,7 @@ import mailConfig from './config/mail.config';
     ProjectSkillsModule,
     TimesheetsModule,
     MobilizationsModule,
+    SpecialDaysModule,
   ],
   controllers: [AppController],
   providers: [

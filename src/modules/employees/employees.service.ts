@@ -211,7 +211,7 @@ export class EmployeesService {
         }
         if (constraint.includes('pp_no')) {
           return `Duplicate Passport Number${duplicateValue}. This passport number already exists.`;
-        }
+      }
         if (constraint.includes('work_permit_no')) {
           return `Duplicate Work Permit Number${duplicateValue}. This work permit number already exists.`;
         }

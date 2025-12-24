@@ -177,6 +177,14 @@ export class TimesheetsService {
         ) {
           wasPreviouslyMobilized = true;
 
+          // Check if the effective mobilization is from this exact date (user-entered)
+          // or carried forward from a previous date
+          const effectiveMobDateStr = new Date(effectiveMob.actionDate)
+            .toISOString()
+            .split('T')[0];
+          const isActualMobilizationForThisDate =
+            effectiveMobDateStr === dateStr;
+
           // Check if this day is an off day for the project
           const isProjectOffDay =
             project.offDays &&
@@ -186,15 +194,23 @@ export class TimesheetsService {
           let hours: number;
           let jobStatus: string;
 
-          if (isProjectOffDay) {
-            // Set to "Off" status with 0 hours for project off days
+          if (existingEntry) {
+            // If user has saved a timesheet entry for this day, respect their data
+            hours = Number(existingEntry.hoursWorked);
+            jobStatus = existingEntry.jobStatus;
+          } else if (isActualMobilizationForThisDate) {
+            // There's an actual mobilization record for this specific date
+            // Use its status regardless of off-days (user explicitly created this record)
+            hours = this.getDefaultHoursForStatus(effectiveMob.jobStatus);
+            jobStatus = effectiveMob.jobStatus;
+          } else if (isProjectOffDay) {
+            // No user entry, no mobilization record for today, and it's an off day
+            // Default to "Off" status for carried-forward entries
             hours = 0;
             jobStatus = JobStatus.OFF;
           } else {
-            // Use existing entry or default hours for status
-            hours = existingEntry
-              ? Number(existingEntry.hoursWorked)
-              : this.getDefaultHoursForStatus(effectiveMob.jobStatus);
+            // No user entry, not an off day - use smart carry-forward
+            hours = this.getDefaultHoursForStatus(effectiveMob.jobStatus);
             jobStatus = effectiveMob.jobStatus;
           }
 

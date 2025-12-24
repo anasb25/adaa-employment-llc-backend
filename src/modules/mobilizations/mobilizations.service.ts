@@ -346,7 +346,10 @@ export class MobilizationsService {
     // Apply smart carry-forward logic for each employee
     const effectiveMobilizations: Mobilization[] = [];
 
-    for (const [employeeId, mobilizations] of employeeMobilizationsMap.entries()) {
+    for (const [
+      employeeId,
+      mobilizations,
+    ] of employeeMobilizationsMap.entries()) {
       const effective = this.applySmartCarryForward(mobilizations, date);
       if (effective) {
         effectiveMobilizations.push(effective);
@@ -366,6 +369,7 @@ export class MobilizationsService {
   /**
    * Apply smart carry-forward logic to mobilization records
    * Temporary statuses (absent, sick_leave, casual_leave) don't carry forward
+   * Respects project off days for carried-forward statuses
    */
   private applySmartCarryForward(
     mobilizations: Mobilization[],
@@ -381,11 +385,32 @@ export class MobilizationsService {
     const latestMobDateStr = latestMobDate.toISOString().split('T')[0];
 
     // List of temporary one-day statuses that should not carry forward
-    const temporaryStatuses: string[] = ['absent', 'sick_leave', 'casual_leave'];
+    const temporaryStatuses: string[] = [
+      'absent',
+      'sick_leave',
+      'casual_leave',
+    ];
 
-    // If the latest mobilization is on the exact date we're looking at -> use it
+    // If the latest mobilization is on the exact date we're looking at -> use it as-is
+    // User explicitly entered this record, so we respect their choice even if it's an off day
     if (latestMobDateStr === targetDateStr) {
       return latestMob;
+    }
+
+    // We're carrying forward a status from a previous date
+    // Check if target date is an off day for the project
+    if (
+      latestMob.project?.offDays &&
+      Array.isArray(latestMob.project.offDays)
+    ) {
+      const dayOfWeek = this.getDayOfWeek(targetDate);
+      if (latestMob.project.offDays.includes(dayOfWeek)) {
+        // Target date is an off day - return OFF status
+        return {
+          ...latestMob,
+          jobStatus: JobStatus.OFF,
+        };
+      }
     }
 
     // Latest mobilization is before the target date
@@ -412,6 +437,22 @@ export class MobilizationsService {
 
     // Latest mobilization is a permanent status - carry it forward
     return latestMob;
+  }
+
+  /**
+   * Get the day of week name from a date
+   */
+  private getDayOfWeek(date: Date): string {
+    const days = [
+      'Sunday',
+      'Monday',
+      'Tuesday',
+      'Wednesday',
+      'Thursday',
+      'Friday',
+      'Saturday',
+    ];
+    return days[date.getDay()];
   }
 
   /**
