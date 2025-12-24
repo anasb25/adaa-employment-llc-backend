@@ -11,6 +11,7 @@ import { TimesheetEntry } from './entities/timesheet-entry.entity';
 import {
   Mobilization,
   MobStatus,
+  JobStatus,
 } from '../mobilizations/entities/mobilization.entity';
 import { Employee } from '../employees/entities/employee.entity';
 import { Project } from '../projects/entities/project.entity';
@@ -150,12 +151,11 @@ export class TimesheetsService {
         const currentDate = new Date(year, monthNum - 1, day);
         const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 
-        // Find effective mobilization for this date
-        // Compare dates by converting to YYYY-MM-DD strings to avoid time/timezone issues
-        const effectiveMob = employeeMobilizations.find((m) => {
-          const mobDateStr = new Date(m.actionDate).toISOString().split('T')[0];
-          return mobDateStr <= dateStr;
-        });
+        // Find effective mobilization for this date with smart carry-forward logic
+        const effectiveMob = this.getEffectiveMobilizationForDate(
+          employeeMobilizations,
+          dateStr,
+        );
 
         // Check if there's an existing entry
         const existingEntry = timesheet?.entries?.find(
@@ -232,6 +232,69 @@ export class TimesheetsService {
       },
       employees,
     };
+  }
+
+  /**
+   * Get effective mobilization for a specific date with smart carry-forward logic
+   * Temporary statuses (absent, sick_leave, casual_leave) don't carry forward
+   */
+  private getEffectiveMobilizationForDate(
+    employeeMobilizations: Mobilization[],
+    dateStr: string,
+  ): Mobilization | undefined {
+    // Find all mobilizations up to and including this date
+    const mobilizationsUpToDate = employeeMobilizations.filter((m) => {
+      const mobDateStr = new Date(m.actionDate).toISOString().split('T')[0];
+      return mobDateStr <= dateStr;
+    });
+
+    if (mobilizationsUpToDate.length === 0) {
+      return undefined;
+    }
+
+    // Get the most recent mobilization
+    const latestMob = mobilizationsUpToDate[0]; // Already sorted by actionDate DESC
+    const latestMobDateStr = new Date(latestMob.actionDate)
+      .toISOString()
+      .split('T')[0];
+
+    // List of temporary one-day statuses that should not carry forward
+    const temporaryStatuses = ['absent', 'sick_leave', 'casual_leave'];
+
+    // If the latest mobilization is:
+    // 1. On the exact date we're looking at -> use it
+    // 2. Before the date AND is a temporary status -> look for the status before it
+    // 3. Before the date AND is NOT a temporary status -> carry it forward
+
+    if (latestMobDateStr === dateStr) {
+      // Exact match - use this status
+      return latestMob;
+    }
+
+    // Latest mobilization is before the date we're checking
+    if (temporaryStatuses.includes(latestMob.jobStatus)) {
+      // It's a temporary status - find the non-temporary status before it
+      const nonTemporaryMob = mobilizationsUpToDate.find(
+        (m, index) => index > 0 && !temporaryStatuses.includes(m.jobStatus), // Skip first (latest) as it's temporary
+      );
+
+      if (nonTemporaryMob) {
+        // Return the non-temporary status but keep the project/trade from latest
+        return {
+          ...latestMob,
+          jobStatus: nonTemporaryMob.jobStatus,
+        };
+      }
+
+      // If no non-temporary status found before, default to 'active'
+      return {
+        ...latestMob,
+        jobStatus: JobStatus.ACTIVE,
+      };
+    }
+
+    // Latest mobilization is a permanent status - carry it forward
+    return latestMob;
   }
 
   /**
@@ -326,12 +389,14 @@ export class TimesheetsService {
     const savedEntries: TimesheetEntry[] = [];
 
     for (const entryDto of saveEntriesDto.entries) {
+      const entryDate = new Date(entryDto.date);
+
       // Check if entry exists
       let entry = await this.entryRepository.findOne({
         where: {
           timesheetId,
           employeeId: entryDto.employeeId,
-          date: new Date(entryDto.date),
+          date: entryDate,
         },
       });
 
@@ -347,7 +412,7 @@ export class TimesheetsService {
         entry = this.entryRepository.create({
           timesheetId,
           employeeId: entryDto.employeeId,
-          date: new Date(entryDto.date),
+          date: entryDate,
           hoursWorked: entryDto.hoursWorked,
           jobStatus: entryDto.jobStatus,
           notes: entryDto.notes,
@@ -356,10 +421,96 @@ export class TimesheetsService {
         });
       }
 
-      savedEntries.push(await this.entryRepository.save(entry));
+      const savedEntry = await this.entryRepository.save(entry);
+      savedEntries.push(savedEntry);
+
+      // Auto-sync mobilization: If jobStatus is different from current mobilization, create new mobilization record
+      await this.syncMobilizationFromTimesheetEntry(
+        savedEntry,
+        timesheet.projectId,
+        updatedBy,
+      );
     }
 
     return savedEntries;
+  }
+
+  /**
+   * Auto-sync mobilization record when timesheet entry status changes
+   * Creates a new mobilization record if the job status differs from the current mobilization
+   */
+  private async syncMobilizationFromTimesheetEntry(
+    entry: TimesheetEntry,
+    projectId: number,
+    createdBy: number,
+  ): Promise<void> {
+    try {
+      const entryDate = new Date(entry.date);
+      const dateStr = entryDate.toISOString().split('T')[0];
+
+      // Get current effective mobilization for this employee on this date
+      const currentMobilizations = await this.mobilizationRepository.find({
+        where: {
+          employeeId: entry.employeeId,
+          actionDate: LessThanOrEqual(entryDate),
+        },
+        relations: ['mobilizedTrade'],
+        order: { actionDate: 'DESC', createdAt: 'DESC' },
+      });
+
+      if (currentMobilizations.length === 0) {
+        this.logger.warn(
+          `No mobilization found for employee ${entry.employeeId} on date ${dateStr}. Cannot auto-sync.`,
+        );
+        return;
+      }
+
+      const currentMob = currentMobilizations[0];
+
+      // Check if there's already a mobilization record for this exact date
+      const exactDateMob = currentMobilizations.find((m) => {
+        const mobDateStr = new Date(m.actionDate).toISOString().split('T')[0];
+        return mobDateStr === dateStr;
+      });
+
+      // If job status is different, create/update mobilization
+      if (exactDateMob) {
+        // Mobilization exists for this date - update it if status changed
+        if (exactDateMob.jobStatus !== entry.jobStatus) {
+          exactDateMob.jobStatus = entry.jobStatus as JobStatus;
+          exactDateMob.updatedBy = createdBy;
+          await this.mobilizationRepository.save(exactDateMob);
+          this.logger.log(
+            `Updated mobilization for employee ${entry.employeeId} on ${dateStr}: ${entry.jobStatus}`,
+          );
+        }
+      } else {
+        // No mobilization for this exact date - check if we need to create one
+        if (currentMob.jobStatus !== entry.jobStatus) {
+          // Create new mobilization record for this date with the new status
+          const newMob = this.mobilizationRepository.create({
+            employeeId: entry.employeeId,
+            mobilizedTradeId: currentMob.mobilizedTradeId,
+            projectId: projectId,
+            mobStatus: MobStatus.MOBILIZED,
+            jobStatus: entry.jobStatus as JobStatus,
+            actionDate: entryDate,
+            notes: `Auto-synced from timesheet: ${entry.notes || ''}`.trim(),
+            createdBy,
+          });
+
+          await this.mobilizationRepository.save(newMob);
+          this.logger.log(
+            `Created mobilization for employee ${entry.employeeId} on ${dateStr}: ${entry.jobStatus}`,
+          );
+        }
+      }
+    } catch (error) {
+      // Log error but don't fail the timesheet save
+      this.logger.error(
+        `Failed to sync mobilization for employee ${entry.employeeId}: ${error.message}`,
+      );
+    }
   }
 
   /**

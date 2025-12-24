@@ -3,14 +3,6 @@ import { BaseEntity } from '../../../common/entities';
 import { Client } from '../../clients/entities/client.entity';
 import { ProjectSkill } from '../../project-skills/entities/project-skill.entity';
 
-export enum ProjectStatus {
-  PLANNED = 'planned',
-  ONGOING = 'ongoing',
-  ON_HOLD = 'on_hold',
-  COMPLETED = 'completed',
-  CANCELLED = 'cancelled',
-}
-
 export enum ProjectFAT {
   ADAA = 'ADAA',
   CLIENT = 'CLIENT',
@@ -24,13 +16,6 @@ export class Project extends BaseEntity {
   @Column({ nullable: true })
   location: string;
 
-  @Column({
-    type: 'enum',
-    enum: ProjectStatus,
-    default: ProjectStatus.PLANNED,
-  })
-  status: ProjectStatus;
-
   @Column({ type: 'text', nullable: true })
   notes: string;
 
@@ -40,6 +25,9 @@ export class Project extends BaseEntity {
     nullable: true,
   })
   fat: ProjectFAT;
+
+  @Column({ type: 'jsonb', nullable: true })
+  offDays: string[];
 
   @ManyToOne(() => Client, (client) => client.projects, { eager: false })
   @JoinColumn({ name: 'clientId' })

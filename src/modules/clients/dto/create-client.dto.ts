@@ -1,4 +1,5 @@
-import { IsString, IsOptional, IsEmail, IsNotEmpty } from 'class-validator';
+import { IsString, IsOptional, IsEmail, IsNotEmpty, IsIn } from 'class-validator';
+import { PaymentTerms } from '../entities/client.entity';
 
 export class CreateClientDto {
   @IsString()
@@ -24,6 +25,15 @@ export class CreateClientDto {
   @IsString()
   @IsOptional()
   notes?: string;
+
+  @IsString()
+  @IsOptional()
+  @IsIn([PaymentTerms.DAYS_15, PaymentTerms.DAYS_30, PaymentTerms.DAYS_45, PaymentTerms.DAYS_60])
+  paymentTerms?: PaymentTerms;
+
+  @IsString()
+  @IsOptional()
+  trn?: string;
 }
 
 

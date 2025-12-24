@@ -171,22 +171,56 @@ export class EmployeesService {
   private translateDatabaseError(error: any): string {
     const message = error.message || '';
     const code = error.code || '';
+    const detail = error.detail || '';
 
     // Handle duplicate key errors
     if (code === '23505' || message.includes('duplicate key')) {
-      if (message.includes('UQ_a8de3ddfd53ca6daf6ba8dd6b93')) {
-        return 'Employee with this ADAA Employee Code already exists';
+      // Extract the duplicated value from the error detail if available
+      let duplicateValue = '';
+      const valueMatch = detail.match(/Key \(.*?\)=\((.*?)\)/);
+      if (valueMatch && valueMatch[1]) {
+        duplicateValue = ` (${valueMatch[1]})`;
       }
-      if (message.includes('adaa_emp_code')) {
-        return 'Employee with this ADAA Employee Code already exists';
+
+      // Check which field is causing the duplicate
+      if (message.includes('UQ_a8de3ddfd53ca6daf6ba8dd6b93') || message.includes('adaa_emp_code')) {
+        return `Duplicate ADAA Employee Code${duplicateValue}. This code already exists in the system.`;
       }
       if (message.includes('emirates_id')) {
-        return 'Employee with this Emirates ID already exists';
+        return `Duplicate Emirates ID${duplicateValue}. This Emirates ID already exists in the system.`;
       }
-      if (message.includes('pp_no') || message.includes('passport')) {
-        return 'Employee with this Passport Number already exists';
+      if (message.includes('pp_no')) {
+        return `Duplicate Passport Number${duplicateValue}. This passport number already exists in the system.`;
       }
-      return 'This employee record already exists in the system';
+      if (message.includes('work_permit_no')) {
+        return `Duplicate Work Permit Number${duplicateValue}. This work permit number already exists in the system.`;
+      }
+      if (message.includes('personal_code')) {
+        return `Duplicate Personal Code${duplicateValue}. This personal code already exists in the system.`;
+      }
+      
+      // If we can't determine the specific field, try to extract it from the constraint name
+      const constraintMatch = message.match(/constraint "([^"]+)"/);
+      if (constraintMatch) {
+        const constraint = constraintMatch[1];
+        if (constraint.includes('adaa_emp_code')) {
+          return `Duplicate ADAA Employee Code${duplicateValue}. This code already exists.`;
+        }
+        if (constraint.includes('emirates_id')) {
+          return `Duplicate Emirates ID${duplicateValue}. This Emirates ID already exists.`;
+        }
+        if (constraint.includes('pp_no')) {
+          return `Duplicate Passport Number${duplicateValue}. This passport number already exists.`;
+        }
+        if (constraint.includes('work_permit_no')) {
+          return `Duplicate Work Permit Number${duplicateValue}. This work permit number already exists.`;
+        }
+        if (constraint.includes('personal_code')) {
+          return `Duplicate Personal Code${duplicateValue}. This personal code already exists.`;
+        }
+      }
+
+      return `Duplicate entry found${duplicateValue}. Please check for duplicate ADAA Code, Passport Number, Emirates ID, Work Permit Number, or Personal Code.`;
     }
 
     // Handle foreign key constraint errors
@@ -196,7 +230,9 @@ export class EmployeesService {
 
     // Handle null constraint errors
     if (code === '23502' || message.includes('null value')) {
-      return 'Required field is missing';
+      const columnMatch = message.match(/column "([^"]+)"/);
+      const columnName = columnMatch ? columnMatch[1] : 'unknown field';
+      return `Required field is missing: ${columnName}`;
     }
 
     // Handle check constraint errors
@@ -233,9 +269,106 @@ export class EmployeesService {
       throw new BadRequestException('No data found in Excel file');
     }
 
+    // First pass: Check for duplicates within the Excel file itself
+    const uniqueFields = {
+      adaa_emp_code: new Map<string, number>(),
+      pp_no: new Map<string, number>(),
+      emirates_id: new Map<string, number>(),
+      work_permit_no: new Map<string, number>(),
+      personal_code: new Map<string, number>(),
+    };
+
+    for (let i = 0; i < validation.data.length; i++) {
+      const row = validation.data[i];
+      const rowNumber = i + 2;
+      const mappedData = ExcelValidatorUtil.mapRowToEmployee(row);
+
+      // Check each unique field for duplicates within the file
+      if (mappedData.adaa_emp_code) {
+        if (uniqueFields.adaa_emp_code.has(mappedData.adaa_emp_code)) {
+          result.failed++;
+          result.errors.push({
+            row: rowNumber,
+            employee: mappedData.name || 'Unknown',
+            errors: [
+              `Duplicate ADAA Employee Code (${mappedData.adaa_emp_code}) found in Excel file at rows ${uniqueFields.adaa_emp_code.get(mappedData.adaa_emp_code)} and ${rowNumber}`,
+            ],
+          });
+          continue;
+        }
+        uniqueFields.adaa_emp_code.set(mappedData.adaa_emp_code, rowNumber);
+      }
+
+      if (mappedData.pp_no) {
+        if (uniqueFields.pp_no.has(mappedData.pp_no)) {
+          result.failed++;
+          result.errors.push({
+            row: rowNumber,
+            employee: mappedData.name || 'Unknown',
+            errors: [
+              `Duplicate Passport Number (${mappedData.pp_no}) found in Excel file at rows ${uniqueFields.pp_no.get(mappedData.pp_no)} and ${rowNumber}`,
+            ],
+          });
+          continue;
+        }
+        uniqueFields.pp_no.set(mappedData.pp_no, rowNumber);
+      }
+
+      if (mappedData.emirates_id) {
+        if (uniqueFields.emirates_id.has(mappedData.emirates_id)) {
+          result.failed++;
+          result.errors.push({
+            row: rowNumber,
+            employee: mappedData.name || 'Unknown',
+            errors: [
+              `Duplicate Emirates ID (${mappedData.emirates_id}) found in Excel file at rows ${uniqueFields.emirates_id.get(mappedData.emirates_id)} and ${rowNumber}`,
+            ],
+          });
+          continue;
+        }
+        uniqueFields.emirates_id.set(mappedData.emirates_id, rowNumber);
+      }
+
+      if (mappedData.work_permit_no) {
+        if (uniqueFields.work_permit_no.has(mappedData.work_permit_no)) {
+          result.failed++;
+          result.errors.push({
+            row: rowNumber,
+            employee: mappedData.name || 'Unknown',
+            errors: [
+              `Duplicate Work Permit Number (${mappedData.work_permit_no}) found in Excel file at rows ${uniqueFields.work_permit_no.get(mappedData.work_permit_no)} and ${rowNumber}`,
+            ],
+          });
+          continue;
+        }
+        uniqueFields.work_permit_no.set(mappedData.work_permit_no, rowNumber);
+      }
+
+      if (mappedData.personal_code) {
+        if (uniqueFields.personal_code.has(mappedData.personal_code)) {
+          result.failed++;
+          result.errors.push({
+            row: rowNumber,
+            employee: mappedData.name || 'Unknown',
+            errors: [
+              `Duplicate Personal Code (${mappedData.personal_code}) found in Excel file at rows ${uniqueFields.personal_code.get(mappedData.personal_code)} and ${rowNumber}`,
+            ],
+          });
+          continue;
+        }
+        uniqueFields.personal_code.set(mappedData.personal_code, rowNumber);
+      }
+    }
+
+    // Second pass: Import the valid rows
     for (let i = 0; i < validation.data.length; i++) {
       const row = validation.data[i];
       const rowNumber = i + 2; // +2 because Excel is 1-indexed and has header row
+
+      // Skip rows that already failed validation in first pass
+      if (result.errors.some((err) => err.row === rowNumber)) {
+        continue;
+      }
 
       try {
         // Map Excel row to employee data

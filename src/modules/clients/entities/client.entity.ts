@@ -2,6 +2,13 @@ import { Entity, Column, OneToMany } from 'typeorm';
 import { BaseEntity } from '../../../common/entities';
 import { Project } from '../../projects/entities/project.entity';
 
+export enum PaymentTerms {
+  DAYS_15 = '15',
+  DAYS_30 = '30',
+  DAYS_45 = '45',
+  DAYS_60 = '60',
+}
+
 @Entity('clients')
 export class Client extends BaseEntity {
   @Column()
@@ -21,6 +28,16 @@ export class Client extends BaseEntity {
 
   @Column({ type: 'text', nullable: true })
   notes: string;
+
+  @Column({
+    type: 'enum',
+    enum: PaymentTerms,
+    nullable: true,
+  })
+  paymentTerms: PaymentTerms;
+
+  @Column({ nullable: true })
+  trn: string;
 
   @OneToMany(() => Project, (project) => project.client)
   projects: Project[];

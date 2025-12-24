@@ -16,9 +16,6 @@ export const REQUIRED_HEADERS = [
   'DOB',
   'NATIONALITY',
   'PP EXPIRY',
-  'PP OUT / DATE',
-  'PP IN / DATE',
-  'PP ISSUE REASON',
   'VISA EXPIRY',
   'EID NO',
   'Emirates ID Expiry Date',
@@ -29,8 +26,6 @@ export const REQUIRED_HEADERS = [
   'TOTAL SALARY',
   'CONTACT NO',
   'PERSONAL CODE',
-  'WORK PERMENT NO',
-  'WORK PERMENT EXPIRY',
   'WORK PERMIT',
   'WP EXPIRY',
 ];
@@ -137,33 +132,36 @@ export class ExcelValidatorUtil {
    * @returns Mapped employee data with trade
    */
   static mapRowToEmployee(row: any): any {
+    // Helper function to convert empty strings to null for unique fields
+    const toNullIfEmpty = (value: any): string | null => {
+      const trimmed = value?.toString().trim();
+      return trimmed && trimmed.length > 0 ? trimmed : null;
+    };
+
     return {
       // Mapped fields (existing in DB)
       adaa_emp_code: row['ADAA EMP CODE']?.toString().trim() || '',
       name: row['NAME']?.toString().trim() || '',
       dob: this.excelDateToISO(row['DOB']),
-      pp_no: row['PP No']?.toString().trim() || null,
+      pp_no: toNullIfEmpty(row['PP No']),
       pp_expiry: this.excelDateToISO(row['PP EXPIRY']),
-      nationality: row['NATIONALITY']?.toString().trim() || null,
-      emirates_id: row['EID NO']?.toString().trim() || null,
+      nationality: toNullIfEmpty(row['NATIONALITY']),
+      emirates_id: toNullIfEmpty(row['EID NO']),
       emirates_id_expiry: this.excelDateToISO(row['Emirates ID Expiry Date']),
       visa_expiry: this.excelDateToISO(row['VISA EXPIRY']),
-      work_permit_no: row['WORK PERMIT']?.toString().trim() || null,
+      work_permit_no: toNullIfEmpty(row['WORK PERMIT']),
       work_permit_expiry: this.excelDateToISO(row['WP EXPIRY']),
-      personal_code: row['PERSONAL CODE']?.toString().trim() || null,
-      contact_no: row['CONTACT NO']?.toString().trim() || null,
+      personal_code: toNullIfEmpty(row['PERSONAL CODE']),
+      contact_no: toNullIfEmpty(row['CONTACT NO']),
       status: 'active', // Default status
       date_of_joining: this.excelDateToISO(row['DOJ']),
       date_of_arrival: null, // Not in Excel
 
       // Special handling for trade (will be processed separately)
-      trade: row['TRADE']?.toString().trim() || null,
+      trade: toNullIfEmpty(row['TRADE']),
 
       // Additional fields (accepted but not saved to DB yet)
       _additionalData: {
-        pp_out_date: this.excelDateToISO(row['PP OUT / DATE']),
-        pp_in_date: this.excelDateToISO(row['PP IN / DATE']),
-        pp_issue_reason: row['PP ISSUE REASON']?.toString().trim() || null,
         basic_salary: row['BASIC SALARY']
           ? parseFloat(row['BASIC SALARY'].toString())
           : null,
@@ -177,8 +175,6 @@ export class ExcelValidatorUtil {
         total_salary: row['TOTAL SALARY']
           ? parseFloat(row['TOTAL SALARY'].toString())
           : null,
-        work_perment_no: row['WORK PERMENT NO']?.toString().trim() || null,
-        work_perment_expiry: this.excelDateToISO(row['WORK PERMENT EXPIRY']),
       },
     };
   }
@@ -198,9 +194,6 @@ export class ExcelValidatorUtil {
         DOB: '1990-01-01',
         NATIONALITY: 'Indian',
         'PP EXPIRY': '2025-12-31',
-        'PP OUT / DATE': '2024-02-01',
-        'PP IN / DATE': '2024-02-15',
-        'PP ISSUE REASON': 'Renewal',
         'VISA EXPIRY': '2025-06-30',
         'EID NO': '784-1990-1234567-1',
         'Emirates ID Expiry Date': '2025-12-31',
@@ -211,8 +204,6 @@ export class ExcelValidatorUtil {
         'TOTAL SALARY': '2800',
         'CONTACT NO': '+971501234567',
         'PERSONAL CODE': 'PC001',
-        'WORK PERMENT NO': '',
-        'WORK PERMENT EXPIRY': '',
         'WORK PERMIT': 'WP123456',
         'WP EXPIRY': '2025-06-30',
       },
@@ -252,9 +243,6 @@ export class ExcelValidatorUtil {
         'PP EXPIRY': emp.pp_expiry
           ? new Date(emp.pp_expiry).toISOString().split('T')[0]
           : '',
-        'PP OUT / DATE': '', // Not in DB yet
-        'PP IN / DATE': '', // Not in DB yet
-        'PP ISSUE REASON': '', // Not in DB yet
         'VISA EXPIRY': emp.visa_expiry
           ? new Date(emp.visa_expiry).toISOString().split('T')[0]
           : '',
@@ -269,8 +257,6 @@ export class ExcelValidatorUtil {
         'TOTAL SALARY': '', // Not in DB yet
         'CONTACT NO': emp.contact_no || '',
         'PERSONAL CODE': emp.personal_code || '',
-        'WORK PERMENT NO': '', // Not in DB yet
-        'WORK PERMENT EXPIRY': '', // Not in DB yet
         'WORK PERMIT': emp.work_permit_no || '',
         'WP EXPIRY': emp.work_permit_expiry
           ? new Date(emp.work_permit_expiry).toISOString().split('T')[0]

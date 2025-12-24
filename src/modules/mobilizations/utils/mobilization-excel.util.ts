@@ -144,41 +144,65 @@ export class MobilizationExcelUtil {
   /**
    * Maps Excel row data to mobilization data
    * @param row Excel row
-   * @returns Mapped mobilization data
+   * @returns Mapped mobilization data with validation info
    */
   static mapRowToMobilization(row: any): any {
+    const originalStatusValue = row['STATUS']?.toString().trim() || '';
+    const originalMobDemValue = row['MOB-DEM']?.toString().trim() || '';
+
     // Map MOB-DEM to mobStatus
-    const mobDemValue = row['MOB-DEM']?.toString().trim().toLowerCase() || '';
+    const mobDemValue = originalMobDemValue.toLowerCase();
+    let mobStatus: string | null = null;
+    let mobStatusValid = false;
+
     // Use exact match to avoid "demobilized" matching "mobilized"
-    const mobStatus = mobDemValue === 'mobilized' ? 'mobilized' : 'demobilized';
+    if (mobDemValue === 'mobilized') {
+      mobStatus = 'mobilized';
+      mobStatusValid = true;
+    } else if (mobDemValue === 'demobilized') {
+      mobStatus = 'demobilized';
+      mobStatusValid = true;
+    }
 
-    // Map STATUS to jobStatus
-    const statusValue = row['STATUS']?.toString().trim().toLowerCase() || '';
-    let jobStatus = 'active'; // Default
+    // Map STATUS to jobStatus with strict validation
+    const statusValue = originalStatusValue.toLowerCase();
+    let jobStatus: string | null = null;
+    let jobStatusValid = false;
 
-    if (
+    // Check for valid status values (case-insensitive, partial match for flexibility)
+    if (statusValue.includes('active')) {
+      jobStatus = 'active';
+      jobStatusValid = true;
+    } else if (
       statusValue.includes('vacation') ||
       statusValue.includes('on vacation')
     ) {
       jobStatus = 'on_vacation';
+      jobStatusValid = true;
     } else if (statusValue.includes('cancel')) {
       jobStatus = 'cancelled';
+      jobStatusValid = true;
     } else if (statusValue.includes('abscond')) {
       jobStatus = 'absconded';
-    } else if (statusValue.includes('absent')) {
-      jobStatus = 'absent';
+      jobStatusValid = true;
     } else if (statusValue.includes('sick')) {
       jobStatus = 'sick_leave';
+      jobStatusValid = true;
     } else if (statusValue.includes('casual')) {
       jobStatus = 'casual_leave';
+      jobStatusValid = true;
     } else if (statusValue.includes('notice')) {
       jobStatus = 'notice_period';
+      jobStatusValid = true;
     } else if (statusValue.includes('resign')) {
       jobStatus = 'resigned';
+      jobStatusValid = true;
+    } else if (statusValue.includes('absent')) {
+      jobStatus = 'absent';
+      jobStatusValid = true;
     } else if (statusValue.includes('idle')) {
       jobStatus = 'idle';
-    } else if (statusValue.includes('active')) {
-      jobStatus = 'active';
+      jobStatusValid = true;
     }
 
     // Get mobilized trade
@@ -197,6 +221,14 @@ export class MobilizationExcelUtil {
       jobStatus,
       actionDate: this.excelDateToISO(row['DATE']),
       notes: null,
+
+      // Validation info
+      _validation: {
+        originalStatus: originalStatusValue,
+        originalMobDem: originalMobDemValue,
+        jobStatusValid,
+        mobStatusValid,
+      },
     };
   }
 
@@ -220,15 +252,58 @@ export class MobilizationExcelUtil {
         'MOBILIZED TRADE': '',
         CLIENT: '',
         SITE: '',
-        STATUS: 'On Vacation',
+        STATUS: 'Idle',
         'MOB-DEM': 'Demobilized',
         DATE: '2024-01-20',
       },
     ];
 
+    // Create instructions sheet with valid values
+    const instructionsData = [
+      {
+        Field: 'ID NO',
+        Description: 'Employee ADAA Code (Required)',
+        'Valid Values': 'Any valid employee code',
+      },
+      {
+        Field: 'MOBILIZED TRADE',
+        Description: 'Trade/Skill for mobilization',
+        'Valid Values': 'Any trade name',
+      },
+      {
+        Field: 'CLIENT',
+        Description: 'Client name (Required when MOB-DEM is Mobilized)',
+        'Valid Values': 'Any client name',
+      },
+      {
+        Field: 'SITE',
+        Description: 'Site/Project name (Required when MOB-DEM is Mobilized)',
+        'Valid Values': 'Any site name',
+      },
+      {
+        Field: 'STATUS',
+        Description: 'Job Status (Required)',
+        'Valid Values':
+          'Active, On Vacation, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle',
+      },
+      {
+        Field: 'MOB-DEM',
+        Description: 'Mobilization Status (Required)',
+        'Valid Values': 'Mobilized, Demobilized',
+      },
+      {
+        Field: 'DATE',
+        Description: 'Action Date (Required)',
+        'Valid Values': 'YYYY-MM-DD format (e.g., 2024-01-15)',
+      },
+    ];
+
     const worksheet = XLSX.utils.json_to_sheet(templateData);
+    const instructionsSheet = XLSX.utils.json_to_sheet(instructionsData);
+
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Mobilizations');
+    XLSX.utils.book_append_sheet(workbook, instructionsSheet, 'Instructions');
 
     // Generate buffer
     return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });

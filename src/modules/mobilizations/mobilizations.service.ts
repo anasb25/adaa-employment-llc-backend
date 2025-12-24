@@ -6,9 +6,13 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike, LessThanOrEqual } from 'typeorm';
-import { Mobilization, MobStatus } from './entities/mobilization.entity';
+import {
+  Mobilization,
+  MobStatus,
+  JobStatus,
+} from './entities/mobilization.entity';
 import { Employee } from '../employees/entities/employee.entity';
-import { Project, ProjectStatus } from '../projects/entities/project.entity';
+import { Project } from '../projects/entities/project.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { Client } from '../clients/entities/client.entity';
 import {
@@ -276,13 +280,14 @@ export class MobilizationsService {
   /**
    * Get employee's effective mobilization status on a specific date
    * Returns the most recent mobilization record on or before the given date
-   * This implements the "carry forward" logic - status remains until explicitly changed
+   * This implements smart "carry forward" logic - temporary statuses don't carry forward
    */
   async getEffectiveStatusOnDate(
     employeeId: number,
     date: Date,
   ): Promise<Mobilization | null> {
-    return await this.mobilizationRepository.findOne({
+    // Get all mobilizations for this employee up to the date
+    const allMobilizations = await this.mobilizationRepository.find({
       where: {
         employeeId,
         actionDate: LessThanOrEqual(date),
@@ -290,6 +295,13 @@ export class MobilizationsService {
       relations: ['employee', 'project', 'project.client', 'mobilizedTrade'],
       order: { actionDate: 'DESC', createdAt: 'DESC' },
     });
+
+    if (allMobilizations.length === 0) {
+      return null;
+    }
+
+    // Apply smart carry-forward logic
+    return this.applySmartCarryForward(allMobilizations, date);
   }
 
   /**
@@ -302,8 +314,9 @@ export class MobilizationsService {
   }
 
   /**
-   * Get effective status for all employees on a specific date (carry-forward logic)
+   * Get effective status for all employees on a specific date (smart carry-forward logic)
    * Returns the most recent mobilization for each employee on or before the given date
+   * Temporary statuses (absent, sick_leave, casual_leave) don't carry forward
    */
   async getEffectiveStatusForAllEmployeesOnDate(
     date: Date,
@@ -320,23 +333,85 @@ export class MobilizationsService {
       },
     });
 
-    // Group by employee and keep only the most recent one for each (carry-forward)
-    const employeeLatestMap = new Map<number, Mobilization>();
+    // Group by employee
+    const employeeMobilizationsMap = new Map<number, Mobilization[]>();
 
     for (const mobilization of allMobilizations) {
-      if (!employeeLatestMap.has(mobilization.employeeId)) {
-        employeeLatestMap.set(mobilization.employeeId, mobilization);
+      if (!employeeMobilizationsMap.has(mobilization.employeeId)) {
+        employeeMobilizationsMap.set(mobilization.employeeId, []);
+      }
+      employeeMobilizationsMap.get(mobilization.employeeId)!.push(mobilization);
+    }
+
+    // Apply smart carry-forward logic for each employee
+    const effectiveMobilizations: Mobilization[] = [];
+
+    for (const [employeeId, mobilizations] of employeeMobilizationsMap.entries()) {
+      const effective = this.applySmartCarryForward(mobilizations, date);
+      if (effective) {
+        effectiveMobilizations.push(effective);
       }
     }
 
-    // Convert back to array and sort by employee name
-    const result = Array.from(employeeLatestMap.values()).sort((a, b) => {
+    // Sort by employee name
+    const result = effectiveMobilizations.sort((a, b) => {
       const nameA = a.employee?.name || '';
       const nameB = b.employee?.name || '';
       return nameA.localeCompare(nameB);
     });
 
     return result;
+  }
+
+  /**
+   * Apply smart carry-forward logic to mobilization records
+   * Temporary statuses (absent, sick_leave, casual_leave) don't carry forward
+   */
+  private applySmartCarryForward(
+    mobilizations: Mobilization[],
+    targetDate: Date,
+  ): Mobilization | null {
+    if (mobilizations.length === 0) {
+      return null;
+    }
+
+    const latestMob = mobilizations[0]; // Already sorted by date DESC
+    const latestMobDate = new Date(latestMob.actionDate);
+    const targetDateStr = targetDate.toISOString().split('T')[0];
+    const latestMobDateStr = latestMobDate.toISOString().split('T')[0];
+
+    // List of temporary one-day statuses that should not carry forward
+    const temporaryStatuses: string[] = ['absent', 'sick_leave', 'casual_leave'];
+
+    // If the latest mobilization is on the exact date we're looking at -> use it
+    if (latestMobDateStr === targetDateStr) {
+      return latestMob;
+    }
+
+    // Latest mobilization is before the target date
+    if (temporaryStatuses.includes(latestMob.jobStatus)) {
+      // It's a temporary status - find the non-temporary status before it
+      const nonTemporaryMob = mobilizations.find(
+        (m, index) => index > 0 && !temporaryStatuses.includes(m.jobStatus),
+      );
+
+      if (nonTemporaryMob) {
+        // Return a copy with the non-temporary job status but keep other fields from latest
+        return {
+          ...latestMob,
+          jobStatus: nonTemporaryMob.jobStatus as JobStatus,
+        };
+      }
+
+      // If no non-temporary status found before, default to 'idle'
+      return {
+        ...latestMob,
+        jobStatus: JobStatus.IDLE,
+      };
+    }
+
+    // Latest mobilization is a permanent status - carry it forward
+    return latestMob;
   }
 
   /**
@@ -558,11 +633,19 @@ export class MobilizationsService {
         if (!mappedData.actionDate) {
           validationErrors.push('DATE is required');
         }
-        if (!mappedData.mobStatus) {
-          validationErrors.push('MOB-DEM is required');
+
+        // Validate MOB-DEM field
+        if (!mappedData._validation.mobStatusValid) {
+          validationErrors.push(
+            `Invalid MOB-DEM value: "${mappedData._validation.originalMobDem}". Valid values are: "Mobilized" or "Demobilized"`,
+          );
         }
-        if (!mappedData.jobStatus) {
-          validationErrors.push('STATUS is required');
+
+        // Validate STATUS field
+        if (!mappedData._validation.jobStatusValid) {
+          validationErrors.push(
+            `Invalid STATUS value: "${mappedData._validation.originalStatus}". Valid values are: Active, On Vacation, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle`,
+          );
         }
 
         // Validate CLIENT and SITE when MOB-DEM is "Mobilized"
@@ -676,7 +759,6 @@ export class MobilizationsService {
             project = this.projectRepository.create({
               name: mappedData.siteName,
               clientId: client.id,
-              status: ProjectStatus.ONGOING,
             });
             project = await this.projectRepository.save(project);
           }
