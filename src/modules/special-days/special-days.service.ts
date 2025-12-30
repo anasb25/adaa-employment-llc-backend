@@ -10,6 +10,7 @@ import { CreateSpecialDayDto } from './dto/create-special-day.dto';
 import { UpdateSpecialDayDto } from './dto/update-special-day.dto';
 import { SpecialDayFiltersDto } from './dto/special-day-filters.dto';
 import { formatDateOnly } from '../../common/utils/date.util';
+import { ProjectSpecialDayRate } from '../projects/entities/project-special-day-rate.entity';
 
 export interface SpecialDayRates {
   isSpecialDay: boolean;
@@ -26,6 +27,8 @@ export class SpecialDaysService {
   constructor(
     @InjectRepository(SpecialDay)
     private specialDayRepository: Repository<SpecialDay>,
+    @InjectRepository(ProjectSpecialDayRate)
+    private projectSpecialDayRateRepository: Repository<ProjectSpecialDayRate>,
   ) {}
 
   async create(
@@ -82,7 +85,7 @@ export class SpecialDaysService {
     // Filter by year
     if (filters?.year) {
       queryBuilder.andWhere(
-        "EXTRACT(YEAR FROM specialDay.startDate) = :year OR EXTRACT(YEAR FROM specialDay.endDate) = :year",
+        'EXTRACT(YEAR FROM specialDay.startDate) = :year OR EXTRACT(YEAR FROM specialDay.endDate) = :year',
         { year: filters.year },
       );
     }
@@ -113,10 +116,11 @@ export class SpecialDaysService {
 
     // Validate date range
     const startDate = updateDto.startDate || specialDay.startDate;
-    const endDate = updateDto.endDate !== undefined 
-      ? updateDto.endDate || startDate // If explicitly set to empty, use startDate
-      : specialDay.endDate; // If not provided, keep existing
-      
+    const endDate =
+      updateDto.endDate !== undefined
+        ? updateDto.endDate || startDate // If explicitly set to empty, use startDate
+        : specialDay.endDate; // If not provided, keep existing
+
     if (endDate && startDate > endDate) {
       throw new BadRequestException('End date must be after start date');
     }
@@ -141,9 +145,12 @@ export class SpecialDaysService {
     const specialDay = await this.specialDayRepository
       .createQueryBuilder('specialDay')
       .where('specialDay.isActive = :isActive', { isActive: true })
-      .andWhere(':date BETWEEN specialDay.startDate AND COALESCE(specialDay.endDate, specialDay.startDate)', {
-        date: dateStr,
-      })
+      .andWhere(
+        ':date BETWEEN specialDay.startDate AND COALESCE(specialDay.endDate, specialDay.startDate)',
+        {
+          date: dateStr,
+        },
+      )
       .getOne();
 
     return specialDay;
@@ -176,8 +183,15 @@ export class SpecialDaysService {
   /**
    * Get special day rates and rules for a specific date
    * This is the main utility method to be used by other modules (mobilizations, timesheets, billing)
+   *
+   * @param date - The date to check
+   * @param projectId - Optional project ID. If provided, uses project-specific client rate multiplier if available, otherwise falls back to global rate.
+   *                    Employee rates always come from the global special day.
    */
-  async getSpecialDayRates(date: Date): Promise<SpecialDayRates> {
+  async getSpecialDayRates(
+    date: Date,
+    projectId?: number,
+  ): Promise<SpecialDayRates> {
     const specialDay = await this.isSpecialDay(date);
 
     if (!specialDay) {
@@ -192,11 +206,28 @@ export class SpecialDaysService {
       };
     }
 
+    // Get client rate multiplier - only from project-specific rates
+    let clientRateMultiplier = 1.0; // Default to no multiplier if not set for project
+    if (projectId) {
+      const projectRate = await this.projectSpecialDayRateRepository.findOne({
+        where: {
+          projectId,
+          specialDayId: specialDay.id,
+        },
+      });
+      if (projectRate) {
+        clientRateMultiplier = Number(projectRate.clientRateMultiplier);
+      }
+    }
+
+    // Employee rate multiplier always comes from global special day
+    const employeeRateMultiplier = Number(specialDay.employeeRateMultiplier);
+
     return {
       isSpecialDay: true,
       specialDay,
-      clientRateMultiplier: Number(specialDay.clientRateMultiplier),
-      employeeRateMultiplier: Number(specialDay.employeeRateMultiplier),
+      clientRateMultiplier,
+      employeeRateMultiplier,
       isDefaultOff: specialDay.isDefaultOff,
       isMandatoryOff: specialDay.dayType === SpecialDayType.MANDATORY_OFF,
       dayType: specialDay.dayType,
@@ -230,8 +261,10 @@ export class SpecialDaysService {
         ratesMap.set(dateStr, {
           isSpecialDay: true,
           specialDay: applicableSpecialDay,
-          clientRateMultiplier: Number(applicableSpecialDay.clientRateMultiplier),
-          employeeRateMultiplier: Number(applicableSpecialDay.employeeRateMultiplier),
+          clientRateMultiplier: 1.0, // Default, project-specific rates are handled separately
+          employeeRateMultiplier: Number(
+            applicableSpecialDay.employeeRateMultiplier,
+          ),
           isDefaultOff: applicableSpecialDay.isDefaultOff,
           isMandatoryOff:
             applicableSpecialDay.dayType === SpecialDayType.MANDATORY_OFF,
@@ -255,4 +288,3 @@ export class SpecialDaysService {
     return ratesMap;
   }
 }
-

@@ -45,9 +45,6 @@ export class SpecialDay extends BaseEntity {
   dayType: SpecialDayType;
 
   @Column({ type: 'decimal', precision: 5, scale: 2, default: 1.0 })
-  clientRateMultiplier: number; // e.g., 1.10 = 110% (10% extra charge to client)
-
-  @Column({ type: 'decimal', precision: 5, scale: 2, default: 1.0 })
   employeeRateMultiplier: number; // e.g., 1.05 = 105% (5% extra pay to employee)
 
   @Column({ default: false })

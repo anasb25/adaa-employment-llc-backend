@@ -1,4 +1,4 @@
-import { IsString, IsBoolean, IsOptional, IsInt, Min } from 'class-validator';
+import { IsString, IsBoolean, IsOptional, IsInt, Min, IsNumber } from 'class-validator';
 
 export class CreateRateVariantDto {
   @IsString()
@@ -24,6 +24,21 @@ export class CreateRateVariantDto {
   @IsOptional()
   @IsString()
   color?: string;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  employeeRateMultiplier?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  minHours?: number | null;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  maxHours?: number | null;
 }
 
 

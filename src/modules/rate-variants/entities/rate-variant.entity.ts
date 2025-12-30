@@ -20,6 +20,33 @@ export class RateVariant extends BaseEntity {
 
   @Column({ nullable: true })
   color: string; // For UI display
+
+  @Column({
+    type: 'decimal',
+    precision: 5,
+    scale: 2,
+    default: 1.0,
+    comment: 'Employee rate multiplier for this rate variant (e.g., 1.05 = 105% = 5% extra pay to employee)',
+  })
+  employeeRateMultiplier: number;
+
+  @Column({
+    type: 'decimal',
+    precision: 5,
+    scale: 2,
+    nullable: true,
+    comment: 'Minimum hours for this rate variant to apply (null = no minimum, e.g., for ">10 hours" set minHours=10)',
+  })
+  minHours: number | null;
+
+  @Column({
+    type: 'decimal',
+    precision: 5,
+    scale: 2,
+    nullable: true,
+    comment: 'Maximum hours for this rate variant to apply (null = no maximum, e.g., for "<5 hours" set maxHours=5)',
+  })
+  maxHours: number | null;
 }
 
 

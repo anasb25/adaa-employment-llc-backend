@@ -209,8 +209,12 @@ export class TimesheetsService {
             isActualMobilizationForThisDate;
 
           // Check for special days first (higher priority) - using timezone-neutral date
+          // Pass projectId to get project-specific client rate multiplier
           const specialDayRates =
-            await this.specialDaysService.getSpecialDayRates(currentDate);
+            await this.specialDaysService.getSpecialDayRates(
+              currentDate,
+              project.id,
+            );
 
           // Check if this day is a project off day
           const isProjectOffDay =
