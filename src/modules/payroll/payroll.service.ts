@@ -29,6 +29,15 @@ import { RateVariant } from '../rate-variants/entities/rate-variant.entity';
 import { SpecialDay } from '../special-days/entities/special-day.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
 import { Skill } from '../skills/entities/skill.entity';
+import { AllowanceDeductionExcelValidator } from './utils/allowance-deduction-excel-validator.util';
+
+export interface ImportResult {
+  success: boolean;
+  message: string;
+  updated: number;
+  notFound: string[];
+  errors: string[];
+}
 
 @Injectable()
 export class PayrollService {
@@ -269,7 +278,6 @@ export class PayrollService {
         baseHourlyRate: calculations.baseHourlyRate,
         totalGrossSalary: calculations.totalGrossSalary,
         allowances: undefined,
-        arrears: undefined,
         otherDeductions: undefined,
         notes: `Calculated from approved timesheet for project ${timesheetData.project.name}`,
       };
@@ -506,18 +514,48 @@ export class PayrollService {
       string,
       { hours: number; rateMultiplier: number }
     >();
-    const specialDaysBreakdown: Array<{
-      specialDayName: string;
+    const specialDaysMap = new Map<
+      string,
+      { hours: number; rateMultiplier: number }
+    >();
+    const offDaysBreakdown: Array<{
       date: string;
       hours: number;
       rateMultiplier: number;
     }> = [];
-    const offDaysBreakdown: Array<{ date: string; hours: number }> = [];
-    let idleHours = 0;
+    const idleDaysBreakdown: Array<{
+      date: string;
+      hours: number;
+      rateMultiplier: number;
+    }> = [];
+    let idleMultiplier = 0.5; // Default to 50%
+
+    // Get the "Project Off Day" variant
+    const projectOffDayVariant = await this.getProjectOffDayVariant();
+    const offDayMultiplier = projectOffDayVariant
+      ? Number(projectOffDayVariant.employeeRateMultiplier)
+      : 1.0;
+
+    // Get the "Idle" variant
+    const idleVariant = await this.getIdleVariant();
+    idleMultiplier = idleVariant
+      ? Number(idleVariant.employeeRateMultiplier)
+      : 0.5;
 
     for (const dayData of dailyHours) {
       const hours = Number(dayData.hoursWorked);
       const jobStatus = dayData.jobStatus?.toLowerCase() || '';
+
+      // Handle idle days first (before checking demobilization)
+      if (jobStatus === 'idle') {
+        totalIdleDayHours += hours;
+        idleDaysBreakdown.push({
+          date: dayData.date,
+          hours,
+          rateMultiplier: idleMultiplier,
+        });
+        continue;
+      }
 
       // Skip if no job status (before mobilization or after demobilization)
       if (!jobStatus || jobStatus === 'demobilized') {
@@ -534,13 +572,6 @@ export class PayrollService {
         continue;
       }
 
-      // Handle idle days
-      if (jobStatus === 'idle') {
-        totalIdleDayHours += hours;
-        idleHours += hours;
-        continue;
-      }
-
       const isOffDay = dayData.isOffDay; // Project-specific off days (e.g., Friday, Saturday)
 
       // Check if this is a special day
@@ -549,12 +580,18 @@ export class PayrollService {
       // If working on a special day
       if (specialDay && hours > 0) {
         const specialDayMultiplier = Number(specialDay.employeeRateMultiplier);
-        specialDaysBreakdown.push({
-          specialDayName: specialDay.name,
-          date: dayData.date,
-          hours,
-          rateMultiplier: specialDayMultiplier,
-        });
+
+        // Track by special day name (consolidate hours for the same special day)
+        const existing = specialDaysMap.get(specialDay.name);
+        if (existing) {
+          existing.hours += hours;
+        } else {
+          specialDaysMap.set(specialDay.name, {
+            hours,
+            rateMultiplier: specialDayMultiplier,
+          });
+        }
+
         totalOffdaysWorkedHours += hours;
         continue;
       }
@@ -564,6 +601,7 @@ export class PayrollService {
         offDaysBreakdown.push({
           date: dayData.date,
           hours,
+          rateMultiplier: offDayMultiplier,
         });
         totalOffdaysWorkedHours += hours;
         continue;
@@ -613,25 +651,28 @@ export class PayrollService {
         amount:
           Math.round(baseRate * data.rateMultiplier * data.hours * 100) / 100,
       })),
-      specialDays: specialDaysBreakdown.map((sd) => ({
-        specialDayName: sd.specialDayName,
-        date: sd.date,
-        hours: Math.round(sd.hours * 100) / 100,
-        rateMultiplier: sd.rateMultiplier,
-        hourlyRate: Math.round(baseRate * sd.rateMultiplier * 100) / 100,
-        amount: Math.round(baseRate * sd.rateMultiplier * sd.hours * 100) / 100,
+      specialDays: Array.from(specialDaysMap.entries()).map(([name, data]) => ({
+        specialDayName: name,
+        hours: Math.round(data.hours * 100) / 100,
+        rateMultiplier: data.rateMultiplier,
+        hourlyRate: Math.round(baseRate * data.rateMultiplier * 100) / 100,
+        amount:
+          Math.round(baseRate * data.rateMultiplier * data.hours * 100) / 100,
       })),
       offDays: offDaysBreakdown.map((od) => ({
         date: od.date,
         hours: Math.round(od.hours * 100) / 100,
-        hourlyRate: baseRate,
-        amount: Math.round(baseRate * od.hours * 100) / 100,
+        rateMultiplier: od.rateMultiplier,
+        hourlyRate: Math.round(baseRate * od.rateMultiplier * 100) / 100,
+        amount: Math.round(baseRate * od.rateMultiplier * od.hours * 100) / 100,
       })),
-      idle: {
-        hours: Math.round(idleHours * 100) / 100,
-        hourlyRate: baseRate,
-        amount: Math.round(baseRate * idleHours * 100) / 100,
-      },
+      idle: idleDaysBreakdown.map((id) => ({
+        date: id.date,
+        hours: Math.round(id.hours * 100) / 100,
+        rateMultiplier: id.rateMultiplier,
+        hourlyRate: Math.round(baseRate * id.rateMultiplier * 100) / 100,
+        amount: Math.round(baseRate * id.rateMultiplier * id.hours * 100) / 100,
+      })),
     };
 
     // Calculate total gross salary
@@ -639,7 +680,7 @@ export class PayrollService {
       hoursBreakdown.regular.reduce((sum, r) => sum + r.amount, 0) +
       hoursBreakdown.specialDays.reduce((sum, sd) => sum + sd.amount, 0) +
       hoursBreakdown.offDays.reduce((sum, od) => sum + od.amount, 0) +
-      hoursBreakdown.idle.amount;
+      hoursBreakdown.idle.reduce((sum, id) => sum + id.amount, 0);
 
     return {
       totalHours: Math.round(totalHours * 100) / 100,
@@ -672,5 +713,132 @@ export class PayrollService {
     }
 
     return null;
+  }
+
+  /**
+   * Get the "Project Off Day" variant
+   */
+  private async getProjectOffDayVariant(): Promise<RateVariant | null> {
+    return await this.rateVariantRepository.findOne({
+      where: { name: 'Project Off Day', isSystem: true },
+    });
+  }
+
+  /**
+   * Get the "Idle" variant
+   */
+  private async getIdleVariant(): Promise<RateVariant | null> {
+    return await this.rateVariantRepository.findOne({
+      where: { name: 'Idle', isSystem: true },
+    });
+  }
+
+  /**
+   * Import allowances and deductions from Excel file
+   */
+  async importAllowancesDeductions(
+    fileBuffer: Buffer,
+    month: string,
+  ): Promise<ImportResult> {
+    // Validate and parse the Excel file
+    const validation =
+      AllowanceDeductionExcelValidator.validateAndParseExcelFile(fileBuffer);
+
+    if (!validation.isValid || !validation.data) {
+      return {
+        success: false,
+        message: 'Validation failed',
+        updated: 0,
+        notFound: [],
+        errors: validation.errors,
+      };
+    }
+
+    const notFoundEmployees: string[] = [];
+    const errors: string[] = [];
+    let updatedCount = 0;
+
+    // Process each employee's allowances/deductions
+    for (const employeeData of validation.data) {
+      try {
+        // Find employee by adaa_emp_code (ID NO)
+        const employee = await this.payrollRepository.manager
+          .getRepository('employees')
+          .findOne({
+            where: { adaa_emp_code: employeeData.employeeId },
+          });
+
+        if (!employee) {
+          notFoundEmployees.push(employeeData.employeeId);
+          continue;
+        }
+
+        // Find existing payroll for this employee and month
+        let payroll = await this.payrollRepository.findOne({
+          where: {
+            employeeId: employee.id,
+            month,
+          },
+        });
+
+        if (!payroll) {
+          // Create a new payroll entry if it doesn't exist
+          payroll = this.payrollRepository.create({
+            employeeId: employee.id,
+            month,
+            totalHours: 0,
+            totalOtHours: 0,
+            totalOffdaysWorkedHours: 0,
+            totalIdleDayHours: 0,
+            absentDaysDeductible: 0,
+            allowances: {},
+            otherDeductions: {},
+            baseHourlyRate: 0,
+            totalGrossSalary: 0,
+          });
+        }
+
+        // Convert allowances array to object format
+        const allowancesObj: Record<string, number> = {};
+        employeeData.allowances.forEach((allowance) => {
+          allowancesObj[allowance.name] = allowance.value;
+        });
+
+        // Convert deductions array to object format
+        const deductionsObj: Record<string, number> = {};
+        employeeData.deductions.forEach((deduction) => {
+          deductionsObj[deduction.name] = deduction.value;
+        });
+
+        // Update allowances and deductions
+        payroll.allowances = allowancesObj;
+        payroll.otherDeductions = deductionsObj;
+
+        await this.payrollRepository.save(payroll);
+        updatedCount++;
+      } catch (error: any) {
+        errors.push(
+          `Error processing employee ${employeeData.employeeId}: ${error.message}`,
+        );
+      }
+    }
+
+    return {
+      success: errors.length === 0,
+      message:
+        errors.length === 0
+          ? `Successfully updated ${updatedCount} payroll records`
+          : `Updated ${updatedCount} records with ${errors.length} errors`,
+      updated: updatedCount,
+      notFound: notFoundEmployees,
+      errors,
+    };
+  }
+
+  /**
+   * Generate Excel template for allowances/deductions import
+   */
+  generateAllowancesDeductionsTemplate(): Buffer {
+    return AllowanceDeductionExcelValidator.generateTemplate();
   }
 }

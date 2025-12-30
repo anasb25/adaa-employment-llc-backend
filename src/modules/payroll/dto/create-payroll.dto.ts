@@ -30,10 +30,6 @@ export class CreatePayrollDto {
   allowances?: Record<string, any>;
 
   @IsOptional()
-  @IsObject()
-  arrears?: Record<string, any>;
-
-  @IsOptional()
   @IsNumber()
   absentDaysDeductible?: number;
 

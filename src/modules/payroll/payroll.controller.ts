@@ -8,7 +8,13 @@ import {
   Param,
   Query,
   ParseIntPipe,
+  UseInterceptors,
+  UploadedFile,
+  Res,
+  BadRequestException,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
+import type { Response } from 'express';
 import { PayrollService } from './payroll.service';
 import { CreatePayrollDto } from './dto/create-payroll.dto';
 import { UpdatePayrollDto } from './dto/update-payroll.dto';
@@ -117,5 +123,55 @@ export class PayrollController {
       projectId,
       month,
     );
+  }
+
+  /**
+   * Import allowances and deductions from Excel file
+   */
+  @Post('import-allowances-deductions/:month')
+  @Permissions('payroll:update')
+  @UseInterceptors(FileInterceptor('file'))
+  async importAllowancesDeductions(
+    @Param('month') month: string,
+    @UploadedFile() file: Express.Multer.File,
+  ) {
+    if (!file) {
+      throw new BadRequestException('No file uploaded');
+    }
+
+    // Validate file type
+    if (
+      !file.mimetype.includes('excel') &&
+      !file.originalname.endsWith('.xlsx')
+    ) {
+      throw new BadRequestException(
+        'Invalid file type. Please upload an Excel file (.xlsx)',
+      );
+    }
+
+    return await this.payrollService.importAllowancesDeductions(
+      file.buffer,
+      month,
+    );
+  }
+
+  /**
+   * Download Excel template for allowances/deductions import
+   */
+  @Get('template/allowances-deductions')
+  @Permissions('payroll:read')
+  async downloadAllowancesDeductionsTemplate(@Res() res: Response) {
+    const buffer = this.payrollService.generateAllowancesDeductionsTemplate();
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename=allowances_deductions_template.xlsx',
+    );
+
+    res.send(buffer);
   }
 }

@@ -178,20 +178,26 @@ export class TimesheetsService {
         // Determine if employee should appear in timesheet for this date
         // Only show if:
         // 1. Currently mobilized to this project, OR
-        // 2. Has saved timesheet entries with hours > 0
+        // 2. Has saved timesheet entries with hours > 0, OR
+        // 3. Has idle status (idle employees should show even if demobilized)
         const isMobilizedToProject =
           effectiveMob &&
           effectiveMob.mobStatus === MobStatus.MOBILIZED &&
           effectiveMob.projectId === project.id;
 
+        const isIdleEmployee =
+          effectiveMob &&
+          effectiveMob.jobStatus === JobStatus.IDLE &&
+          effectiveMob.projectId === project.id;
+
         const hasSavedHours =
           existingEntry && Number(existingEntry.hoursWorked) > 0;
 
-        // Only include dates where employee is mobilized OR has saved work hours
-        if (isMobilizedToProject || hasSavedHours) {
-          // If demobilized but has saved hours, show those hours
-          // If demobilized with no saved hours, don't show the day at all
-          if (!isMobilizedToProject && !hasSavedHours) {
+        // Only include dates where employee is mobilized OR idle OR has saved work hours
+        if (isMobilizedToProject || isIdleEmployee || hasSavedHours) {
+          // If demobilized but has saved hours or is idle, show those hours
+          // If demobilized with no saved hours and not idle, don't show the day at all
+          if (!isMobilizedToProject && !hasSavedHours && !isIdleEmployee) {
             continue; // Skip this day
           }
 
@@ -203,10 +209,12 @@ export class TimesheetsService {
           const isActualMobilizationForThisDate =
             effectiveMobDateStr === dateStr;
 
-          // If this is the first day of demobilization, show "demobilized" status
+          // If this is the first day of demobilization (but not idle), show "demobilized" status
+          // Idle employees should show with their idle hours, not as demobilized
           const isDemobilizationDay =
             effectiveMob &&
             effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
+            effectiveMob.jobStatus !== JobStatus.IDLE &&
             isActualMobilizationForThisDate;
 
           // Check for special days first (higher priority) - using timezone-neutral date
@@ -381,7 +389,7 @@ export class TimesheetsService {
       case 'off':
         return 0;
       case 'idle':
-        return 8;
+        return 10;
       default:
         return 10;
     }

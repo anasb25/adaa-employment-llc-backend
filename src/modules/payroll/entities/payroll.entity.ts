@@ -26,9 +26,6 @@ export class Payroll extends BaseEntity {
   @Column({ type: 'jsonb', nullable: true })
   allowances: Record<string, any>;
 
-  @Column({ type: 'jsonb', nullable: true })
-  arrears: Record<string, any>;
-
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   absentDaysDeductible: number;
 
@@ -50,7 +47,6 @@ export class Payroll extends BaseEntity {
     }>;
     specialDays: Array<{
       specialDayName: string;
-      date: string;
       hours: number;
       rateMultiplier: number;
       hourlyRate: number;
@@ -59,14 +55,17 @@ export class Payroll extends BaseEntity {
     offDays: Array<{
       date: string;
       hours: number;
+      rateMultiplier: number;
       hourlyRate: number;
       amount: number;
     }>;
-    idle: {
+    idle: Array<{
+      date: string;
       hours: number;
+      rateMultiplier: number;
       hourlyRate: number;
       amount: number;
-    };
+    }>;
   };
 
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })

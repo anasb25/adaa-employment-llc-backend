@@ -44,6 +44,12 @@ export class RateVariant extends BaseEntity {
     comment: 'Maximum hours for this rate variant to apply (null = no maximum, e.g., for "<5 hours" set maxHours=5)',
   })
   maxHours: number | null;
+
+  @Column({
+    default: false,
+    comment: 'System-defined variant that cannot be deleted or edited (except multiplier)',
+  })
+  isSystem: boolean;
 }
 
 

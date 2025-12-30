@@ -49,7 +49,36 @@ export class RateVariantsService {
   ): Promise<RateVariant> {
     const rateVariant = await this.findOne(id);
 
-    Object.assign(rateVariant, updateDto);
+    // For system variants, only allow updating employeeRateMultiplier
+    if (rateVariant.isSystem) {
+      const allowedFields = ['employeeRateMultiplier'];
+      const disallowedChanges: string[] = [];
+
+      // Check which fields are actually being changed
+      for (const [key, value] of Object.entries(updateDto)) {
+        if (value !== undefined && !allowedFields.includes(key)) {
+          // Check if the value is actually different from the current value
+          if (rateVariant[key] !== value) {
+            disallowedChanges.push(key);
+          }
+        }
+      }
+
+      if (disallowedChanges.length > 0) {
+        throw new BadRequestException(
+          `System variants can only have their multiplier updated. Cannot modify: ${disallowedChanges.join(', ')}`,
+        );
+      }
+
+      // Only update the allowed field
+      if (updateDto.employeeRateMultiplier !== undefined) {
+        rateVariant.employeeRateMultiplier = updateDto.employeeRateMultiplier;
+      }
+    } else {
+      // For non-system variants, update all provided fields
+      Object.assign(rateVariant, updateDto);
+    }
+
     rateVariant.updatedBy = updatedBy;
 
     return await this.rateVariantRepository.save(rateVariant);
@@ -57,6 +86,13 @@ export class RateVariantsService {
 
   async remove(id: number): Promise<void> {
     const rateVariant = await this.findOne(id);
+    
+    if (rateVariant.isSystem) {
+      throw new BadRequestException(
+        'System variants cannot be deleted',
+      );
+    }
+    
     await this.rateVariantRepository.remove(rateVariant);
   }
 }
