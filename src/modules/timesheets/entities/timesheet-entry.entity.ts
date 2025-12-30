@@ -36,6 +36,7 @@ export class TimesheetEntry extends BaseEntity {
       'resigned',
       'idle',
       'demobilized',
+      'off',
     ],
     default: 'active',
   })

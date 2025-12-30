@@ -1,6 +1,10 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between } from 'typeorm';
+import { Repository } from 'typeorm';
 import { Payroll } from './entities/payroll.entity';
 import { CreatePayrollDto } from './dto/create-payroll.dto';
 import { UpdatePayrollDto } from './dto/update-payroll.dto';
@@ -9,10 +13,11 @@ import {
   PaginationUtil,
   PaginatedResponse,
 } from '../../common/utils/pagination.util';
-import { Timesheet, TimesheetStatus } from '../timesheets/entities/timesheet.entity';
-import { TimesheetEntry } from '../timesheets/entities/timesheet-entry.entity';
-import { Mobilization } from '../mobilizations/entities/mobilization.entity';
-import { SpecialDay } from '../special-days/entities/special-day.entity';
+import {
+  Timesheet,
+  TimesheetStatus,
+} from '../timesheets/entities/timesheet.entity';
+import { TimesheetsService } from '../timesheets/timesheets.service';
 import { Project } from '../projects/entities/project.entity';
 
 @Injectable()
@@ -22,42 +27,37 @@ export class PayrollService {
     private readonly payrollRepository: Repository<Payroll>,
     @InjectRepository(Timesheet)
     private readonly timesheetRepository: Repository<Timesheet>,
-    @InjectRepository(TimesheetEntry)
-    private readonly timesheetEntryRepository: Repository<TimesheetEntry>,
-    @InjectRepository(Mobilization)
-    private readonly mobilizationRepository: Repository<Mobilization>,
-    @InjectRepository(SpecialDay)
-    private readonly specialDayRepository: Repository<SpecialDay>,
     @InjectRepository(Project)
     private readonly projectRepository: Repository<Project>,
+    private readonly timesheetsService: TimesheetsService,
   ) {}
 
   /**
    * Get all payrolls with optional filters and pagination
    */
-  async findAll(filters: PayrollFiltersDto): Promise<PaginatedResponse<Payroll>> {
+  async findAll(
+    filters: PayrollFiltersDto,
+  ): Promise<PaginatedResponse<Payroll>> {
     const { month, employeeId, page = 1, limit = 10 } = filters;
 
-    const queryBuilder = this.payrollRepository
-      .createQueryBuilder('payroll')
-      .leftJoinAndSelect('payroll.employee', 'employee')
-      .orderBy('payroll.month', 'DESC')
-      .addOrderBy('employee.name', 'ASC');
-
+    // Build where conditions
+    const where: any = {};
     if (month) {
-      queryBuilder.andWhere('payroll.month = :month', { month });
+      where.month = month;
     }
-
     if (employeeId) {
-      queryBuilder.andWhere('payroll.employeeId = :employeeId', { employeeId });
+      where.employeeId = employeeId;
     }
 
-    const [data, total] = await queryBuilder
-      .skip((page - 1) * limit)
-      .take(limit)
-      .getManyAndCount();
-
-    return PaginationUtil.createPaginatedResponse(data, total, page, limit);
+    return await PaginationUtil.paginate(
+      this.payrollRepository,
+      { page, limit },
+      {
+        where,
+        relations: ['employee'],
+        order: { month: 'DESC', employeeId: 'ASC' },
+      },
+    );
   }
 
   /**
@@ -123,7 +123,10 @@ export class PayrollService {
   /**
    * Update an existing payroll entry
    */
-  async update(id: number, updatePayrollDto: UpdatePayrollDto): Promise<Payroll> {
+  async update(
+    id: number,
+    updatePayrollDto: UpdatePayrollDto,
+  ): Promise<Payroll> {
     const payroll = await this.findOne(id);
 
     Object.assign(payroll, updatePayrollDto);
@@ -170,7 +173,7 @@ export class PayrollService {
 
   /**
    * Calculate payroll for a specific month based on approved timesheets
-   * This will process all approved timesheets for the month and generate payroll entries
+   * Uses the same timesheet data structure that displays correctly in the UI
    */
   async calculatePayrollForMonth(month: string): Promise<Payroll[]> {
     // Get all approved timesheets for the month
@@ -179,7 +182,7 @@ export class PayrollService {
         month,
         status: TimesheetStatus.APPROVED,
       },
-      relations: ['entries', 'entries.employee', 'project'],
+      relations: ['project'],
     });
 
     if (approvedTimesheets.length === 0) {
@@ -188,66 +191,54 @@ export class PayrollService {
       );
     }
 
-    // Get date range for the month
-    const [year, monthNum] = month.split('-').map(Number);
-    const startDate = new Date(year, monthNum - 1, 1);
-    const endDate = new Date(year, monthNum, 0);
-
-    // Get special days for the month
-    const specialDays = await this.specialDayRepository.find({
-      where: {
-        startDate: Between(startDate, endDate),
-        isActive: true,
-      },
-    });
-
-    // Create a map to check if a date is a special day (off day)
-    const specialDayMap = new Map<string, boolean>();
-    specialDays.forEach((sd) => {
-      const dateStr = this.formatDate(sd.startDate);
-      // Consider it an off day if it's marked as default off or optional/mandatory off
-      specialDayMap.set(dateStr, sd.isDefaultOff);
-    });
-
-    // Group entries by employee
-    const employeeEntriesMap = new Map<number, TimesheetEntry[]>();
-    approvedTimesheets.forEach((timesheet) => {
-      timesheet.entries.forEach((entry) => {
-        if (!employeeEntriesMap.has(entry.employeeId)) {
-          employeeEntriesMap.set(entry.employeeId, []);
-        }
-        employeeEntriesMap.get(entry.employeeId)!.push(entry);
-      });
-    });
-
-    // Get mobilizations for the month to determine idle days
-    const mobilizations = await this.mobilizationRepository.find({
-      where: {
-        actionDate: Between(startDate, endDate),
-      },
-    });
-
-    // Group mobilizations by employee
-    const employeeMobilizationsMap = new Map<number, Mobilization[]>();
-    mobilizations.forEach((mob) => {
-      if (!employeeMobilizationsMap.has(mob.employeeId)) {
-        employeeMobilizationsMap.set(mob.employeeId, []);
-      }
-      employeeMobilizationsMap.get(mob.employeeId)!.push(mob);
-    });
-
-    // Calculate payroll for each employee
     const payrolls: Payroll[] = [];
 
-    for (const [employeeId, entries] of employeeEntriesMap.entries()) {
-      const calculations = this.calculateEmployeePayroll(
-        entries,
-        employeeMobilizationsMap.get(employeeId) || [],
-        specialDayMap,
+    // Process each approved timesheet (project)
+    for (const timesheet of approvedTimesheets) {
+      const projectPayrolls = await this.calculatePayrollForProject(
+        timesheet.projectId,
+        month,
+      );
+      payrolls.push(...projectPayrolls);
+    }
+
+    return payrolls;
+  }
+
+  /**
+   * Calculate payroll for a specific project and month
+   * Uses the existing getMonthlyProjectTimesheet which has correct carry-forward logic
+   */
+  async calculatePayrollForProject(
+    projectId: number,
+    month: string,
+  ): Promise<Payroll[]> {
+    // Use the existing timesheet service to get the properly formatted data with carry-forward
+    const timesheetData =
+      await this.timesheetsService.getMonthlyProjectTimesheet(projectId, month);
+
+    if (!timesheetData.timesheet) {
+      throw new NotFoundException(
+        `No timesheet found for project ${projectId} in month ${month}`,
+      );
+    }
+
+    if (timesheetData.timesheet.status !== TimesheetStatus.APPROVED) {
+      throw new BadRequestException(
+        `Timesheet for project ${projectId} in month ${month} is not approved`,
+      );
+    }
+
+    const payrolls: Payroll[] = [];
+
+    // Calculate payroll for each employee using the timesheet data
+    for (const employee of timesheetData.employees) {
+      const calculations = this.calculateEmployeePayrollFromTimesheetData(
+        employee.dailyHours,
       );
 
       const payrollData: CreatePayrollDto = {
-        employeeId,
+        employeeId: employee.employeeId,
         month,
         totalHours: calculations.totalHours,
         totalOtHours: calculations.totalOtHours,
@@ -257,7 +248,7 @@ export class PayrollService {
         allowances: undefined,
         arrears: undefined,
         otherDeductions: undefined,
-        notes: `Auto-calculated from approved timesheets`,
+        notes: `Calculated from approved timesheet for project ${timesheetData.project.name}`,
       };
 
       const payroll = await this.createOrUpdate(payrollData);
@@ -268,12 +259,18 @@ export class PayrollService {
   }
 
   /**
-   * Calculate payroll metrics for a single employee
+   * Calculate payroll metrics from the timesheet daily hours data
+   * This uses the same data structure that's displayed in the UI
    */
-  private calculateEmployeePayroll(
-    entries: TimesheetEntry[],
-    mobilizations: Mobilization[],
-    specialDayMap: Map<string, boolean>,
+  private calculateEmployeePayrollFromTimesheetData(
+    dailyHours: Array<{
+      date: string;
+      day: number;
+      hoursWorked: number;
+      isOffDay: boolean;
+      jobStatus: string | null;
+      notes: string | null;
+    }>,
   ) {
     let totalHours = 0;
     let totalOtHours = 0;
@@ -281,58 +278,45 @@ export class PayrollService {
     let totalIdleDayHours = 0;
     let absentDays = 0;
 
-    // Create a map of date to mobilization status for idle day detection
-    const mobilizationStatusMap = new Map<string, string>();
-    mobilizations.forEach((mob) => {
-      const dateStr = this.formatDate(mob.actionDate);
-      mobilizationStatusMap.set(dateStr, mob.jobStatus);
-    });
+    dailyHours.forEach((dayData) => {
+      const hours = Number(dayData.hoursWorked);
+      const jobStatus = dayData.jobStatus?.toLowerCase() || '';
 
-    entries.forEach((entry) => {
-      const entryDateStr = this.formatDate(entry.date);
-      const hours = Number(entry.hoursWorked);
-      const jobStatus = entry.jobStatus.toLowerCase();
-
-      // Check if this is a special/off day
-      const isOffDay = specialDayMap.get(entryDateStr) || false;
-      const dayOfWeek = new Date(entry.date).getDay();
-      const isFriday = dayOfWeek === 5; // Friday is typically an off day
-
-      // Check if employee was marked as idle in mobilization
-      const mobStatus = mobilizationStatusMap.get(entryDateStr);
-      const isIdleFromMobilization = mobStatus === 'idle';
+      // Skip if no job status (before mobilization or after demobilization)
+      if (!jobStatus || jobStatus === 'demobilized') {
+        return;
+      }
 
       // Count absent days (absent, sick leave, casual leave, on_vacation)
       if (
         jobStatus === 'absent' ||
         jobStatus === 'sick_leave' ||
-        jobStatus === 'casual_leave' ||
-        jobStatus === 'on_vacation'
+        jobStatus === 'casual_leave'
       ) {
         absentDays++;
-        return; // Skip further processing for absent days
-      }
-
-      // Skip demobilized status
-      if (jobStatus === 'demobilized') {
         return;
       }
 
-      // Handle idle days - from timesheet or mobilization status
-      if (jobStatus === 'idle' || isIdleFromMobilization) {
-        // For idle status, count the hours as idle day hours
+      // Handle idle days
+      if (jobStatus === 'idle') {
         totalIdleDayHours += hours;
         return;
       }
 
-      // If working on an off day (Friday or special day)
-      if ((isFriday || isOffDay) && hours > 0) {
+      // Check if it's a Friday or off day
+      const date = new Date(dayData.date);
+      const dayOfWeek = date.getDay();
+
+      const isOffDay = dayData.isOffDay;
+
+      // If working on an off day (Friday or marked as off)
+      if (isOffDay && hours > 0) {
         totalOffdaysWorkedHours += hours;
         return;
       }
 
-      // Regular working day
-      if (hours > 0) {
+      // Regular working day (active, notice_period, etc.)
+      if (hours > 0 && !isOffDay) {
         // Regular hours: up to 10 hours
         const regularHours = Math.min(hours, 10);
         totalHours += regularHours;
@@ -353,121 +337,4 @@ export class PayrollService {
       absentDays: Math.round(absentDays * 100) / 100,
     };
   }
-
-  /**
-   * Helper to format date as YYYY-MM-DD
-   */
-  private formatDate(date: Date): string {
-    const d = new Date(date);
-    const year = d.getFullYear();
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  }
-
-  /**
-   * Calculate payroll for a specific project and month
-   */
-  async calculatePayrollForProject(
-    projectId: number,
-    month: string,
-  ): Promise<Payroll[]> {
-    // Get approved timesheet for the project and month
-    const timesheet = await this.timesheetRepository.findOne({
-      where: {
-        projectId,
-        month,
-        status: TimesheetStatus.APPROVED,
-      },
-      relations: ['entries', 'entries.employee'],
-    });
-
-    if (!timesheet) {
-      throw new NotFoundException(
-        `No approved timesheet found for project ${projectId} in month ${month}`,
-      );
-    }
-
-    // Get date range for the month
-    const [year, monthNum] = month.split('-').map(Number);
-    const startDate = new Date(year, monthNum - 1, 1);
-    const endDate = new Date(year, monthNum, 0);
-
-    // Get special days for the month
-    const specialDays = await this.specialDayRepository.find({
-      where: {
-        startDate: Between(startDate, endDate),
-        isActive: true,
-      },
-    });
-
-    const specialDayMap = new Map<string, boolean>();
-    specialDays.forEach((sd) => {
-      const dateStr = this.formatDate(sd.startDate);
-      specialDayMap.set(dateStr, sd.isDefaultOff);
-    });
-
-    // Get mobilizations for the employees in this timesheet
-    const employeeIds = [
-      ...new Set(timesheet.entries.map((e) => e.employeeId)),
-    ];
-    const mobilizations = await this.mobilizationRepository.find({
-      where: {
-        actionDate: Between(startDate, endDate),
-      },
-    });
-
-    const relevantMobilizations = mobilizations.filter((m) =>
-      employeeIds.includes(m.employeeId),
-    );
-
-    // Group entries by employee
-    const employeeEntriesMap = new Map<number, TimesheetEntry[]>();
-    timesheet.entries.forEach((entry) => {
-      if (!employeeEntriesMap.has(entry.employeeId)) {
-        employeeEntriesMap.set(entry.employeeId, []);
-      }
-      employeeEntriesMap.get(entry.employeeId)!.push(entry);
-    });
-
-    // Group mobilizations by employee
-    const employeeMobilizationsMap = new Map<number, Mobilization[]>();
-    relevantMobilizations.forEach((mob) => {
-      if (!employeeMobilizationsMap.has(mob.employeeId)) {
-        employeeMobilizationsMap.set(mob.employeeId, []);
-      }
-      employeeMobilizationsMap.get(mob.employeeId)!.push(mob);
-    });
-
-    // Calculate payroll for each employee
-    const payrolls: Payroll[] = [];
-
-    for (const [employeeId, entries] of employeeEntriesMap.entries()) {
-      const calculations = this.calculateEmployeePayroll(
-        entries,
-        employeeMobilizationsMap.get(employeeId) || [],
-        specialDayMap,
-      );
-
-      const payrollData: CreatePayrollDto = {
-        employeeId,
-        month,
-        totalHours: calculations.totalHours,
-        totalOtHours: calculations.totalOtHours,
-        totalOffdaysWorkedHours: calculations.totalOffdaysWorkedHours,
-        totalIdleDayHours: calculations.totalIdleDayHours,
-        absentDaysDeductible: calculations.absentDays,
-        allowances: undefined,
-        arrears: undefined,
-        otherDeductions: undefined,
-        notes: `Calculated from approved timesheet for project ${projectId}`,
-      };
-
-      const payroll = await this.createOrUpdate(payrollData);
-      payrolls.push(payroll);
-    }
-
-    return payrolls;
-  }
 }
-

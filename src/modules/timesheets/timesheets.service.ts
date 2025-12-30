@@ -31,14 +31,7 @@ import { SpecialDayType } from '../special-days/entities/special-day.entity';
 
 export interface MonthlyProjectTimesheetData {
   timesheet: Timesheet | null;
-  project: {
-    id: number;
-    name: string;
-    client: {
-      id: number;
-      name: string;
-    };
-  };
+  project: Project;
   employees: Array<{
     srNo: number;
     employeeId: number;
@@ -50,6 +43,7 @@ export interface MonthlyProjectTimesheetData {
       day: number;
       hoursWorked: number;
       jobStatus: string | null;
+      isOffDay: boolean;
       notes: string | null;
       entryId: number | null;
     }>;
@@ -265,6 +259,7 @@ export class TimesheetsService {
             day,
             hoursWorked: hours,
             jobStatus: jobStatus,
+            isOffDay: isProjectOffDay,
             notes: existingEntry?.notes || null,
             entryId: existingEntry?.id || null,
           });
@@ -287,14 +282,7 @@ export class TimesheetsService {
 
     return {
       timesheet: timesheet || null,
-      project: {
-        id: project.id,
-        name: project.name,
-        client: {
-          id: project.client?.id || 0,
-          name: project.client?.name || '',
-        },
-      },
+      project,
       employees,
     };
   }
