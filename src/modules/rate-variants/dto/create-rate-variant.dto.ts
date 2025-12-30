@@ -9,10 +9,6 @@ export class CreateRateVariantDto {
   description?: string;
 
   @IsOptional()
-  @IsBoolean()
-  isBaseRate?: boolean;
-
-  @IsOptional()
   @IsInt()
   @Min(0)
   displayOrder?: number;

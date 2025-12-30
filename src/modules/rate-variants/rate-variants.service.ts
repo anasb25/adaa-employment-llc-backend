@@ -16,14 +16,6 @@ export class RateVariantsService {
     createDto: CreateRateVariantDto,
     createdBy: number,
   ): Promise<RateVariant> {
-    // If setting as base rate, unset any existing base rate
-    if (createDto.isBaseRate) {
-      await this.rateVariantRepository.update(
-        { isBaseRate: true },
-        { isBaseRate: false },
-      );
-    }
-
     const rateVariant = this.rateVariantRepository.create({
       ...createDto,
       createdBy,
@@ -50,26 +42,12 @@ export class RateVariantsService {
     return rateVariant;
   }
 
-  async findBaseRate(): Promise<RateVariant | null> {
-    return await this.rateVariantRepository.findOne({
-      where: { isBaseRate: true, isActive: true },
-    });
-  }
-
   async update(
     id: number,
     updateDto: UpdateRateVariantDto,
     updatedBy: number,
   ): Promise<RateVariant> {
     const rateVariant = await this.findOne(id);
-
-    // If setting as base rate, unset any existing base rate
-    if (updateDto.isBaseRate && !rateVariant.isBaseRate) {
-      await this.rateVariantRepository.update(
-        { isBaseRate: true },
-        { isBaseRate: false },
-      );
-    }
 
     Object.assign(rateVariant, updateDto);
     rateVariant.updatedBy = updatedBy;
@@ -79,11 +57,6 @@ export class RateVariantsService {
 
   async remove(id: number): Promise<void> {
     const rateVariant = await this.findOne(id);
-
-    if (rateVariant.isBaseRate) {
-      throw new BadRequestException('Cannot delete the base rate variant');
-    }
-
     await this.rateVariantRepository.remove(rateVariant);
   }
 }

@@ -31,11 +31,6 @@ export class RateVariantsController {
     return this.rateVariantsService.findAll();
   }
 
-  @Get('base')
-  findBaseRate() {
-    return this.rateVariantsService.findBaseRate();
-  }
-
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.rateVariantsService.findOne(id);

@@ -9,9 +9,6 @@ export class RateVariant extends BaseEntity {
   @Column({ nullable: true })
   description: string; // e.g., "Standard 10 hours", ">10 hours", "10pm-6am"
 
-  @Column({ default: false })
-  isBaseRate: boolean; // Only one should be true - the base/regular rate
-
   @Column({ type: 'integer', default: 0 })
   displayOrder: number; // For UI sorting
 
