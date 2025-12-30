@@ -148,7 +148,6 @@ export class TimesheetsService {
 
       // Build daily hours
       const dailyHours: any[] = [];
-      let wasPreviouslyMobilized = false;
 
       for (let day = 1; day <= daysInMonth; day++) {
         const currentDate = new Date(year, monthNum - 1, day);
@@ -172,21 +171,38 @@ export class TimesheetsService {
             new Date(e.date).toISOString().split('T')[0] === dateStr,
         );
 
-        // Only include if mobilized to this project
-        if (
+        // Determine if employee should appear in timesheet for this date
+        // Only show if:
+        // 1. Currently mobilized to this project, OR
+        // 2. Has saved timesheet entries with hours > 0
+        const isMobilizedToProject =
           effectiveMob &&
           effectiveMob.mobStatus === MobStatus.MOBILIZED &&
-          effectiveMob.projectId === project.id
-        ) {
-          wasPreviouslyMobilized = true;
+          effectiveMob.projectId === project.id;
+
+        const hasSavedHours = existingEntry && Number(existingEntry.hoursWorked) > 0;
+
+        // Only include dates where employee is mobilized OR has saved work hours
+        if (isMobilizedToProject || hasSavedHours) {
+          // If demobilized but has saved hours, show those hours
+          // If demobilized with no saved hours, don't show the day at all
+          if (!isMobilizedToProject && !hasSavedHours) {
+            continue; // Skip this day
+          }
 
           // Check if the effective mobilization is from this exact date (user-entered)
           // or carried forward from a previous date
-          const effectiveMobDateStr = new Date(effectiveMob.actionDate)
-            .toISOString()
-            .split('T')[0];
+          const effectiveMobDateStr = effectiveMob
+            ? new Date(effectiveMob.actionDate).toISOString().split('T')[0]
+            : null;
           const isActualMobilizationForThisDate =
             effectiveMobDateStr === dateStr;
+
+          // If this is the first day of demobilization, show "demobilized" status
+          const isDemobilizationDay =
+            effectiveMob &&
+            effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
+            isActualMobilizationForThisDate;
 
           // Check for special days first (higher priority)
           const specialDayRates =
@@ -201,15 +217,19 @@ export class TimesheetsService {
           let hours: number;
           let jobStatus: string;
 
-          if (existingEntry) {
+          if (isDemobilizationDay) {
+            // First day of demobilization - show as "demobilized" with 0 hours
+            hours = 0;
+            jobStatus = 'demobilized';
+          } else if (existingEntry) {
             // If user has saved a timesheet entry for this day, respect their data
             hours = Number(existingEntry.hoursWorked);
             jobStatus = existingEntry.jobStatus;
           } else if (isActualMobilizationForThisDate) {
             // There's an actual mobilization record for this specific date
             // Use its status regardless of off-days/special days (user explicitly created this record)
-            hours = this.getDefaultHoursForStatus(effectiveMob.jobStatus);
-            jobStatus = effectiveMob.jobStatus;
+            hours = this.getDefaultHoursForStatus(effectiveMob!.jobStatus);
+            jobStatus = effectiveMob!.jobStatus;
           } else if (
             specialDayRates.isSpecialDay &&
             specialDayRates.isMandatoryOff
@@ -230,10 +250,13 @@ export class TimesheetsService {
             // Default to "Off" status for carried-forward entries
             hours = 0;
             jobStatus = JobStatus.OFF;
-          } else {
+          } else if (effectiveMob) {
             // No user entry, not an off day - use smart carry-forward
             hours = this.getDefaultHoursForStatus(effectiveMob.jobStatus);
             jobStatus = effectiveMob.jobStatus;
+          } else {
+            // No effective mobilization - skip this day
+            continue;
           }
 
           dailyHours.push({
@@ -244,32 +267,12 @@ export class TimesheetsService {
             notes: existingEntry?.notes || null,
             entryId: existingEntry?.id || null,
           });
-        } else if (wasPreviouslyMobilized) {
-          // Was mobilized before but not anymore - show "Dem" for first day, then "-"
-          const isDemobilizedFirstDay = !dailyHours.find(
-            (h) => h.jobStatus === 'demobilized',
-          );
-
-          dailyHours.push({
-            date: dateStr,
-            day,
-            hoursWorked: 0,
-            jobStatus: isDemobilizedFirstDay ? 'demobilized' : null,
-            notes: null,
-            entryId: null,
-          });
-
-          if (isDemobilizedFirstDay) {
-            wasPreviouslyMobilized = false; // Reset flag after showing "Dem"
-          }
         }
+        // If not mobilized and no saved hours, don't show this day (show as "-")
       }
 
-      // Only include employee if they were mobilized to this project on at least one day
-      const hasMobilizedDays = dailyHours.some(
-        (d) => d.jobStatus && d.jobStatus !== 'demobilized',
-      );
-      if (hasMobilizedDays || dailyHours.length > 0) {
+      // Only include employee if they have mobilized days (not just demobilized)
+      if (dailyHours.length > 0) {
         employees.push({
           srNo: srNo++,
           employeeId: latestMob.employee.id,
@@ -500,6 +503,7 @@ export class TimesheetsService {
   /**
    * Auto-sync mobilization record when timesheet entry status changes
    * Creates a new mobilization record if the job status differs from the current mobilization
+   * Automatically demobilizes employee if status is: cancelled, absconded, on_vacation, resigned, or idle
    */
   private async syncMobilizationFromTimesheetEntry(
     entry: TimesheetEntry,
@@ -509,6 +513,20 @@ export class TimesheetsService {
     try {
       const entryDate = new Date(entry.date);
       const dateStr = entryDate.toISOString().split('T')[0];
+
+      // Define statuses that should trigger automatic demobilization
+      const demobilizingStatuses = [
+        'cancelled',
+        'absconded',
+        'on_vacation',
+        'resigned',
+        'idle',
+      ];
+
+      // Determine if this status should demobilize the employee
+      const shouldDemobilize = demobilizingStatuses.includes(
+        entry.jobStatus.toLowerCase(),
+      );
 
       // Get current effective mobilization for this employee on this date
       const currentMobilizations = await this.mobilizationRepository.find({
@@ -538,32 +556,54 @@ export class TimesheetsService {
       // If job status is different, create/update mobilization
       if (exactDateMob) {
         // Mobilization exists for this date - update it if status changed
-        if (exactDateMob.jobStatus !== entry.jobStatus) {
+        const statusChanged = exactDateMob.jobStatus !== entry.jobStatus;
+        const mobStatusChanged =
+          shouldDemobilize && exactDateMob.mobStatus !== MobStatus.DEMOBILIZED;
+
+        if (statusChanged || mobStatusChanged) {
           exactDateMob.jobStatus = entry.jobStatus as JobStatus;
+          
+          // Auto-demobilize if status requires it
+          if (shouldDemobilize) {
+            exactDateMob.mobStatus = MobStatus.DEMOBILIZED;
+            exactDateMob.projectId = null; // Remove project assignment when demobilized
+          }
+          
           exactDateMob.updatedBy = createdBy;
           await this.mobilizationRepository.save(exactDateMob);
+          
+          const mobStatusInfo = shouldDemobilize ? ' (DEMOBILIZED)' : '';
           this.logger.log(
-            `Updated mobilization for employee ${entry.employeeId} on ${dateStr}: ${entry.jobStatus}`,
+            `Updated mobilization for employee ${entry.employeeId} on ${dateStr}: ${entry.jobStatus}${mobStatusInfo}`,
           );
         }
       } else {
         // No mobilization for this exact date - check if we need to create one
-        if (currentMob.jobStatus !== entry.jobStatus) {
+        const statusDiffers = currentMob.jobStatus !== entry.jobStatus;
+        const needsDemobilization =
+          shouldDemobilize && currentMob.mobStatus !== MobStatus.DEMOBILIZED;
+
+        if (statusDiffers || needsDemobilization) {
           // Create new mobilization record for this date with the new status
           const newMob = this.mobilizationRepository.create({
             employeeId: entry.employeeId,
             mobilizedTradeId: currentMob.mobilizedTradeId,
-            projectId: projectId,
-            mobStatus: MobStatus.MOBILIZED,
+            projectId: shouldDemobilize ? null : projectId, // Remove project if demobilizing
+            mobStatus: shouldDemobilize
+              ? MobStatus.DEMOBILIZED
+              : MobStatus.MOBILIZED,
             jobStatus: entry.jobStatus as JobStatus,
             actionDate: entryDate,
-            notes: `Auto-synced from timesheet: ${entry.notes || ''}`.trim(),
+            notes: `Auto-synced from timesheet${shouldDemobilize ? ' - Auto-demobilized' : ''}: ${entry.notes || ''}`.trim(),
             createdBy,
           });
 
           await this.mobilizationRepository.save(newMob);
+          
+          const mobStatusInfo = shouldDemobilize ? ' (DEMOBILIZED)' : '';
           this.logger.log(
-            `Created mobilization for employee ${entry.employeeId} on ${dateStr}: ${entry.jobStatus}`,
+            `Created mobilization for employee ${entry.employeeId} on ${dateStr}: ${entry.jobStatus}${mobStatusInfo}`,
+          );
           );
         }
       }
