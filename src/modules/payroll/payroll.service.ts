@@ -265,6 +265,9 @@ export class PayrollService {
         totalOffdaysWorkedHours: calculations.totalOffdaysWorkedHours,
         totalIdleDayHours: calculations.totalIdleDayHours,
         absentDaysDeductible: calculations.absentDays,
+        hoursBreakdown: calculations.hoursBreakdown,
+        baseHourlyRate: calculations.baseHourlyRate,
+        totalGrossSalary: calculations.totalGrossSalary,
         allowances: undefined,
         arrears: undefined,
         otherDeductions: undefined,
@@ -310,35 +313,130 @@ export class PayrollService {
   }
 
   /**
-   * Get the applicable rate variant based on hours worked
-   * Returns the rate variant with matching hour range, or null if none match
+   * Split hours across applicable rate variants
+   * Returns an array of rate variants with the hours that apply to each
+   *
+   * Logic:
+   * - maxHours: Variant applies ONLY if total hours <= maxHours (e.g., Half-day: ≤4 hours)
+   * - minHours: Variant applies to hours ABOVE minHours (e.g., Overtime: >10 hours)
+   * - No constraints: Base/Regular rate
+   *
+   * Examples:
+   * - 4 hours worked with Half-day(maxHours=4): All 4 hours at Half-day rate
+   * - 12 hours worked with Overtime(minHours=10): 10 at Regular + 2 at Overtime
+   * - 6 hours worked: All at Regular rate
    */
-  private async getApplicableRateVariant(
+  private async splitHoursAcrossRateVariants(
     hoursWorked: number,
-  ): Promise<RateVariant | null> {
+  ): Promise<
+    Array<{ variant: RateVariant | null; hours: number; variantName: string }>
+  > {
     const rateVariants = await this.rateVariantRepository.find({
       where: { isActive: true },
       order: { displayOrder: 'ASC' },
     });
 
-    // Find the rate variant that matches the hour range
+    const result: Array<{
+      variant: RateVariant | null;
+      hours: number;
+      variantName: string;
+    }> = [];
+
+    // Check if any range variant applies (e.g., Half-day with minHours=1, maxHours=4)
+    // These apply to the ENTIRE day if total hours fall within the range
     for (const variant of rateVariants) {
-      const minHours =
-        variant.minHours !== null ? Number(variant.minHours) : null;
       const maxHours =
         variant.maxHours !== null ? Number(variant.maxHours) : null;
+      const minHours =
+        variant.minHours !== null ? Number(variant.minHours) : null;
 
-      // Check if hours fall within the range
-      const meetsMin = minHours === null || hoursWorked >= minHours;
-      const meetsMax = maxHours === null || hoursWorked <= maxHours;
+      // Check if this is a "range" variant (has maxHours, possibly with minHours as lower bound)
+      if (maxHours !== null) {
+        const lowerBound = minHours !== null ? minHours : 0;
 
-      if (meetsMin && meetsMax) {
-        return variant;
+        // If hours fall within the range, this variant applies to the whole day
+        if (hoursWorked >= lowerBound && hoursWorked <= maxHours) {
+          return [
+            {
+              variant,
+              hours: hoursWorked,
+              variantName: variant.name,
+            },
+          ];
+        }
       }
     }
 
-    // If no specific variant matches, return a default with 1.0 multiplier
-    return null;
+    // Check for minHours-only variants (e.g., Overtime with minHours=10, no maxHours)
+    // These split the day: base hours up to threshold, then variant hours after
+    const minHoursVariants = rateVariants.filter(
+      (v) => v.minHours !== null && v.minHours > 0 && v.maxHours === null,
+    );
+
+    if (minHoursVariants.length > 0) {
+      // Sort by minHours ascending
+      minHoursVariants.sort((a, b) => Number(a.minHours) - Number(b.minHours));
+
+      let currentHour = 0;
+
+      for (const variant of minHoursVariants) {
+        const threshold = Number(variant.minHours);
+
+        if (hoursWorked > threshold) {
+          // Add base/regular hours up to threshold (if any)
+          if (currentHour < threshold) {
+            const baseHours = threshold - currentHour;
+            result.push({
+              variant: null, // Regular/base rate
+              hours: baseHours,
+              variantName: 'Regular',
+            });
+            currentHour = threshold;
+          }
+
+          // Check if there's a next threshold
+          const nextVariant = minHoursVariants.find(
+            (v) => Number(v.minHours) > threshold,
+          );
+          const nextThreshold = nextVariant
+            ? Number(nextVariant.minHours)
+            : hoursWorked;
+
+          // Hours for this variant
+          const variantHours =
+            Math.min(nextThreshold, hoursWorked) - currentHour;
+
+          if (variantHours > 0) {
+            result.push({
+              variant,
+              hours: variantHours,
+              variantName: variant.name,
+            });
+            currentHour += variantHours;
+          }
+        }
+      }
+
+      // If there are remaining hours (shouldn't happen but just in case)
+      if (currentHour < hoursWorked) {
+        result.push({
+          variant: null,
+          hours: hoursWorked - currentHour,
+          variantName: 'Regular',
+        });
+      }
+
+      return result;
+    }
+
+    // No special variants apply, all hours at base/regular rate
+    return [
+      {
+        variant: null,
+        hours: hoursWorked,
+        variantName: 'Regular',
+      },
+    ];
   }
 
   /**
@@ -403,6 +501,20 @@ export class PayrollService {
     // Get base hourly rate for this employee
     const baseRate = await this.getEmployeeBaseRate(employeeId, skillId);
 
+    // Detailed breakdown tracking
+    const regularHoursMap = new Map<
+      string,
+      { hours: number; rateMultiplier: number }
+    >();
+    const specialDaysBreakdown: Array<{
+      specialDayName: string;
+      date: string;
+      hours: number;
+      rateMultiplier: number;
+    }> = [];
+    const offDaysBreakdown: Array<{ date: string; hours: number }> = [];
+    let idleHours = 0;
+
     for (const dayData of dailyHours) {
       const hours = Number(dayData.hoursWorked);
       const jobStatus = dayData.jobStatus?.toLowerCase() || '';
@@ -425,70 +537,109 @@ export class PayrollService {
       // Handle idle days
       if (jobStatus === 'idle') {
         totalIdleDayHours += hours;
+        idleHours += hours;
         continue;
       }
 
       const isOffDay = dayData.isOffDay; // Project-specific off days (e.g., Friday, Saturday)
 
       // Check if this is a special day
-      const isSpecial = await this.isSpecialDay(dayData.date);
+      const specialDay = await this.getSpecialDayForDate(dayData.date);
 
-      // If working on an off day (project-specific off days) OR special day
-      if ((isOffDay || isSpecial) && hours > 0) {
-        // For special days, use special day multiplier (not rate variants)
-        if (isSpecial) {
-          const specialDayMultiplier = await this.getSpecialDayMultiplier(
-            dayData.date,
-          );
-          // Track as special day hours with multiplier applied
-          totalOffdaysWorkedHours += hours;
-        } else {
-          // Regular off day (based on project's offDays configuration)
-          totalOffdaysWorkedHours += hours;
-        }
+      // If working on a special day
+      if (specialDay && hours > 0) {
+        const specialDayMultiplier = Number(specialDay.employeeRateMultiplier);
+        specialDaysBreakdown.push({
+          specialDayName: specialDay.name,
+          date: dayData.date,
+          hours,
+          rateMultiplier: specialDayMultiplier,
+        });
+        totalOffdaysWorkedHours += hours;
+        continue;
+      }
+
+      // If working on an off day (but not a special day)
+      if (isOffDay && hours > 0) {
+        offDaysBreakdown.push({
+          date: dayData.date,
+          hours,
+        });
+        totalOffdaysWorkedHours += hours;
         continue;
       }
 
       // Regular working day (active, notice_period, etc.)
-      if (hours > 0 && !isOffDay && !isSpecial) {
-        // Get applicable rate variant based on hours worked
-        const rateVariant = await this.getApplicableRateVariant(hours);
-        const rateMultiplier = rateVariant
-          ? Number(rateVariant.employeeRateMultiplier)
-          : 1.0;
+      if (hours > 0 && !isOffDay && !specialDay) {
+        // Split hours across applicable rate variants
+        const hoursSplit = await this.splitHoursAcrossRateVariants(hours);
 
-        // Apply rate variant logic based on hour ranges
-        if (rateVariant && rateVariant.minHours !== null) {
-          // This is an overtime/extra hours variant (e.g., >10 hours)
-          const minHours = Number(rateVariant.minHours);
-          if (hours > minHours) {
-            // Regular hours: up to the threshold
-            const regularHours = minHours;
-            totalHours += regularHours;
+        for (const { variant, hours: hoursForVariant } of hoursSplit) {
+          const rateMultiplier = variant
+            ? Number(variant.employeeRateMultiplier)
+            : 1.0;
+          const rateVariantName = variant ? variant.name : 'Regular';
 
-            // OT hours: anything above the threshold with multiplier
-            const otHours = hours - minHours;
-            totalOtHours += otHours;
+          // Track by rate variant
+          const existing = regularHoursMap.get(rateVariantName);
+          if (existing) {
+            existing.hours += hoursForVariant;
           } else {
-            // All hours are regular
-            totalHours += hours;
+            regularHoursMap.set(rateVariantName, {
+              hours: hoursForVariant,
+              rateMultiplier,
+            });
           }
-        } else if (rateVariant && rateVariant.maxHours !== null) {
-          // This is a reduced hours variant (e.g., half-day: 1-4 hours)
-          const maxHours = Number(rateVariant.maxHours);
-          if (hours <= maxHours) {
-            // Apply the special rate for these hours
-            totalHours += hours;
+
+          // Track for totals (distinguish overtime from regular)
+          if (variant && variant.minHours !== null && variant.minHours > 0) {
+            // This is overtime (hours above a threshold)
+            totalOtHours += hoursForVariant;
           } else {
-            // Shouldn't exceed maxHours, but count as regular if it does
-            totalHours += hours;
+            // Regular hours
+            totalHours += hoursForVariant;
           }
-        } else {
-          // No hour constraints, regular hours
-          totalHours += hours;
         }
       }
     }
+
+    // Build detailed breakdown with amounts
+    const hoursBreakdown = {
+      regular: Array.from(regularHoursMap.entries()).map(([name, data]) => ({
+        rateVariantName: name,
+        hours: Math.round(data.hours * 100) / 100,
+        rateMultiplier: data.rateMultiplier,
+        hourlyRate: Math.round(baseRate * data.rateMultiplier * 100) / 100,
+        amount:
+          Math.round(baseRate * data.rateMultiplier * data.hours * 100) / 100,
+      })),
+      specialDays: specialDaysBreakdown.map((sd) => ({
+        specialDayName: sd.specialDayName,
+        date: sd.date,
+        hours: Math.round(sd.hours * 100) / 100,
+        rateMultiplier: sd.rateMultiplier,
+        hourlyRate: Math.round(baseRate * sd.rateMultiplier * 100) / 100,
+        amount: Math.round(baseRate * sd.rateMultiplier * sd.hours * 100) / 100,
+      })),
+      offDays: offDaysBreakdown.map((od) => ({
+        date: od.date,
+        hours: Math.round(od.hours * 100) / 100,
+        hourlyRate: baseRate,
+        amount: Math.round(baseRate * od.hours * 100) / 100,
+      })),
+      idle: {
+        hours: Math.round(idleHours * 100) / 100,
+        hourlyRate: baseRate,
+        amount: Math.round(baseRate * idleHours * 100) / 100,
+      },
+    };
+
+    // Calculate total gross salary
+    const totalGrossSalary =
+      hoursBreakdown.regular.reduce((sum, r) => sum + r.amount, 0) +
+      hoursBreakdown.specialDays.reduce((sum, sd) => sum + sd.amount, 0) +
+      hoursBreakdown.offDays.reduce((sum, od) => sum + od.amount, 0) +
+      hoursBreakdown.idle.amount;
 
     return {
       totalHours: Math.round(totalHours * 100) / 100,
@@ -496,6 +647,30 @@ export class PayrollService {
       totalOffdaysWorkedHours: Math.round(totalOffdaysWorkedHours * 100) / 100,
       totalIdleDayHours: Math.round(totalIdleDayHours * 100) / 100,
       absentDays: Math.round(absentDays * 100) / 100,
+      hoursBreakdown,
+      baseHourlyRate: baseRate,
+      totalGrossSalary: Math.round(totalGrossSalary * 100) / 100,
     };
+  }
+
+  /**
+   * Get the special day for a specific date (returns full special day entity)
+   */
+  private async getSpecialDayForDate(date: string): Promise<SpecialDay | null> {
+    const specialDays = await this.specialDayRepository.find({
+      where: { isActive: true },
+    });
+
+    for (const specialDay of specialDays) {
+      const targetDate = new Date(date);
+      const start = new Date(specialDay.startDate);
+      const end = specialDay.endDate ? new Date(specialDay.endDate) : start;
+
+      if (targetDate >= start && targetDate <= end) {
+        return specialDay;
+      }
+    }
+
+    return null;
   }
 }

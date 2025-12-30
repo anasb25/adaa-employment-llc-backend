@@ -38,6 +38,43 @@ export class Payroll extends BaseEntity {
   @Column({ type: 'text', nullable: true })
   notes: string | null;
 
+  // Detailed breakdown of hours and amounts
+  @Column({ type: 'jsonb', nullable: true })
+  hoursBreakdown: {
+    regular: Array<{
+      rateVariantName: string;
+      hours: number;
+      rateMultiplier: number;
+      hourlyRate: number;
+      amount: number;
+    }>;
+    specialDays: Array<{
+      specialDayName: string;
+      date: string;
+      hours: number;
+      rateMultiplier: number;
+      hourlyRate: number;
+      amount: number;
+    }>;
+    offDays: Array<{
+      date: string;
+      hours: number;
+      hourlyRate: number;
+      amount: number;
+    }>;
+    idle: {
+      hours: number;
+      hourlyRate: number;
+      amount: number;
+    };
+  };
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  baseHourlyRate: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  totalGrossSalary: number;
+
   // Relations
   @ManyToOne(() => Employee, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'employeeId' })

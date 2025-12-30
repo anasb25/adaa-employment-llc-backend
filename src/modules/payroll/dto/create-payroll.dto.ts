@@ -44,5 +44,17 @@ export class CreatePayrollDto {
   @IsOptional()
   @IsString()
   notes?: string;
+
+  @IsOptional()
+  @IsObject()
+  hoursBreakdown?: any;
+
+  @IsOptional()
+  @IsNumber()
+  baseHourlyRate?: number;
+
+  @IsOptional()
+  @IsNumber()
+  totalGrossSalary?: number;
 }
 
