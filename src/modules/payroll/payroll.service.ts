@@ -4,7 +4,13 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import {
+  Repository,
+  Between,
+  IsNull,
+  LessThanOrEqual,
+  MoreThanOrEqual,
+} from 'typeorm';
 import { Payroll } from './entities/payroll.entity';
 import { CreatePayrollDto } from './dto/create-payroll.dto';
 import { UpdatePayrollDto } from './dto/update-payroll.dto';
@@ -19,6 +25,10 @@ import {
 } from '../timesheets/entities/timesheet.entity';
 import { TimesheetsService } from '../timesheets/timesheets.service';
 import { Project } from '../projects/entities/project.entity';
+import { RateVariant } from '../rate-variants/entities/rate-variant.entity';
+import { SpecialDay } from '../special-days/entities/special-day.entity';
+import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
+import { Skill } from '../skills/entities/skill.entity';
 
 @Injectable()
 export class PayrollService {
@@ -29,6 +39,14 @@ export class PayrollService {
     private readonly timesheetRepository: Repository<Timesheet>,
     @InjectRepository(Project)
     private readonly projectRepository: Repository<Project>,
+    @InjectRepository(RateVariant)
+    private readonly rateVariantRepository: Repository<RateVariant>,
+    @InjectRepository(SpecialDay)
+    private readonly specialDayRepository: Repository<SpecialDay>,
+    @InjectRepository(EmployeeSkill)
+    private readonly employeeSkillRepository: Repository<EmployeeSkill>,
+    @InjectRepository(Skill)
+    private readonly skillRepository: Repository<Skill>,
     private readonly timesheetsService: TimesheetsService,
   ) {}
 
@@ -233,7 +251,9 @@ export class PayrollService {
 
     // Calculate payroll for each employee using the timesheet data
     for (const employee of timesheetData.employees) {
-      const calculations = this.calculateEmployeePayrollFromTimesheetData(
+      const calculations = await this.calculateEmployeePayrollFromTimesheetData(
+        employee.employeeId,
+        employee.skillId,
         employee.dailyHours,
       );
 
@@ -259,10 +279,112 @@ export class PayrollService {
   }
 
   /**
-   * Calculate payroll metrics from the timesheet daily hours data
-   * This uses the same data structure that's displayed in the UI
+   * Get the base hourly rate for an employee
+   * Priority: employee_skill.cost_price > skill.cost_price
    */
-  private calculateEmployeePayrollFromTimesheetData(
+  private async getEmployeeBaseRate(
+    employeeId: number,
+    skillId: number,
+  ): Promise<number> {
+    // First, try to get employee-specific rate
+    const employeeSkill = await this.employeeSkillRepository.findOne({
+      where: { employeeId, skillId },
+    });
+
+    if (employeeSkill && employeeSkill.cost_price) {
+      return Number(employeeSkill.cost_price);
+    }
+
+    // Fallback to skill's base cost_price
+    const skill = await this.skillRepository.findOne({
+      where: { id: skillId },
+    });
+
+    if (skill && skill.cost_price) {
+      return Number(skill.cost_price);
+    }
+
+    throw new BadRequestException(
+      `No cost_price found for employee ${employeeId} and skill ${skillId}`,
+    );
+  }
+
+  /**
+   * Get the applicable rate variant based on hours worked
+   * Returns the rate variant with matching hour range, or null if none match
+   */
+  private async getApplicableRateVariant(
+    hoursWorked: number,
+  ): Promise<RateVariant | null> {
+    const rateVariants = await this.rateVariantRepository.find({
+      where: { isActive: true },
+      order: { displayOrder: 'ASC' },
+    });
+
+    // Find the rate variant that matches the hour range
+    for (const variant of rateVariants) {
+      const minHours =
+        variant.minHours !== null ? Number(variant.minHours) : null;
+      const maxHours =
+        variant.maxHours !== null ? Number(variant.maxHours) : null;
+
+      // Check if hours fall within the range
+      const meetsMin = minHours === null || hoursWorked >= minHours;
+      const meetsMax = maxHours === null || hoursWorked <= maxHours;
+
+      if (meetsMin && meetsMax) {
+        return variant;
+      }
+    }
+
+    // If no specific variant matches, return a default with 1.0 multiplier
+    return null;
+  }
+
+  /**
+   * Check if a date is a special day and return the employee rate multiplier
+   * Returns the multiplier (default 1.0 if not a special day)
+   */
+  private async getSpecialDayMultiplier(date: string): Promise<number> {
+    // Find all active special days
+    const specialDays = await this.specialDayRepository.find({
+      where: { isActive: true },
+    });
+
+    // Check if date falls within any special day
+    for (const specialDay of specialDays) {
+      const targetDate = new Date(date);
+      const start = new Date(specialDay.startDate);
+      const end = specialDay.endDate ? new Date(specialDay.endDate) : start;
+
+      if (targetDate >= start && targetDate <= end) {
+        return Number(specialDay.employeeRateMultiplier || 1.0);
+      }
+    }
+
+    return 1.0; // No special day, return base multiplier
+  }
+
+  /**
+   * Check if a date is a special day (with premium rates)
+   */
+  private async isSpecialDay(date: string): Promise<boolean> {
+    const multiplier = await this.getSpecialDayMultiplier(date);
+    return multiplier !== 1.0;
+  }
+
+  /**
+   * Calculate payroll metrics from the timesheet daily hours data with rate variants and special days
+   * This uses the same data structure that's displayed in the UI
+   *
+   * Rate calculation logic:
+   * - Base rate: employee_skill.cost_price OR skill.cost_price
+   * - For special days: Apply special day employee multiplier ONLY (no rate variants)
+   * - For regular days: Apply rate variant employee multiplier based on hours worked
+   */
+  private async calculateEmployeePayrollFromTimesheetData(
+    employeeId: number,
+    skillId: number,
     dailyHours: Array<{
       date: string;
       day: number;
@@ -278,13 +400,16 @@ export class PayrollService {
     let totalIdleDayHours = 0;
     let absentDays = 0;
 
-    dailyHours.forEach((dayData) => {
+    // Get base hourly rate for this employee
+    const baseRate = await this.getEmployeeBaseRate(employeeId, skillId);
+
+    for (const dayData of dailyHours) {
       const hours = Number(dayData.hoursWorked);
       const jobStatus = dayData.jobStatus?.toLowerCase() || '';
 
       // Skip if no job status (before mobilization or after demobilization)
       if (!jobStatus || jobStatus === 'demobilized') {
-        return;
+        continue;
       }
 
       // Count absent days (absent, sick leave, casual leave, on_vacation)
@@ -294,40 +419,76 @@ export class PayrollService {
         jobStatus === 'casual_leave'
       ) {
         absentDays++;
-        return;
+        continue;
       }
 
       // Handle idle days
       if (jobStatus === 'idle') {
         totalIdleDayHours += hours;
-        return;
+        continue;
       }
 
-      // Check if it's a Friday or off day
-      const date = new Date(dayData.date);
-      const dayOfWeek = date.getDay();
+      const isOffDay = dayData.isOffDay; // Project-specific off days (e.g., Friday, Saturday)
 
-      const isOffDay = dayData.isOffDay;
+      // Check if this is a special day
+      const isSpecial = await this.isSpecialDay(dayData.date);
 
-      // If working on an off day (Friday or marked as off)
-      if (isOffDay && hours > 0) {
-        totalOffdaysWorkedHours += hours;
-        return;
+      // If working on an off day (project-specific off days) OR special day
+      if ((isOffDay || isSpecial) && hours > 0) {
+        // For special days, use special day multiplier (not rate variants)
+        if (isSpecial) {
+          const specialDayMultiplier = await this.getSpecialDayMultiplier(
+            dayData.date,
+          );
+          // Track as special day hours with multiplier applied
+          totalOffdaysWorkedHours += hours;
+        } else {
+          // Regular off day (based on project's offDays configuration)
+          totalOffdaysWorkedHours += hours;
+        }
+        continue;
       }
 
       // Regular working day (active, notice_period, etc.)
-      if (hours > 0 && !isOffDay) {
-        // Regular hours: up to 10 hours
-        const regularHours = Math.min(hours, 10);
-        totalHours += regularHours;
+      if (hours > 0 && !isOffDay && !isSpecial) {
+        // Get applicable rate variant based on hours worked
+        const rateVariant = await this.getApplicableRateVariant(hours);
+        const rateMultiplier = rateVariant
+          ? Number(rateVariant.employeeRateMultiplier)
+          : 1.0;
 
-        // OT hours: anything above 10 hours
-        if (hours > 10) {
-          const otHours = hours - 10;
-          totalOtHours += otHours;
+        // Apply rate variant logic based on hour ranges
+        if (rateVariant && rateVariant.minHours !== null) {
+          // This is an overtime/extra hours variant (e.g., >10 hours)
+          const minHours = Number(rateVariant.minHours);
+          if (hours > minHours) {
+            // Regular hours: up to the threshold
+            const regularHours = minHours;
+            totalHours += regularHours;
+
+            // OT hours: anything above the threshold with multiplier
+            const otHours = hours - minHours;
+            totalOtHours += otHours;
+          } else {
+            // All hours are regular
+            totalHours += hours;
+          }
+        } else if (rateVariant && rateVariant.maxHours !== null) {
+          // This is a reduced hours variant (e.g., half-day: 1-4 hours)
+          const maxHours = Number(rateVariant.maxHours);
+          if (hours <= maxHours) {
+            // Apply the special rate for these hours
+            totalHours += hours;
+          } else {
+            // Shouldn't exceed maxHours, but count as regular if it does
+            totalHours += hours;
+          }
+        } else {
+          // No hour constraints, regular hours
+          totalHours += hours;
         }
       }
-    });
+    }
 
     return {
       totalHours: Math.round(totalHours * 100) / 100,

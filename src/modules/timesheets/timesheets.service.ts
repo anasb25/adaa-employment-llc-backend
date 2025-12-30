@@ -43,6 +43,7 @@ export interface MonthlyProjectTimesheetData {
     idNo: string;
     name: string;
     trade: string;
+    skillId: number;
     dailyHours: Array<{
       date: string;
       day: number;
@@ -288,6 +289,7 @@ export class TimesheetsService {
           idNo: latestMob.employee.adaa_emp_code,
           name: latestMob.employee.name,
           trade: latestMob.mobilizedTrade?.skill || '',
+          skillId: latestMob.mobilizedTradeId,
           dailyHours,
         });
       }
