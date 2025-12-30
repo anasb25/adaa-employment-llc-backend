@@ -29,6 +29,7 @@ import {
 import { MobilizationExcelUtil } from './utils/mobilization-excel.util';
 import { SpecialDaysService } from '../special-days/special-days.service';
 import { SpecialDayType } from '../special-days/entities/special-day.entity';
+import { parseDateOnly, formatDateOnly } from '../../common/utils/date.util';
 
 @Injectable()
 export class MobilizationsService {
@@ -290,10 +291,12 @@ export class MobilizationsService {
     date: Date,
   ): Promise<Mobilization | null> {
     // Get all mobilizations for this employee up to the date
+    // actionDate is now a string, so we use string comparison
+    const dateStr = formatDateOnly(date);
     const allMobilizations = await this.mobilizationRepository.find({
       where: {
         employeeId,
-        actionDate: LessThanOrEqual(date),
+        actionDate: LessThanOrEqual(dateStr) as any,
       },
       relations: ['employee', 'project', 'project.client', 'mobilizedTrade'],
       order: { actionDate: 'DESC', createdAt: 'DESC' },
@@ -325,9 +328,11 @@ export class MobilizationsService {
     date: Date,
   ): Promise<Mobilization[]> {
     // Fetch all mobilizations up to and including the specified date
+    // actionDate is now a string, so we use string comparison
+    const dateStr = formatDateOnly(date);
     const allMobilizations = await this.mobilizationRepository.find({
       where: {
-        actionDate: LessThanOrEqual(date),
+        actionDate: LessThanOrEqual(dateStr) as any,
       },
       relations: ['employee', 'project', 'project.client', 'mobilizedTrade'],
       order: {
@@ -837,10 +842,11 @@ export class MobilizationsService {
         }
 
         // Check if mobilization already exists for this employee on this date
+        // actionDate is now a string (YYYY-MM-DD)
         const existingMobilization = await this.mobilizationRepository.findOne({
           where: {
             employeeId: employee.id,
-            actionDate: new Date(mappedData.actionDate),
+            actionDate: mappedData.actionDate as any, // TypeORM will handle the transformer
           },
         });
 
@@ -890,11 +896,22 @@ export class MobilizationsService {
         } else {
           // Check if this is actually a change from previous status
           // (Optimization: Don't create a record if it's the same as the last one)
+          // Calculate previous day in timezone-neutral way
+          const actionDateParts = mappedData.actionDate.split('-');
+          const actionDateObj = new Date(
+            Date.UTC(
+              parseInt(actionDateParts[0]),
+              parseInt(actionDateParts[1]) - 1,
+              parseInt(actionDateParts[2]),
+            ),
+          );
+          const previousDayObj = new Date(
+            actionDateObj.getTime() - 24 * 60 * 60 * 1000,
+          );
+          
           const previousMobilization = await this.getEffectiveStatusOnDate(
             employee.id,
-            new Date(
-              new Date(mappedData.actionDate).getTime() - 24 * 60 * 60 * 1000,
-            ),
+            previousDayObj,
           );
 
           const isDifferentFromPrevious =
@@ -906,13 +923,14 @@ export class MobilizationsService {
 
           if (isDifferentFromPrevious) {
             // Create new mobilization (actual change occurred)
+            // actionDate is already a YYYY-MM-DD string from Excel import
             const newMobilization = this.mobilizationRepository.create({
               employeeId: employee.id,
               mobilizedTradeId: mobilizedTrade.id,
               projectId: project?.id || null,
               mobStatus: mappedData.mobStatus as MobStatus,
               jobStatus: mappedData.jobStatus,
-              actionDate: new Date(mappedData.actionDate),
+              actionDate: mappedData.actionDate as any, // TypeORM will handle the transformer
               notes: mappedData.notes,
               createdBy,
             });

@@ -3,6 +3,7 @@ import { BaseEntity } from '../../../common/entities';
 import { Timesheet } from './timesheet.entity';
 import { Employee } from '../../employees/entities/employee.entity';
 import { Skill } from '../../skills/entities/skill.entity';
+import { DateOnlyTransformer } from '../../../common/transformers/date.transformer';
 
 @Entity('timesheet_entries')
 @Index(['timesheetId', 'employeeId', 'date'], { unique: true })
@@ -13,8 +14,8 @@ export class TimesheetEntry extends BaseEntity {
   @Column({ type: 'integer' })
   employeeId: number;
 
-  @Column({ type: 'date' })
-  date: Date;
+  @Column({ type: 'date', transformer: DateOnlyTransformer })
+  date: string; // Date in YYYY-MM-DD format
 
   @Column({ type: 'integer', nullable: true })
   tradeInSiteId: number | null;

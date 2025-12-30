@@ -1,4 +1,8 @@
 import * as XLSX from 'xlsx';
+import {
+  excelSerialToDateString,
+  formatDateOnly,
+} from '../../../common/utils/date.util';
 
 export interface ExcelValidationResult {
   isValid: boolean;
@@ -116,29 +120,13 @@ export class MobilizationExcelUtil {
   }
 
   /**
-   * Converts Excel date serial number to ISO date string
+   * Converts Excel date serial number to ISO date string (timezone-neutral)
    * @param serial Excel date serial
    * @returns ISO date string or null
    */
   static excelDateToISO(serial: any): string | null {
-    if (!serial) return null;
-
-    // If it's already a string, try to parse it
-    if (typeof serial === 'string') {
-      const date = new Date(serial);
-      return isNaN(date.getTime()) ? null : date.toISOString().split('T')[0];
-    }
-
-    // If it's a number (Excel date serial)
-    if (typeof serial === 'number') {
-      const excelEpoch = new Date(1899, 11, 30);
-      const date = new Date(
-        excelEpoch.getTime() + serial * 24 * 60 * 60 * 1000,
-      );
-      return date.toISOString().split('T')[0];
-    }
-
-    return null;
+    // Use the centralized timezone-neutral date utility
+    return excelSerialToDateString(serial);
   }
 
   /**
@@ -369,9 +357,7 @@ export class MobilizationExcelUtil {
         'BOOKING FOR CLIENT': '',
         CATEGORIES: '',
         'MOB-DEM': mobDem,
-        DATE: mob.actionDate
-          ? new Date(mob.actionDate).toISOString().split('T')[0]
-          : '',
+        DATE: mob.actionDate ? formatDateOnly(mob.actionDate) : '',
       };
     });
 

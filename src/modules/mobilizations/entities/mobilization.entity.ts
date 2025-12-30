@@ -3,6 +3,7 @@ import { BaseEntity } from '../../../common/entities';
 import { Employee } from '../../employees/entities/employee.entity';
 import { Project } from '../../projects/entities/project.entity';
 import { Skill } from '../../skills/entities/skill.entity';
+import { DateOnlyTransformer } from '../../../common/transformers/date.transformer';
 
 export enum MobStatus {
   MOBILIZED = 'mobilized',
@@ -49,8 +50,8 @@ export class Mobilization extends BaseEntity {
   })
   jobStatus: JobStatus;
 
-  @Column({ type: 'date' })
-  actionDate: Date; // Date when this mobilization action occurred
+  @Column({ type: 'date', transformer: DateOnlyTransformer })
+  actionDate: string; // Date when this mobilization action occurred (YYYY-MM-DD)
 
   @Column({ type: 'text', nullable: true })
   notes: string | null;

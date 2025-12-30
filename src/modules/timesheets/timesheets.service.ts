@@ -28,6 +28,11 @@ import {
 import { TimesheetFiltersDto } from './dto/timesheet-filters.dto';
 import { SpecialDaysService } from '../special-days/special-days.service';
 import { SpecialDayType } from '../special-days/entities/special-day.entity';
+import {
+  formatDateOnly,
+  parseDateOnly,
+  compareDateOnly,
+} from '../../common/utils/date.util';
 
 export interface MonthlyProjectTimesheetData {
   timesheet: Timesheet | null;
@@ -100,11 +105,13 @@ export class TimesheetsService {
     });
 
     // Get all mobilizations for this project
+    // actionDate is now a string, so we use string comparison
+    const endDateStr = formatDateOnly(endDate);
     const mobilizations = await this.mobilizationRepository.find({
       where: {
         projectId: project.id,
         mobStatus: MobStatus.MOBILIZED,
-        actionDate: LessThanOrEqual(endDate),
+        actionDate: LessThanOrEqual(endDateStr) as any,
       },
       relations: ['employee', 'mobilizedTrade'],
       order: {
@@ -129,10 +136,11 @@ export class TimesheetsService {
 
     for (const [employeeId, latestMob] of employeeMap.entries()) {
       // Get all mobilizations for this employee to determine status for each day
+      // actionDate is now a string, so we use string comparison
       const employeeMobilizations = await this.mobilizationRepository.find({
         where: {
           employeeId,
-          actionDate: LessThanOrEqual(endDate),
+          actionDate: LessThanOrEqual(endDateStr) as any,
         },
         order: {
           actionDate: 'DESC',
@@ -158,11 +166,10 @@ export class TimesheetsService {
           dateStr,
         );
 
-        // Check if there's an existing entry
+        // Check if there's an existing entry (using timezone-neutral comparison)
         const existingEntry = timesheet?.entries?.find(
           (e) =>
-            e.employeeId === employeeId &&
-            new Date(e.date).toISOString().split('T')[0] === dateStr,
+            e.employeeId === employeeId && formatDateOnly(e.date) === dateStr,
         );
 
         // Determine if employee should appear in timesheet for this date
@@ -186,9 +193,9 @@ export class TimesheetsService {
           }
 
           // Check if the effective mobilization is from this exact date (user-entered)
-          // or carried forward from a previous date
+          // or carried forward from a previous date (using timezone-neutral comparison)
           const effectiveMobDateStr = effectiveMob
-            ? new Date(effectiveMob.actionDate).toISOString().split('T')[0]
+            ? formatDateOnly(effectiveMob.actionDate)
             : null;
           const isActualMobilizationForThisDate =
             effectiveMobDateStr === dateStr;
@@ -295,9 +302,9 @@ export class TimesheetsService {
     employeeMobilizations: Mobilization[],
     dateStr: string,
   ): Mobilization | undefined {
-    // Find all mobilizations up to and including this date
+    // Find all mobilizations up to and including this date (using timezone-neutral comparison)
     const mobilizationsUpToDate = employeeMobilizations.filter((m) => {
-      const mobDateStr = new Date(m.actionDate).toISOString().split('T')[0];
+      const mobDateStr = formatDateOnly(m.actionDate);
       return mobDateStr <= dateStr;
     });
 
@@ -307,9 +314,7 @@ export class TimesheetsService {
 
     // Get the most recent mobilization
     const latestMob = mobilizationsUpToDate[0]; // Already sorted by actionDate DESC
-    const latestMobDateStr = new Date(latestMob.actionDate)
-      .toISOString()
-      .split('T')[0];
+    const latestMobDateStr = formatDateOnly(latestMob.actionDate);
 
     // List of temporary one-day statuses that should not carry forward
     const temporaryStatuses = ['absent', 'sick_leave', 'casual_leave'];
@@ -443,14 +448,16 @@ export class TimesheetsService {
     const savedEntries: TimesheetEntry[] = [];
 
     for (const entryDto of saveEntriesDto.entries) {
-      const entryDate = new Date(entryDto.date);
+      // Parse date as timezone-neutral
+      const entryDate = parseDateOnly(entryDto.date);
 
-      // Check if entry exists
+      // Check if entry exists (date is now a string)
+      const dateString = formatDateOnly(entryDate);
       let entry = await this.entryRepository.findOne({
         where: {
           timesheetId,
           employeeId: entryDto.employeeId,
-          date: entryDate,
+          date: dateString as any, // TypeORM will handle the transformer
         },
       });
 
@@ -462,11 +469,11 @@ export class TimesheetsService {
         entry.tradeInSiteId = entryDto.tradeInSiteId || null;
         entry.updatedBy = updatedBy;
       } else {
-        // Create new entry
+        // Create new entry (date will be transformed by DateOnlyTransformer)
         entry = this.entryRepository.create({
           timesheetId,
           employeeId: entryDto.employeeId,
-          date: entryDate,
+          date: dateString as any, // TypeORM will handle the transformer
           hoursWorked: entryDto.hoursWorked,
           jobStatus: entryDto.jobStatus,
           notes: entryDto.notes,
@@ -500,8 +507,9 @@ export class TimesheetsService {
     createdBy: number,
   ): Promise<void> {
     try {
-      const entryDate = new Date(entry.date);
-      const dateStr = entryDate.toISOString().split('T')[0];
+      // entry.date is now a string (YYYY-MM-DD) thanks to DateOnlyTransformer
+      const dateStr = entry.date;
+      const entryDate = parseDateOnly(dateStr);
 
       // Define statuses that should trigger automatic demobilization
       const demobilizingStatuses = [
@@ -518,10 +526,11 @@ export class TimesheetsService {
       );
 
       // Get current effective mobilization for this employee on this date
+      // actionDate is now a string, so we use string comparison
       const currentMobilizations = await this.mobilizationRepository.find({
         where: {
           employeeId: entry.employeeId,
-          actionDate: LessThanOrEqual(entryDate),
+          actionDate: LessThanOrEqual(dateStr) as any,
         },
         relations: ['mobilizedTrade'],
         order: { actionDate: 'DESC', createdAt: 'DESC' },
@@ -536,9 +545,9 @@ export class TimesheetsService {
 
       const currentMob = currentMobilizations[0];
 
-      // Check if there's already a mobilization record for this exact date
+      // Check if there's already a mobilization record for this exact date (using timezone-neutral comparison)
       const exactDateMob = currentMobilizations.find((m) => {
-        const mobDateStr = new Date(m.actionDate).toISOString().split('T')[0];
+        const mobDateStr = formatDateOnly(m.actionDate);
         return mobDateStr === dateStr;
       });
 
@@ -574,6 +583,7 @@ export class TimesheetsService {
 
         if (statusDiffers || needsDemobilization) {
           // Create new mobilization record for this date with the new status
+          // actionDate is now a string (YYYY-MM-DD)
           const newMob = this.mobilizationRepository.create({
             employeeId: entry.employeeId,
             mobilizedTradeId: currentMob.mobilizedTradeId,
@@ -582,7 +592,7 @@ export class TimesheetsService {
               ? MobStatus.DEMOBILIZED
               : MobStatus.MOBILIZED,
             jobStatus: entry.jobStatus as JobStatus,
-            actionDate: entryDate,
+            actionDate: dateStr as any, // TypeORM will handle the transformer
             notes:
               `Auto-synced from timesheet${shouldDemobilize ? ' - Auto-demobilized' : ''}: ${entry.notes || ''}`.trim(),
             createdBy,
