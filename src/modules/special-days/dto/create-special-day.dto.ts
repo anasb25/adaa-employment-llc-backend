@@ -3,7 +3,12 @@ import {
   IsDateString,
   IsOptional,
   IsBoolean,
+  IsEnum,
+  IsNumber,
+  Min,
+  Max,
 } from 'class-validator';
+import { SpecialDayType } from '../entities/special-day.entity';
 
 export class CreateSpecialDayDto {
   @IsString()
@@ -35,5 +40,28 @@ export class CreateSpecialDayDto {
   @IsOptional()
   @IsString()
   color?: string;
-}
 
+  @IsOptional()
+  @IsEnum(SpecialDayType)
+  dayType?: SpecialDayType;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(10)
+  clientRateMultiplier?: number; // Max 10x (1000% increase)
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(10)
+  employeeRateMultiplier?: number; // Max 10x (1000% increase)
+
+  @IsOptional()
+  @IsBoolean()
+  isDefaultOff?: boolean;
+
+  @IsOptional()
+  @IsString()
+  notes?: string;
+}

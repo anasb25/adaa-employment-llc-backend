@@ -7,6 +7,7 @@ import { Employee } from '../employees/entities/employee.entity';
 import { Project } from '../projects/entities/project.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { Client } from '../clients/entities/client.entity';
+import { SpecialDaysModule } from '../special-days/special-days.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { Client } from '../clients/entities/client.entity';
       Skill,
       Client,
     ]),
+    SpecialDaysModule,
   ],
   controllers: [MobilizationsController],
   providers: [MobilizationsService],

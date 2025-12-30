@@ -1,6 +1,13 @@
 import { Entity, Column, Index } from 'typeorm';
 import { BaseEntity } from '../../../common/entities';
 
+export enum SpecialDayType {
+  MANDATORY_OFF = 'mandatory_off', // Must be off (e.g., government mandated holidays)
+  OPTIONAL_OFF = 'optional_off', // Default off but can work with premium rates
+  PREMIUM_RATE = 'premium_rate', // Working day with premium billing rates
+  REGULAR = 'regular', // Just marked for reference, no special treatment
+}
+
 @Entity('special_days')
 @Index(['startDate', 'endDate'])
 export class SpecialDay extends BaseEntity {
@@ -27,5 +34,25 @@ export class SpecialDay extends BaseEntity {
 
   @Column({ nullable: true })
   color: string; // Hex color for UI display
+
+  // NEW FIELDS for rate management
+  @Column({
+    type: 'enum',
+    enum: SpecialDayType,
+    default: SpecialDayType.REGULAR,
+  })
+  dayType: SpecialDayType;
+
+  @Column({ type: 'decimal', precision: 5, scale: 2, default: 1.0 })
+  clientRateMultiplier: number; // e.g., 1.10 = 110% (10% extra charge to client)
+
+  @Column({ type: 'decimal', precision: 5, scale: 2, default: 1.0 })
+  employeeRateMultiplier: number; // e.g., 1.05 = 105% (5% extra pay to employee)
+
+  @Column({ default: false })
+  isDefaultOff: boolean; // If true, default to off status (but can be overridden if not mandatory)
+
+  @Column({ type: 'text', nullable: true })
+  notes: string; // Internal notes for admins
 }
 

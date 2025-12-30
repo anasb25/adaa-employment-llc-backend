@@ -8,6 +8,7 @@ import { Mobilization } from '../mobilizations/entities/mobilization.entity';
 import { Employee } from '../employees/entities/employee.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { Project } from '../projects/entities/project.entity';
+import { SpecialDaysModule } from '../special-days/special-days.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { Project } from '../projects/entities/project.entity';
       Skill,
       Project,
     ]),
+    SpecialDaysModule,
   ],
   controllers: [TimesheetsController],
   providers: [TimesheetsService],

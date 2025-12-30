@@ -5,10 +5,20 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Between, LessThanOrEqual, MoreThanOrEqual } from 'typeorm';
-import { SpecialDay } from './entities/special-day.entity';
+import { SpecialDay, SpecialDayType } from './entities/special-day.entity';
 import { CreateSpecialDayDto } from './dto/create-special-day.dto';
 import { UpdateSpecialDayDto } from './dto/update-special-day.dto';
 import { SpecialDayFiltersDto } from './dto/special-day-filters.dto';
+
+export interface SpecialDayRates {
+  isSpecialDay: boolean;
+  specialDay: SpecialDay | null;
+  clientRateMultiplier: number;
+  employeeRateMultiplier: number;
+  isDefaultOff: boolean;
+  isMandatoryOff: boolean;
+  dayType: SpecialDayType | null;
+}
 
 @Injectable()
 export class SpecialDaysService {
@@ -26,8 +36,12 @@ export class SpecialDaysService {
       throw new BadRequestException('End date must be after start date');
     }
 
+    // If no end date provided, set it to start date (single day event)
+    const endDate = createDto.endDate || createDto.startDate;
+
     const specialDay = this.specialDayRepository.create({
       ...createDto,
+      endDate,
       createdBy,
     });
 
@@ -98,12 +112,15 @@ export class SpecialDaysService {
 
     // Validate date range
     const startDate = updateDto.startDate || specialDay.startDate;
-    const endDate = updateDto.endDate || specialDay.endDate;
+    const endDate = updateDto.endDate !== undefined 
+      ? updateDto.endDate || startDate // If explicitly set to empty, use startDate
+      : specialDay.endDate; // If not provided, keep existing
+      
     if (endDate && startDate > endDate) {
       throw new BadRequestException('End date must be after start date');
     }
 
-    Object.assign(specialDay, updateDto);
+    Object.assign(specialDay, { ...updateDto, endDate });
     specialDay.updatedBy = updatedBy;
 
     return await this.specialDayRepository.save(specialDay);
@@ -123,11 +140,9 @@ export class SpecialDaysService {
     const specialDay = await this.specialDayRepository
       .createQueryBuilder('specialDay')
       .where('specialDay.isActive = :isActive', { isActive: true })
-      .andWhere('specialDay.startDate <= :date', { date: dateStr })
-      .andWhere(
-        '(specialDay.endDate IS NULL OR specialDay.endDate >= :date)',
-        { date: dateStr },
-      )
+      .andWhere(':date BETWEEN specialDay.startDate AND COALESCE(specialDay.endDate, specialDay.startDate)', {
+        date: dateStr,
+      })
       .getOne();
 
     return specialDay;
@@ -155,6 +170,88 @@ export class SpecialDaysService {
       )
       .orderBy('specialDay.startDate', 'ASC')
       .getMany();
+  }
+
+  /**
+   * Get special day rates and rules for a specific date
+   * This is the main utility method to be used by other modules (mobilizations, timesheets, billing)
+   */
+  async getSpecialDayRates(date: Date): Promise<SpecialDayRates> {
+    const specialDay = await this.isSpecialDay(date);
+
+    if (!specialDay) {
+      return {
+        isSpecialDay: false,
+        specialDay: null,
+        clientRateMultiplier: 1.0,
+        employeeRateMultiplier: 1.0,
+        isDefaultOff: false,
+        isMandatoryOff: false,
+        dayType: null,
+      };
+    }
+
+    return {
+      isSpecialDay: true,
+      specialDay,
+      clientRateMultiplier: Number(specialDay.clientRateMultiplier),
+      employeeRateMultiplier: Number(specialDay.employeeRateMultiplier),
+      isDefaultOff: specialDay.isDefaultOff,
+      isMandatoryOff: specialDay.dayType === SpecialDayType.MANDATORY_OFF,
+      dayType: specialDay.dayType,
+    };
+  }
+
+  /**
+   * Batch get special day rates for multiple dates
+   * More efficient than calling getSpecialDayRates multiple times
+   */
+  async getSpecialDayRatesForRange(
+    startDate: Date,
+    endDate: Date,
+  ): Promise<Map<string, SpecialDayRates>> {
+    const specialDays = await this.getSpecialDaysInRange(startDate, endDate);
+    const ratesMap = new Map<string, SpecialDayRates>();
+
+    // Create a map of all dates in range
+    const currentDate = new Date(startDate);
+    while (currentDate <= endDate) {
+      const dateStr = currentDate.toISOString().split('T')[0];
+
+      // Find if this date falls within any special day
+      const applicableSpecialDay = specialDays.find((sd) => {
+        const sdStart = new Date(sd.startDate);
+        const sdEnd = sd.endDate ? new Date(sd.endDate) : sdStart;
+        return currentDate >= sdStart && currentDate <= sdEnd;
+      });
+
+      if (applicableSpecialDay) {
+        ratesMap.set(dateStr, {
+          isSpecialDay: true,
+          specialDay: applicableSpecialDay,
+          clientRateMultiplier: Number(applicableSpecialDay.clientRateMultiplier),
+          employeeRateMultiplier: Number(applicableSpecialDay.employeeRateMultiplier),
+          isDefaultOff: applicableSpecialDay.isDefaultOff,
+          isMandatoryOff:
+            applicableSpecialDay.dayType === SpecialDayType.MANDATORY_OFF,
+          dayType: applicableSpecialDay.dayType,
+        });
+      } else {
+        ratesMap.set(dateStr, {
+          isSpecialDay: false,
+          specialDay: null,
+          clientRateMultiplier: 1.0,
+          employeeRateMultiplier: 1.0,
+          isDefaultOff: false,
+          isMandatoryOff: false,
+          dayType: null,
+        });
+      }
+
+      currentDate.setDate(currentDate.getDate() + 1);
+    }
+
+    return ratesMap;
   }
 }
 

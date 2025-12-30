@@ -27,6 +27,8 @@ import {
   PaginationUtil,
 } from '../../common/utils/pagination.util';
 import { MobilizationExcelUtil } from './utils/mobilization-excel.util';
+import { SpecialDaysService } from '../special-days/special-days.service';
+import { SpecialDayType } from '../special-days/entities/special-day.entity';
 
 @Injectable()
 export class MobilizationsService {
@@ -43,6 +45,7 @@ export class MobilizationsService {
     private skillRepository: Repository<Skill>,
     @InjectRepository(Client)
     private clientRepository: Repository<Client>,
+    private specialDaysService: SpecialDaysService,
   ) {}
 
   /**
@@ -301,7 +304,7 @@ export class MobilizationsService {
     }
 
     // Apply smart carry-forward logic
-    return this.applySmartCarryForward(allMobilizations, date);
+    return await this.applySmartCarryForward(allMobilizations, date);
   }
 
   /**
@@ -350,7 +353,7 @@ export class MobilizationsService {
       employeeId,
       mobilizations,
     ] of employeeMobilizationsMap.entries()) {
-      const effective = this.applySmartCarryForward(mobilizations, date);
+      const effective = await this.applySmartCarryForward(mobilizations, date);
       if (effective) {
         effectiveMobilizations.push(effective);
       }
@@ -369,12 +372,12 @@ export class MobilizationsService {
   /**
    * Apply smart carry-forward logic to mobilization records
    * Temporary statuses (absent, sick_leave, casual_leave) don't carry forward
-   * Respects project off days for carried-forward statuses
+   * Respects project off days and special days for carried-forward statuses
    */
-  private applySmartCarryForward(
+  private async applySmartCarryForward(
     mobilizations: Mobilization[],
     targetDate: Date,
-  ): Mobilization | null {
+  ): Promise<Mobilization | null> {
     if (mobilizations.length === 0) {
       return null;
     }
@@ -392,20 +395,48 @@ export class MobilizationsService {
     ];
 
     // If the latest mobilization is on the exact date we're looking at -> use it as-is
-    // User explicitly entered this record, so we respect their choice even if it's an off day
+    // User explicitly entered this record, so we respect their choice even if it's an off day or special day
     if (latestMobDateStr === targetDateStr) {
       return latestMob;
     }
 
     // We're carrying forward a status from a previous date
-    // Check if target date is an off day for the project
+    // Check for special days first (higher priority than project off days)
+    const specialDayRates =
+      await this.specialDaysService.getSpecialDayRates(targetDate);
+
+    if (specialDayRates.isSpecialDay) {
+      // Handle special day logic based on day type
+      if (specialDayRates.isMandatoryOff) {
+        // Mandatory off day - must be off, cannot override (for carry-forward)
+        return {
+          ...latestMob,
+          jobStatus: JobStatus.OFF,
+        };
+      }
+
+      if (
+        specialDayRates.dayType === SpecialDayType.OPTIONAL_OFF ||
+        specialDayRates.isDefaultOff
+      ) {
+        // Optional off or default to off (for carry-forward)
+        return {
+          ...latestMob,
+          jobStatus: JobStatus.OFF,
+        };
+      }
+
+      // For PREMIUM_RATE or REGULAR special days, continue with normal logic
+    }
+
+    // Check if target date is a project off day
     if (
       latestMob.project?.offDays &&
       Array.isArray(latestMob.project.offDays)
     ) {
       const dayOfWeek = this.getDayOfWeek(targetDate);
       if (latestMob.project.offDays.includes(dayOfWeek)) {
-        // Target date is an off day - return OFF status
+        // Target date is a project off day - return OFF status
         return {
           ...latestMob,
           jobStatus: JobStatus.OFF,

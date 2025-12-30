@@ -26,6 +26,8 @@ import {
   ApproveTimesheetDto,
 } from './dto/update-timesheet.dto';
 import { TimesheetFiltersDto } from './dto/timesheet-filters.dto';
+import { SpecialDaysService } from '../special-days/special-days.service';
+import { SpecialDayType } from '../special-days/entities/special-day.entity';
 
 export interface MonthlyProjectTimesheetData {
   timesheet: Timesheet | null;
@@ -71,6 +73,7 @@ export class TimesheetsService {
     private readonly projectRepository: Repository<Project>,
     @InjectRepository(Skill)
     private readonly skillRepository: Repository<Skill>,
+    private specialDaysService: SpecialDaysService,
   ) {}
 
   /**
@@ -185,7 +188,11 @@ export class TimesheetsService {
           const isActualMobilizationForThisDate =
             effectiveMobDateStr === dateStr;
 
-          // Check if this day is an off day for the project
+          // Check for special days first (higher priority)
+          const specialDayRates =
+            await this.specialDaysService.getSpecialDayRates(currentDate);
+
+          // Check if this day is a project off day
           const isProjectOffDay =
             project.offDays &&
             Array.isArray(project.offDays) &&
@@ -200,11 +207,26 @@ export class TimesheetsService {
             jobStatus = existingEntry.jobStatus;
           } else if (isActualMobilizationForThisDate) {
             // There's an actual mobilization record for this specific date
-            // Use its status regardless of off-days (user explicitly created this record)
+            // Use its status regardless of off-days/special days (user explicitly created this record)
             hours = this.getDefaultHoursForStatus(effectiveMob.jobStatus);
             jobStatus = effectiveMob.jobStatus;
+          } else if (
+            specialDayRates.isSpecialDay &&
+            specialDayRates.isMandatoryOff
+          ) {
+            // Mandatory off day - must be off
+            hours = 0;
+            jobStatus = JobStatus.OFF;
+          } else if (
+            specialDayRates.isSpecialDay &&
+            (specialDayRates.dayType === SpecialDayType.OPTIONAL_OFF ||
+              specialDayRates.isDefaultOff)
+          ) {
+            // Optional off day or default off
+            hours = 0;
+            jobStatus = JobStatus.OFF;
           } else if (isProjectOffDay) {
-            // No user entry, no mobilization record for today, and it's an off day
+            // No user entry, no mobilization record for today, and it's a project off day
             // Default to "Off" status for carried-forward entries
             hours = 0;
             jobStatus = JobStatus.OFF;

@@ -67,5 +67,26 @@ export class SpecialDaysController {
       new Date(endDate),
     );
   }
+
+  @Get('rates')
+  async getRates(@Query('date') date: string) {
+    const dateObj = new Date(date);
+    return this.specialDaysService.getSpecialDayRates(dateObj);
+  }
+
+  @Get('rates/range')
+  async getRatesRange(
+    @Query('startDate') startDate: string,
+    @Query('endDate') endDate: string,
+  ) {
+    const startDateObj = new Date(startDate);
+    const endDateObj = new Date(endDate);
+    const ratesMap = await this.specialDaysService.getSpecialDayRatesForRange(
+      startDateObj,
+      endDateObj,
+    );
+    // Convert Map to object for JSON serialization
+    return Object.fromEntries(ratesMap);
+  }
 }
 

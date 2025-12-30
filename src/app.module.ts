@@ -19,6 +19,7 @@ import { ProjectSkillsModule } from './modules/project-skills/project-skills.mod
 import { TimesheetsModule } from './modules/timesheets/timesheets.module';
 import { MobilizationsModule } from './modules/mobilizations/mobilizations.module';
 import { SpecialDaysModule } from './modules/special-days/special-days.module';
+import { RateVariantsModule } from './modules/rate-variants/rate-variants.module';
 import appConfig from './config/app.config';
 import databaseConfig from './config/database.config';
 import authConfig from './config/auth.config';
@@ -75,6 +76,7 @@ import mailConfig from './config/mail.config';
     TimesheetsModule,
     MobilizationsModule,
     SpecialDaysModule,
+    RateVariantsModule,
   ],
   controllers: [AppController],
   providers: [
