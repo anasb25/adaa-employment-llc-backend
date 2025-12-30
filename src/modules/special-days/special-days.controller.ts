@@ -17,6 +17,7 @@ import { SpecialDayFiltersDto } from './dto/special-day-filters.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
 import { CurrentUser } from '../../common/decorators';
 import { User } from '../users/entities/user.entity';
+import { parseDateOnly } from '../../common/utils/date.util';
 
 @Controller('special-days')
 @UseGuards(JwtAuthGuard)
@@ -54,7 +55,8 @@ export class SpecialDaysController {
 
   @Get('check/:date')
   checkDate(@Param('date') date: string) {
-    return this.specialDaysService.isSpecialDay(new Date(date));
+    // Parse date as timezone-neutral
+    return this.specialDaysService.isSpecialDay(parseDateOnly(date));
   }
 
   @Get('range/:startDate/:endDate')
@@ -62,15 +64,17 @@ export class SpecialDaysController {
     @Param('startDate') startDate: string,
     @Param('endDate') endDate: string,
   ) {
+    // Parse dates as timezone-neutral
     return this.specialDaysService.getSpecialDaysInRange(
-      new Date(startDate),
-      new Date(endDate),
+      parseDateOnly(startDate),
+      parseDateOnly(endDate),
     );
   }
 
   @Get('rates')
   async getRates(@Query('date') date: string) {
-    const dateObj = new Date(date);
+    // Parse date as timezone-neutral
+    const dateObj = parseDateOnly(date);
     return this.specialDaysService.getSpecialDayRates(dateObj);
   }
 
@@ -79,8 +83,9 @@ export class SpecialDaysController {
     @Query('startDate') startDate: string,
     @Query('endDate') endDate: string,
   ) {
-    const startDateObj = new Date(startDate);
-    const endDateObj = new Date(endDate);
+    // Parse dates as timezone-neutral
+    const startDateObj = parseDateOnly(startDate);
+    const endDateObj = parseDateOnly(endDate);
     const ratesMap = await this.specialDaysService.getSpecialDayRatesForRange(
       startDateObj,
       endDateObj,

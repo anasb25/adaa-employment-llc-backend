@@ -9,6 +9,7 @@ import { SpecialDay, SpecialDayType } from './entities/special-day.entity';
 import { CreateSpecialDayDto } from './dto/create-special-day.dto';
 import { UpdateSpecialDayDto } from './dto/update-special-day.dto';
 import { SpecialDayFiltersDto } from './dto/special-day-filters.dto';
+import { formatDateOnly } from '../../common/utils/date.util';
 
 export interface SpecialDayRates {
   isSpecialDay: boolean;
@@ -132,10 +133,10 @@ export class SpecialDaysService {
   }
 
   /**
-   * Check if a given date falls within any special day
+   * Check if a given date falls within any special day (timezone-neutral)
    */
   async isSpecialDay(date: Date): Promise<SpecialDay | null> {
-    const dateStr = date.toISOString().split('T')[0];
+    const dateStr = formatDateOnly(date);
 
     const specialDay = await this.specialDayRepository
       .createQueryBuilder('specialDay')
@@ -149,14 +150,14 @@ export class SpecialDaysService {
   }
 
   /**
-   * Get all special days within a date range
+   * Get all special days within a date range (timezone-neutral)
    */
   async getSpecialDaysInRange(
     startDate: Date,
     endDate: Date,
   ): Promise<SpecialDay[]> {
-    const startStr = startDate.toISOString().split('T')[0];
-    const endStr = endDate.toISOString().split('T')[0];
+    const startStr = formatDateOnly(startDate);
+    const endStr = formatDateOnly(endDate);
 
     return await this.specialDayRepository
       .createQueryBuilder('specialDay')
@@ -203,7 +204,7 @@ export class SpecialDaysService {
   }
 
   /**
-   * Batch get special day rates for multiple dates
+   * Batch get special day rates for multiple dates (timezone-neutral)
    * More efficient than calling getSpecialDayRates multiple times
    */
   async getSpecialDayRatesForRange(
@@ -213,16 +214,16 @@ export class SpecialDaysService {
     const specialDays = await this.getSpecialDaysInRange(startDate, endDate);
     const ratesMap = new Map<string, SpecialDayRates>();
 
-    // Create a map of all dates in range
+    // Create a map of all dates in range using timezone-neutral date handling
     const currentDate = new Date(startDate);
     while (currentDate <= endDate) {
-      const dateStr = currentDate.toISOString().split('T')[0];
+      const dateStr = formatDateOnly(currentDate);
 
-      // Find if this date falls within any special day
+      // Find if this date falls within any special day (using string comparison)
       const applicableSpecialDay = specialDays.find((sd) => {
-        const sdStart = new Date(sd.startDate);
-        const sdEnd = sd.endDate ? new Date(sd.endDate) : sdStart;
-        return currentDate >= sdStart && currentDate <= sdEnd;
+        const sdStart = sd.startDate;
+        const sdEnd = sd.endDate || sdStart;
+        return dateStr >= sdStart && dateStr <= sdEnd;
       });
 
       if (applicableSpecialDay) {

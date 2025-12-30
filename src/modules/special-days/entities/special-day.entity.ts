@@ -1,5 +1,6 @@
 import { Entity, Column, Index } from 'typeorm';
 import { BaseEntity } from '../../../common/entities';
+import { DateOnlyTransformer } from '../../../common/transformers/date.transformer';
 
 export enum SpecialDayType {
   MANDATORY_OFF = 'mandatory_off', // Must be off (e.g., government mandated holidays)
@@ -17,11 +18,11 @@ export class SpecialDay extends BaseEntity {
   @Column({ nullable: true })
   category: string; // Flexible category like "Public Holiday", "Ramadan", "National Day", etc.
 
-  @Column({ type: 'date' })
-  startDate: Date;
+  @Column({ type: 'date', transformer: DateOnlyTransformer })
+  startDate: string; // Date in YYYY-MM-DD format
 
-  @Column({ type: 'date', nullable: true })
-  endDate: Date; // For date ranges like Ramadan
+  @Column({ type: 'date', nullable: true, transformer: DateOnlyTransformer })
+  endDate: string | null; // For date ranges like Ramadan (YYYY-MM-DD format)
 
   @Column({ type: 'text', nullable: true })
   description: string;
@@ -55,4 +56,3 @@ export class SpecialDay extends BaseEntity {
   @Column({ type: 'text', nullable: true })
   notes: string; // Internal notes for admins
 }
-

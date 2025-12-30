@@ -1,5 +1,9 @@
 import * as XLSX from 'xlsx';
 import { BadRequestException } from '@nestjs/common';
+import {
+  excelSerialToDateString,
+  formatDateOnly,
+} from '../../../common/utils/date.util';
 
 export interface ExcelValidationResult {
   isValid: boolean;
@@ -101,29 +105,13 @@ export class ExcelValidatorUtil {
   }
 
   /**
-   * Converts Excel date serial number to ISO date string
+   * Converts Excel date serial number to ISO date string (timezone-neutral)
    * @param serial Excel date serial
    * @returns ISO date string or null
    */
   static excelDateToISO(serial: any): string | null {
-    if (!serial) return null;
-
-    // If it's already a string, try to parse it
-    if (typeof serial === 'string') {
-      const date = new Date(serial);
-      return isNaN(date.getTime()) ? null : date.toISOString().split('T')[0];
-    }
-
-    // If it's a number (Excel date serial)
-    if (typeof serial === 'number') {
-      const excelEpoch = new Date(1899, 11, 30);
-      const date = new Date(
-        excelEpoch.getTime() + serial * 24 * 60 * 60 * 1000,
-      );
-      return date.toISOString().split('T')[0];
-    }
-
-    return null;
+    // Use the centralized timezone-neutral date utility
+    return excelSerialToDateString(serial);
   }
 
   /**
@@ -235,20 +223,14 @@ export class ExcelValidatorUtil {
         NAME: emp.name || '',
         TRADE: primaryTrade,
         'PP No': emp.pp_no || '',
-        DOJ: emp.date_of_joining
-          ? new Date(emp.date_of_joining).toISOString().split('T')[0]
-          : '',
-        DOB: emp.dob ? new Date(emp.dob).toISOString().split('T')[0] : '',
+        DOJ: emp.date_of_joining ? formatDateOnly(emp.date_of_joining) : '',
+        DOB: emp.dob ? formatDateOnly(emp.dob) : '',
         NATIONALITY: emp.nationality || '',
-        'PP EXPIRY': emp.pp_expiry
-          ? new Date(emp.pp_expiry).toISOString().split('T')[0]
-          : '',
-        'VISA EXPIRY': emp.visa_expiry
-          ? new Date(emp.visa_expiry).toISOString().split('T')[0]
-          : '',
+        'PP EXPIRY': emp.pp_expiry ? formatDateOnly(emp.pp_expiry) : '',
+        'VISA EXPIRY': emp.visa_expiry ? formatDateOnly(emp.visa_expiry) : '',
         'EID NO': emp.emirates_id || '',
         'Emirates ID Expiry Date': emp.emirates_id_expiry
-          ? new Date(emp.emirates_id_expiry).toISOString().split('T')[0]
+          ? formatDateOnly(emp.emirates_id_expiry)
           : '',
         'BASIC SALARY': '', // Not in DB yet
         HRA: '', // Not in DB yet
@@ -259,7 +241,7 @@ export class ExcelValidatorUtil {
         'PERSONAL CODE': emp.personal_code || '',
         'WORK PERMIT': emp.work_permit_no || '',
         'WP EXPIRY': emp.work_permit_expiry
-          ? new Date(emp.work_permit_expiry).toISOString().split('T')[0]
+          ? formatDateOnly(emp.work_permit_expiry)
           : '',
       };
     });

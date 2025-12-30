@@ -1,6 +1,7 @@
 import { Entity, Column, OneToMany } from 'typeorm';
 import { BaseEntity } from '../../../common/entities';
 import { EmployeeSkill } from '../../employee-skills/entities/employee-skill.entity';
+import { DateOnlyTransformer } from '../../../common/transformers/date.transformer';
 
 export enum EmployeeStatus {
   ACTIVE = 'active',
@@ -15,14 +16,14 @@ export class Employee extends BaseEntity {
   @Column()
   name: string;
 
-  @Column({ type: 'date', nullable: true })
-  dob: Date;
+  @Column({ type: 'date', nullable: true, transformer: DateOnlyTransformer })
+  dob: string | null; // Date in YYYY-MM-DD format
 
   @Column({ nullable: true, unique: true })
   pp_no: string;
 
-  @Column({ type: 'date', nullable: true })
-  pp_expiry: Date;
+  @Column({ type: 'date', nullable: true, transformer: DateOnlyTransformer })
+  pp_expiry: string | null; // Date in YYYY-MM-DD format
 
   @Column({ nullable: true })
   nationality: string;
@@ -30,17 +31,17 @@ export class Employee extends BaseEntity {
   @Column({ nullable: true, unique: true })
   emirates_id: string;
 
-  @Column({ type: 'date', nullable: true })
-  emirates_id_expiry: Date;
+  @Column({ type: 'date', nullable: true, transformer: DateOnlyTransformer })
+  emirates_id_expiry: string | null; // Date in YYYY-MM-DD format
 
-  @Column({ type: 'date', nullable: true })
-  visa_expiry: Date;
+  @Column({ type: 'date', nullable: true, transformer: DateOnlyTransformer })
+  visa_expiry: string | null; // Date in YYYY-MM-DD format
 
   @Column({ nullable: true, unique: true })
   work_permit_no: string;
 
-  @Column({ type: 'date', nullable: true })
-  work_permit_expiry: Date;
+  @Column({ type: 'date', nullable: true, transformer: DateOnlyTransformer })
+  work_permit_expiry: string | null; // Date in YYYY-MM-DD format
 
   @Column({ nullable: true, unique: true })
   personal_code: string;
@@ -55,11 +56,11 @@ export class Employee extends BaseEntity {
   })
   status: EmployeeStatus;
 
-  @Column({ type: 'date', nullable: true })
-  date_of_joining: Date;
+  @Column({ type: 'date', nullable: true, transformer: DateOnlyTransformer })
+  date_of_joining: string | null; // Date in YYYY-MM-DD format
 
-  @Column({ type: 'date', nullable: true })
-  date_of_arrival: Date;
+  @Column({ type: 'date', nullable: true, transformer: DateOnlyTransformer })
+  date_of_arrival: string | null; // Date in YYYY-MM-DD format
 
   @OneToMany(() => EmployeeSkill, (employeeSkill) => employeeSkill.employee)
   employeeSkills: EmployeeSkill[];

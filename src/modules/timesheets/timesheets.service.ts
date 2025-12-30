@@ -152,8 +152,10 @@ export class TimesheetsService {
       const dailyHours: any[] = [];
 
       for (let day = 1; day <= daysInMonth; day++) {
-        const currentDate = new Date(year, monthNum - 1, day);
         const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+
+        // Create date at UTC midnight for timezone-neutral operations
+        const currentDate = parseDateOnly(dateStr);
 
         // Get day of week name (e.g., 'Monday', 'Tuesday', etc.)
         const dayOfWeekName = currentDate.toLocaleDateString('en-US', {
@@ -206,7 +208,7 @@ export class TimesheetsService {
             effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
             isActualMobilizationForThisDate;
 
-          // Check for special days first (higher priority)
+          // Check for special days first (higher priority) - using timezone-neutral date
           const specialDayRates =
             await this.specialDaysService.getSpecialDayRates(currentDate);
 
