@@ -180,7 +180,8 @@ export class TimesheetsService {
           effectiveMob.mobStatus === MobStatus.MOBILIZED &&
           effectiveMob.projectId === project.id;
 
-        const hasSavedHours = existingEntry && Number(existingEntry.hoursWorked) > 0;
+        const hasSavedHours =
+          existingEntry && Number(existingEntry.hoursWorked) > 0;
 
         // Only include dates where employee is mobilized OR has saved work hours
         if (isMobilizedToProject || hasSavedHours) {
@@ -562,16 +563,16 @@ export class TimesheetsService {
 
         if (statusChanged || mobStatusChanged) {
           exactDateMob.jobStatus = entry.jobStatus as JobStatus;
-          
+
           // Auto-demobilize if status requires it
           if (shouldDemobilize) {
             exactDateMob.mobStatus = MobStatus.DEMOBILIZED;
             exactDateMob.projectId = null; // Remove project assignment when demobilized
           }
-          
+
           exactDateMob.updatedBy = createdBy;
           await this.mobilizationRepository.save(exactDateMob);
-          
+
           const mobStatusInfo = shouldDemobilize ? ' (DEMOBILIZED)' : '';
           this.logger.log(
             `Updated mobilization for employee ${entry.employeeId} on ${dateStr}: ${entry.jobStatus}${mobStatusInfo}`,
@@ -594,16 +595,16 @@ export class TimesheetsService {
               : MobStatus.MOBILIZED,
             jobStatus: entry.jobStatus as JobStatus,
             actionDate: entryDate,
-            notes: `Auto-synced from timesheet${shouldDemobilize ? ' - Auto-demobilized' : ''}: ${entry.notes || ''}`.trim(),
+            notes:
+              `Auto-synced from timesheet${shouldDemobilize ? ' - Auto-demobilized' : ''}: ${entry.notes || ''}`.trim(),
             createdBy,
           });
 
           await this.mobilizationRepository.save(newMob);
-          
+
           const mobStatusInfo = shouldDemobilize ? ' (DEMOBILIZED)' : '';
           this.logger.log(
             `Created mobilization for employee ${entry.employeeId} on ${dateStr}: ${entry.jobStatus}${mobStatusInfo}`,
-          );
           );
         }
       }
