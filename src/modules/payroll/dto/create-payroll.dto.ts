@@ -52,5 +52,9 @@ export class CreatePayrollDto {
   @IsOptional()
   @IsNumber()
   totalGrossSalary?: number;
+
+  @IsOptional()
+  @IsNumber()
+  netSalary?: number;
 }
 

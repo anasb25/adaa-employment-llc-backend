@@ -145,25 +145,22 @@ export class ExcelValidatorUtil {
       date_of_joining: this.excelDateToISO(row['DOJ']),
       date_of_arrival: null, // Not in Excel
 
+      // Salary fields
+      basic_salary: row['BASIC SALARY']
+        ? parseFloat(row['BASIC SALARY'].toString())
+        : null,
+      hra: row['HRA'] ? parseFloat(row['HRA'].toString()) : null,
+      other_allowance: row['OTHER ALLOWANCE']
+        ? parseFloat(row['OTHER ALLOWANCE'].toString())
+        : null,
+
       // Special handling for trade (will be processed separately)
       trade: toNullIfEmpty(row['TRADE']),
 
-      // Additional fields (accepted but not saved to DB yet)
-      _additionalData: {
-        basic_salary: row['BASIC SALARY']
-          ? parseFloat(row['BASIC SALARY'].toString())
-          : null,
-        hra: row['HRA'] ? parseFloat(row['HRA'].toString()) : null,
-        other_allowance: row['OTHER ALLOWANCE']
-          ? parseFloat(row['OTHER ALLOWANCE'].toString())
-          : null,
-        rate_per_hr: row['RATE PER HR']
-          ? parseFloat(row['RATE PER HR'].toString())
-          : null,
-        total_salary: row['TOTAL SALARY']
-          ? parseFloat(row['TOTAL SALARY'].toString())
-          : null,
-      },
+      // Rate per hour for employee skill (will be processed separately)
+      rate_per_hr: row['RATE PER HR']
+        ? parseFloat(row['RATE PER HR'].toString())
+        : null,
     };
   }
 
@@ -232,11 +229,19 @@ export class ExcelValidatorUtil {
         'Emirates ID Expiry Date': emp.emirates_id_expiry
           ? formatDateOnly(emp.emirates_id_expiry)
           : '',
-        'BASIC SALARY': '', // Not in DB yet
-        HRA: '', // Not in DB yet
-        'OTHER ALLOWANCE': '', // Not in DB yet
-        'RATE PER HR': '', // Not in DB yet
-        'TOTAL SALARY': '', // Not in DB yet
+        'BASIC SALARY': emp.basic_salary || '',
+        HRA: emp.hra || '',
+        'OTHER ALLOWANCE': emp.other_allowance || '',
+        'RATE PER HR':
+          emp.employeeSkills && emp.employeeSkills.length > 0
+            ? emp.employeeSkills[0].cost_price || ''
+            : '',
+        'TOTAL SALARY':
+          emp.basic_salary && emp.hra && emp.other_allowance
+            ? parseFloat(emp.basic_salary) +
+              parseFloat(emp.hra) +
+              parseFloat(emp.other_allowance)
+            : '',
         'CONTACT NO': emp.contact_no || '',
         'PERSONAL CODE': emp.personal_code || '',
         'WORK PERMIT': emp.work_permit_no || '',

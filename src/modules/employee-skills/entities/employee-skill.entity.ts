@@ -24,5 +24,5 @@ export class EmployeeSkill extends BaseEntity {
   rating: number;
 
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
-  cost_price: number;
+  cost_price: number | null;
 }

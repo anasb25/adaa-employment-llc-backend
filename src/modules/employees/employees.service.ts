@@ -374,8 +374,8 @@ export class EmployeesService {
         // Map Excel row to employee data
         const mappedData = ExcelValidatorUtil.mapRowToEmployee(row);
 
-        // Extract trade and additional data
-        const { trade, _additionalData, ...employeeData } = mappedData;
+        // Extract trade, rate_per_hr, and prepare employee data
+        const { trade, rate_per_hr, ...employeeData } = mappedData;
 
         // Validate required fields
         if (!employeeData.adaa_emp_code || !employeeData.name) {
@@ -413,9 +413,9 @@ export class EmployeesService {
           employee = await this.create(employeeData);
         }
 
-        // Handle TRADE - link to skill or create new one
+        // Handle TRADE - link to skill or create new one, with rate_per_hr
         if (trade && employee) {
-          await this.handleEmployeeTrade(employee.id, trade);
+          await this.handleEmployeeTrade(employee.id, trade, rate_per_hr);
         }
 
         result.success++;
@@ -441,10 +441,12 @@ export class EmployeesService {
    * Handle employee trade - find existing skill or create new one and link
    * @param employeeId Employee ID
    * @param tradeName Trade/Skill name
+   * @param costPrice Cost price/hourly rate from Excel
    */
   private async handleEmployeeTrade(
     employeeId: number,
     tradeName: string,
+    costPrice?: number | null,
   ): Promise<void> {
     // Find existing skill by name (case-insensitive)
     let skill = await this.skillRepository.findOne({
@@ -471,9 +473,13 @@ export class EmployeesService {
         employeeId,
         skillId: skill.id,
         rating: 0, // Default rating
-        // cost_price is optional and will be undefined
+        cost_price: costPrice || null, // Use provided cost price from Excel
       });
       await this.employeeSkillRepository.save(employeeSkill);
+    } else if (costPrice !== null && costPrice !== undefined) {
+      // Update existing employee skill with new cost price if provided
+      existingEmployeeSkill.cost_price = costPrice;
+      await this.employeeSkillRepository.save(existingEmployeeSkill);
     }
   }
 
@@ -483,6 +489,7 @@ export class EmployeesService {
    */
   async exportEmployees(): Promise<Buffer> {
     const employees = await this.employeeRepository.find({
+      relations: ['employeeSkills', 'employeeSkills.skill'],
       order: { adaa_emp_code: 'ASC' },
     });
 

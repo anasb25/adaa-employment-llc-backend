@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsEnum, IsDateString } from 'class-validator';
+import { IsString, IsOptional, IsEnum, IsDateString, IsNumber } from 'class-validator';
 import { EmployeeStatus } from '../entities/employee.entity';
 
 export class CreateEmployeeDto {
@@ -63,4 +63,16 @@ export class CreateEmployeeDto {
   @IsOptional()
   @IsDateString()
   date_of_arrival?: string;
+
+  @IsOptional()
+  @IsNumber()
+  basic_salary?: number;
+
+  @IsOptional()
+  @IsNumber()
+  hra?: number;
+
+  @IsOptional()
+  @IsNumber()
+  other_allowance?: number;
 }

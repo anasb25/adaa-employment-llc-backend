@@ -143,7 +143,11 @@ export class PayrollService {
       );
     }
 
-    const payroll = this.payrollRepository.create(createPayrollDto);
+    // Calculate net salary before creating
+    const netSalary = await this.calculateNetSalary(createPayrollDto);
+    const payrollWithNetSalary = { ...createPayrollDto, netSalary };
+
+    const payroll = this.payrollRepository.create(payrollWithNetSalary);
     return await this.payrollRepository.save(payroll);
   }
 
@@ -156,7 +160,13 @@ export class PayrollService {
   ): Promise<Payroll> {
     const payroll = await this.findOne(id);
 
+    // Merge the updates
     Object.assign(payroll, updatePayrollDto);
+
+    // Recalculate net salary with updated values
+    const netSalary = await this.calculateNetSalary(payroll as any);
+    payroll.netSalary = netSalary;
+
     return await this.payrollRepository.save(payroll);
   }
 
@@ -840,5 +850,63 @@ export class PayrollService {
    */
   generateAllowancesDeductionsTemplate(): Buffer {
     return AllowanceDeductionExcelValidator.generateTemplate();
+  }
+
+  /**
+   * Calculate net salary from payroll data
+   * Net Salary = Total Gross Salary + Employee Salary Components + Allowances - Deductions - Absent Days Deductible
+   * Employee Salary Components = Basic Salary + HRA + Other Allowance
+   */
+  private async calculateNetSalary(
+    payrollData: CreatePayrollDto | Payroll,
+  ): Promise<number> {
+    const grossSalary = Number(payrollData.totalGrossSalary || 0);
+
+    // Fetch employee data to get salary components
+    const employee = await this.payrollRepository.manager
+      .getRepository('employees')
+      .findOne({
+        where: { id: payrollData.employeeId },
+      });
+
+    // Calculate employee fixed salary components
+    let employeeSalaryComponents = 0;
+    if (employee) {
+      const basicSalary = Number(employee.basic_salary || 0);
+      const hra = Number(employee.hra || 0);
+      const otherAllowance = Number(employee.other_allowance || 0);
+      employeeSalaryComponents = basicSalary + hra + otherAllowance;
+    }
+
+    // Calculate total allowances from payroll
+    let totalAllowances = 0;
+    if (payrollData.allowances) {
+      totalAllowances = Object.values(payrollData.allowances).reduce(
+        (sum, value) => sum + (Number(value) || 0),
+        0,
+      );
+    }
+
+    // Calculate total deductions
+    let totalDeductions = 0;
+    if (payrollData.otherDeductions) {
+      totalDeductions = Object.values(payrollData.otherDeductions).reduce(
+        (sum, value) => sum + (Number(value) || 0),
+        0,
+      );
+    }
+
+    // Add absent days deductible to deductions
+    const absentDaysDeductible = Number(payrollData.absentDaysDeductible || 0);
+
+    // Calculate net salary
+    const netSalary =
+      grossSalary +
+      employeeSalaryComponents +
+      totalAllowances -
+      totalDeductions -
+      absentDaysDeductible;
+
+    return Math.round(netSalary * 100) / 100; // Round to 2 decimal places
   }
 }

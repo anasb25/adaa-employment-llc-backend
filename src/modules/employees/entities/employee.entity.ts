@@ -62,6 +62,15 @@ export class Employee extends BaseEntity {
   @Column({ type: 'date', nullable: true, transformer: DateOnlyTransformer })
   date_of_arrival: string | null; // Date in YYYY-MM-DD format
 
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true, comment: 'Employee basic salary' })
+  basic_salary: number | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true, comment: 'House Rent Allowance' })
+  hra: number | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true, comment: 'Other allowances' })
+  other_allowance: number | null;
+
   @OneToMany(() => EmployeeSkill, (employeeSkill) => employeeSkill.employee)
   employeeSkills: EmployeeSkill[];
 }

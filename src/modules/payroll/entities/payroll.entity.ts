@@ -74,6 +74,15 @@ export class Payroll extends BaseEntity {
   @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
   totalGrossSalary: number;
 
+  @Column({
+    type: 'decimal',
+    precision: 10,
+    scale: 2,
+    nullable: true,
+    comment: 'Net salary after all additions and deductions',
+  })
+  netSalary: number | null;
+
   // Relations
   @ManyToOne(() => Employee, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'employeeId' })
