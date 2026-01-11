@@ -13,3 +13,4 @@ import { RateVariant } from './entities/rate-variant.entity';
 export class RateVariantsModule {}
 
 
+

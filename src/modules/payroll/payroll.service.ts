@@ -160,8 +160,14 @@ export class PayrollService {
   ): Promise<Payroll> {
     const payroll = await this.findOne(id);
 
-    // Merge the updates
-    Object.assign(payroll, updatePayrollDto);
+    // Merge the updates, but only for defined values
+    // This prevents overwriting existing allowances/deductions with undefined
+    Object.keys(updatePayrollDto).forEach((key) => {
+      const value = updatePayrollDto[key];
+      if (value !== undefined) {
+        payroll[key] = value;
+      }
+    });
 
     // Recalculate net salary with updated values
     const netSalary = await this.calculateNetSalary(payroll as any);
@@ -276,6 +282,14 @@ export class PayrollService {
         employee.dailyHours,
       );
 
+      // Check if payroll already exists to preserve allowances/deductions
+      const existingPayroll = await this.payrollRepository.findOne({
+        where: {
+          employeeId: employee.employeeId,
+          month,
+        },
+      });
+
       const payrollData: CreatePayrollDto = {
         employeeId: employee.employeeId,
         month,
@@ -287,8 +301,9 @@ export class PayrollService {
         hoursBreakdown: calculations.hoursBreakdown,
         baseHourlyRate: calculations.baseHourlyRate,
         totalGrossSalary: calculations.totalGrossSalary,
-        allowances: undefined,
-        otherDeductions: undefined,
+        // Preserve existing allowances and deductions if they exist
+        allowances: existingPayroll?.allowances || undefined,
+        otherDeductions: existingPayroll?.otherDeductions || undefined,
         notes: `Calculated from approved timesheet for project ${timesheetData.project.name}`,
       };
 
@@ -823,6 +838,10 @@ export class PayrollService {
         // Update allowances and deductions
         payroll.allowances = allowancesObj;
         payroll.otherDeductions = deductionsObj;
+
+        // Recalculate net salary with updated allowances and deductions
+        const netSalary = await this.calculateNetSalary(payroll);
+        payroll.netSalary = netSalary;
 
         await this.payrollRepository.save(payroll);
         updatedCount++;
