@@ -29,6 +29,11 @@ export class CreateRateVariantDto {
   @IsOptional()
   @IsNumber()
   @Min(0)
+  clientRateMultiplier?: number;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
   minHours?: number | null;
 
   @IsOptional()

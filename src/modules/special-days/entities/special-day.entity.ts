@@ -47,6 +47,16 @@ export class SpecialDay extends BaseEntity {
   @Column({ type: 'decimal', precision: 5, scale: 2, default: 1.0 })
   employeeRateMultiplier: number; // e.g., 1.05 = 105% (5% extra pay to employee)
 
+  @Column({
+    type: 'decimal',
+    precision: 5,
+    scale: 2,
+    default: 1.0,
+    comment:
+      'Global client rate multiplier for this special day (e.g., 1.10 = 110%). Used when project-specific multiplier is not set.',
+  })
+  clientRateMultiplier: number;
+
   @Column({ default: false })
   isDefaultOff: boolean; // If true, default to off status (but can be overridden if not mandatory)
 

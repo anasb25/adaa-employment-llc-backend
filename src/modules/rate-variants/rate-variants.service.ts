@@ -4,12 +4,21 @@ import { Repository } from 'typeorm';
 import { RateVariant } from './entities/rate-variant.entity';
 import { CreateRateVariantDto } from './dto/create-rate-variant.dto';
 import { UpdateRateVariantDto } from './dto/update-rate-variant.dto';
+import { ProjectRateVariantRate } from '../projects/entities/project-rate-variant-rate.entity';
+
+export interface RateVariantRates {
+  rateVariant: RateVariant;
+  clientRateMultiplier: number;
+  employeeRateMultiplier: number;
+}
 
 @Injectable()
 export class RateVariantsService {
   constructor(
     @InjectRepository(RateVariant)
     private rateVariantRepository: Repository<RateVariant>,
+    @InjectRepository(ProjectRateVariantRate)
+    private projectRateVariantRateRepository: Repository<ProjectRateVariantRate>,
   ) {}
 
   async create(
@@ -49,9 +58,9 @@ export class RateVariantsService {
   ): Promise<RateVariant> {
     const rateVariant = await this.findOne(id);
 
-    // For system variants, only allow updating employeeRateMultiplier
+    // For system variants, only allow updating employeeRateMultiplier and clientRateMultiplier
     if (rateVariant.isSystem) {
-      const allowedFields = ['employeeRateMultiplier'];
+      const allowedFields = ['employeeRateMultiplier', 'clientRateMultiplier'];
       const disallowedChanges: string[] = [];
 
       // Check which fields are actually being changed
@@ -66,13 +75,16 @@ export class RateVariantsService {
 
       if (disallowedChanges.length > 0) {
         throw new BadRequestException(
-          `System variants can only have their multiplier updated. Cannot modify: ${disallowedChanges.join(', ')}`,
+          `System variants can only have their multipliers updated. Cannot modify: ${disallowedChanges.join(', ')}`,
         );
       }
 
-      // Only update the allowed field
+      // Only update the allowed fields
       if (updateDto.employeeRateMultiplier !== undefined) {
         rateVariant.employeeRateMultiplier = updateDto.employeeRateMultiplier;
+      }
+      if (updateDto.clientRateMultiplier !== undefined) {
+        rateVariant.clientRateMultiplier = updateDto.clientRateMultiplier;
       }
     } else {
       // For non-system variants, update all provided fields
@@ -94,6 +106,46 @@ export class RateVariantsService {
     }
     
     await this.rateVariantRepository.remove(rateVariant);
+  }
+
+  /**
+   * Get rate variant rates for a specific variant
+   * This is the main utility method to be used by other modules (timesheets, billing)
+   *
+   * @param rateVariantId - The rate variant ID
+   * @param projectId - Optional project ID. If provided, uses project-specific client rate multiplier if available, otherwise falls back to global rate.
+   *                    Employee rates always come from the global rate variant.
+   */
+  async getRateVariantRates(
+    rateVariantId: number,
+    projectId?: number,
+  ): Promise<RateVariantRates> {
+    const rateVariant = await this.findOne(rateVariantId);
+
+    // Get client rate multiplier - project-specific takes precedence, then global, then 1.0
+    let clientRateMultiplier =
+      Number(rateVariant.clientRateMultiplier) || 1.0; // Start with global default
+    if (projectId) {
+      const projectRate =
+        await this.projectRateVariantRateRepository.findOne({
+          where: {
+            projectId,
+            rateVariantId: rateVariant.id,
+          },
+        });
+      if (projectRate) {
+        clientRateMultiplier = Number(projectRate.clientRateMultiplier);
+      }
+    }
+
+    // Employee rate multiplier always comes from global rate variant
+    const employeeRateMultiplier = Number(rateVariant.employeeRateMultiplier);
+
+    return {
+      rateVariant,
+      clientRateMultiplier,
+      employeeRateMultiplier,
+    };
   }
 }
 

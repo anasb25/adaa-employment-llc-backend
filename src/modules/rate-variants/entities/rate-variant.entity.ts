@@ -31,6 +31,16 @@ export class RateVariant extends BaseEntity {
     type: 'decimal',
     precision: 5,
     scale: 2,
+    default: 1.0,
+    comment:
+      'Global client rate multiplier for this rate variant (e.g., 1.10 = 110%). Used when project-specific multiplier is not set.',
+  })
+  clientRateMultiplier: number;
+
+  @Column({
+    type: 'decimal',
+    precision: 5,
+    scale: 2,
     nullable: true,
     comment: 'Minimum hours for this rate variant to apply (null = no minimum, e.g., for ">10 hours" set minHours=10)',
   })

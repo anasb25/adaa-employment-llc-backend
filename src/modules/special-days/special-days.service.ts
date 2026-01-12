@@ -206,8 +206,8 @@ export class SpecialDaysService {
       };
     }
 
-    // Get client rate multiplier - only from project-specific rates
-    let clientRateMultiplier = 1.0; // Default to no multiplier if not set for project
+    // Get client rate multiplier - project-specific takes precedence, then global, then 1.0
+    let clientRateMultiplier = Number(specialDay.clientRateMultiplier) || 1.0; // Start with global default
     if (projectId) {
       const projectRate = await this.projectSpecialDayRateRepository.findOne({
         where: {
@@ -261,7 +261,8 @@ export class SpecialDaysService {
         ratesMap.set(dateStr, {
           isSpecialDay: true,
           specialDay: applicableSpecialDay,
-          clientRateMultiplier: 1.0, // Default, project-specific rates are handled separately
+          clientRateMultiplier:
+            Number(applicableSpecialDay.clientRateMultiplier) || 1.0, // Use global multiplier, project-specific rates are handled separately
           employeeRateMultiplier: Number(
             applicableSpecialDay.employeeRateMultiplier,
           ),
