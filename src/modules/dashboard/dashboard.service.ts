@@ -85,10 +85,11 @@ export class DashboardService {
 
           expiryDate.setHours(0, 0, 0, 0);
 
-          // Check if expiry date is within the next 15 days (including today)
-          if (expiryDate >= today && expiryDate <= fifteenDaysFromNow) {
-            const daysUntilExpiry = Math.ceil((expiryDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
-            
+          // Calculate days until expiry (negative if already expired)
+          const daysUntilExpiry = Math.ceil((expiryDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24));
+
+          // Include documents that are expired or expiring within the next 15 days
+          if (daysUntilExpiry <= 15) {
             expiringDocuments.push({
               field: doc.field,
               label: doc.label,
@@ -114,11 +115,16 @@ export class DashboardService {
       }
     }
 
-    // Sort employees by the most urgent expiration (lowest daysUntilExpiry)
+    // Sort employees by the most urgent expiration (lowest daysUntilExpiry, expired first)
     employeesWithExpiringDocs.sort((a, b) => {
       const minDaysA = Math.min(...a.expiringDocuments.map(d => d.daysUntilExpiry));
       const minDaysB = Math.min(...b.expiringDocuments.map(d => d.daysUntilExpiry));
       return minDaysA - minDaysB;
+    });
+
+    // Sort documents within each employee (expired first, then by urgency)
+    employeesWithExpiringDocs.forEach(employee => {
+      employee.expiringDocuments.sort((a, b) => a.daysUntilExpiry - b.daysUntilExpiry);
     });
 
     return employeesWithExpiringDocs;
