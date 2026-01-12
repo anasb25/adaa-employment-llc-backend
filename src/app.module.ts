@@ -22,6 +22,7 @@ import { SpecialDaysModule } from './modules/special-days/special-days.module';
 import { RateVariantsModule } from './modules/rate-variants/rate-variants.module';
 import { PayrollModule } from './modules/payroll/payroll.module';
 import { InvoicesModule } from './modules/invoices/invoices.module';
+import { DashboardModule } from './modules/dashboard/dashboard.module';
 import appConfig from './config/app.config';
 import databaseConfig from './config/database.config';
 import authConfig from './config/auth.config';
@@ -81,6 +82,7 @@ import mailConfig from './config/mail.config';
     RateVariantsModule,
     PayrollModule,
     InvoicesModule,
+    DashboardModule,
   ],
   controllers: [AppController],
   providers: [

@@ -22,6 +22,7 @@ import { ProjectRateVariantRate } from '../projects/entities/project-rate-varian
 import { TimesheetsService } from '../timesheets/timesheets.service';
 import { PaginatedResponse } from '../../common/utils/pagination.util';
 import { formatDateOnly } from '../../common/utils/date.util';
+import * as numberToWords from 'number-to-words';
 
 // Constants for ADAA company
 const ADAA_COMPANY_NAME = 'ADAA EMPLOYMENT L.L.C';
@@ -199,7 +200,8 @@ export class InvoicesService {
     const totalAmount = Math.round((totalTaxableAmount + totalTax) * 100) / 100;
 
     // Generate invoice number
-    const invoiceNumber = dto.invoiceNumber || (await this.generateInvoiceNumber());
+    const invoiceNumber =
+      dto.invoiceNumber || (await this.generateInvoiceNumber());
 
     // Calculate dates
     const invoiceDate = new Date();
@@ -211,7 +213,9 @@ export class InvoicesService {
 
     // Generate subject
     const [year, monthNum] = month.split('-');
-    const monthName = new Date(parseInt(year), parseInt(monthNum) - 1).toLocaleString('en-US', { month: 'short' }).toUpperCase();
+    const monthName = new Date(parseInt(year), parseInt(monthNum) - 1)
+      .toLocaleString('en-US', { month: 'short' })
+      .toUpperCase();
     const subject = `ADAA MANPOWER LABOR SUPPLY SERVICES FOR THE MONTH OF ${monthName}-${year}`;
 
     // Create invoice
@@ -226,7 +230,7 @@ export class InvoicesService {
       totalTaxableAmount,
       totalTax,
       totalAmount,
-      totalInWords: this.convertAmountToWords(totalAmount),
+      totalInWords: this.convertAmountToWords(Number(totalAmount)),
       status: InvoiceStatus.DRAFT,
       createdBy,
     });
@@ -249,19 +253,21 @@ export class InvoicesService {
         isOffDay: boolean;
       }>;
     }>,
-  ): Promise<Array<{
-    skillName: string;
-    skillId: number;
-    rateVariants: Array<{
-      variantName: string;
-      hours: number;
-      ratePerHour: number;
-      taxPercentage: number;
-      taxAmount: number;
-      amount: number;
-    }>;
-    subtotal: number;
-  }>> {
+  ): Promise<
+    Array<{
+      skillName: string;
+      skillId: number;
+      rateVariants: Array<{
+        variantName: string;
+        hours: number;
+        ratePerHour: number;
+        taxPercentage: number;
+        taxAmount: number;
+        amount: number;
+      }>;
+      subtotal: number;
+    }>
+  > {
     // Group employees by skill
     const skillGroups = new Map<number, typeof employees>();
     for (const employee of employees) {
@@ -293,7 +299,10 @@ export class InvoicesService {
       if (!skill) continue;
 
       // Collect all hours by rate variant for this skill
-      const rateVariantHours = new Map<string, { hours: number; variantId: number | null; multiplier: number }>();
+      const rateVariantHours = new Map<
+        string,
+        { hours: number; variantId: number | null; multiplier: number }
+      >();
 
       // Get client rate for this skill on this project
       const baseClientRate = await this.getSkillClientRate(project.id, skillId);
@@ -310,9 +319,15 @@ export class InvoicesService {
           const jobStatus = dayData.jobStatus?.toLowerCase() || '';
 
           // Skip if no hours or if demobilized/absent/idle
-          if (hours <= 0 || !jobStatus || jobStatus === 'demobilized' ||
-              jobStatus === 'absent' || jobStatus === 'sick_leave' || 
-              jobStatus === 'casual_leave' || jobStatus === 'idle') {
+          if (
+            hours <= 0 ||
+            !jobStatus ||
+            jobStatus === 'demobilized' ||
+            jobStatus === 'absent' ||
+            jobStatus === 'sick_leave' ||
+            jobStatus === 'casual_leave' ||
+            jobStatus === 'idle'
+          ) {
             continue;
           }
 
@@ -324,9 +339,9 @@ export class InvoicesService {
           // If working on a special day (special days take precedence)
           if (specialDay && hours > 0) {
             const multiplier = await this.getSpecialDayClientMultiplier(
-              project.id, 
-              specialDay.id, 
-              specialDay.clientRateMultiplier
+              project.id,
+              specialDay.id,
+              specialDay.clientRateMultiplier,
             );
             const key = specialDay.name;
             const existing = rateVariantHours.get(key);
@@ -366,9 +381,9 @@ export class InvoicesService {
             for (const { variant, hours: hoursForVariant } of hoursSplit) {
               const multiplier = variant
                 ? await this.getRateVariantClientMultiplier(
-                    project.id, 
-                    variant.id, 
-                    variant.clientRateMultiplier
+                    project.id,
+                    variant.id,
+                    variant.clientRateMultiplier,
                   )
                 : 1.0;
               const key = variant ? variant.name : 'Regular';
@@ -400,7 +415,8 @@ export class InvoicesService {
       let skillSubtotal = 0;
 
       for (const [variantName, data] of rateVariantHours.entries()) {
-        const ratePerHour = Math.round(baseClientRate * data.multiplier * 100) / 100;
+        const ratePerHour =
+          Math.round(baseClientRate * data.multiplier * 100) / 100;
         const amount = Math.round(data.hours * ratePerHour * 100) / 100;
         const taxAmount = Math.round(amount * TAX_RATE * 100) / 100;
 
@@ -624,14 +640,25 @@ export class InvoicesService {
 
   /**
    * Convert amount to words (AED)
+   * Example: 45670.80 -> "AED Forty-Five Thousand Six Hundred Seventy and 80 Fils"
    */
   private convertAmountToWords(amount: number): string {
-    // This is a simplified version. You might want to use a library like 'number-to-words'
     const dirham = Math.floor(amount);
     const fils = Math.round((amount - dirham) * 100);
 
-    // For now, return a placeholder. Implement proper conversion if needed
-    return `AED ${dirham.toLocaleString()} and ${fils} Fils`;
+    // Convert dirham amount to words and capitalize first letter of each word
+    let dirhamWords = numberToWords
+      .toWords(dirham)
+      .split(' ')
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(' ');
+
+    // Format: "AED Forty-Five Thousand Six Hundred Seventy and 80 Fils"
+    if (fils > 0) {
+      return `AED ${dirhamWords} and ${fils} Fils`;
+    } else {
+      return `AED ${dirhamWords} Only`;
+    }
   }
 
   /**
@@ -655,7 +682,8 @@ export class InvoicesService {
       );
       invoice.totalTaxableAmount = totalTaxableAmount;
       invoice.totalTax = Math.round(totalTaxableAmount * TAX_RATE * 100) / 100;
-      invoice.totalAmount = Math.round((totalTaxableAmount + invoice.totalTax) * 100) / 100;
+      invoice.totalAmount =
+        Math.round((totalTaxableAmount + invoice.totalTax) * 100) / 100;
       invoice.totalInWords = this.convertAmountToWords(invoice.totalAmount);
     }
 
@@ -668,7 +696,10 @@ export class InvoicesService {
   async approve(id: number, approvedBy: number): Promise<Invoice> {
     const invoice = await this.findOne(id);
 
-    if (invoice.status !== InvoiceStatus.DRAFT && invoice.status !== InvoiceStatus.PENDING) {
+    if (
+      invoice.status !== InvoiceStatus.DRAFT &&
+      invoice.status !== InvoiceStatus.PENDING
+    ) {
       throw new BadRequestException(
         'Only draft or pending invoices can be approved',
       );
@@ -689,7 +720,9 @@ export class InvoicesService {
     const invoice = await this.findOne(id);
 
     if (invoice.status !== InvoiceStatus.APPROVED) {
-      throw new BadRequestException('Only approved invoices can be marked as sent');
+      throw new BadRequestException(
+        'Only approved invoices can be marked as sent',
+      );
     }
 
     invoice.status = InvoiceStatus.SENT;
@@ -730,4 +763,3 @@ export class InvoicesService {
     await this.invoiceRepository.remove(invoice);
   }
 }
-
