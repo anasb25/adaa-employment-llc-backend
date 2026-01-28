@@ -26,6 +26,7 @@
     "show-migrations": "npm run typeorm -- migration:show -d src/database/data-source.ts"
   },
   "dependencies": {
+    "dotenv": "^16.4.5",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.2",

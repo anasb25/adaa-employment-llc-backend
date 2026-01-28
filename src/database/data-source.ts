@@ -1,3 +1,6 @@
+// Load .env first (TypeORM CLI runs this file without NestJS, so ConfigModule never loads .env)
+import 'dotenv/config';
+
 import { DataSource } from 'typeorm';
 import { join } from 'path';
 import databaseConfig from '../config/database.config';
