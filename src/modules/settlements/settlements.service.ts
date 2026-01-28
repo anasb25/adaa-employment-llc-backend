@@ -284,32 +284,39 @@ export class SettlementsService {
     const hourlyRate = await this.getEmployeeHourlyRate(employeeId);
 
     // UAE Federal Law Gratuity Calculation
-    // Uses BASIC SALARY ONLY (not allowances)
+    // Formula: basic salary / 30 * gratuity days per year (21 or 30) * total days from date of joining till last day / 365
     const basicSalary = Number(employee.basic_salary);
     const dailySalary = basicSalary / 30;
 
     let gratuityAmount = 0;
     let eligibleDays = 0;
 
+    // Calculate total days from date of joining till last day
+    const totalDays = Math.floor((endDate.getTime() - joinDate.getTime()) / (24 * 60 * 60 * 1000));
+
     // No gratuity for less than 1 year of service
     if (totalYearsOfService < 1) {
       gratuityAmount = 0;
       eligibleDays = 0;
     }
-    // For first 5 years: (Basic Salary / 30) × 21 × Years of Service
+    // For first 5 years: 21 days per year
+    // Formula: basic salary / 30 * 21 * total days / 365
     else if (totalYearsOfService < 5) {
+      gratuityAmount = (basicSalary / 30) * 21 * (totalDays / 365);
       eligibleDays = Math.floor(totalYearsOfService * 21);
-      gratuityAmount = dailySalary * 21 * totalYearsOfService;
     }
-    // For 5 years and above: [(Basic Salary / 30) × 21 × 5] + [(Basic Salary / 30) × 30 × Remaining Years]
+    // For 5 years and above: 21 days for first 5 years, 30 days for remaining years
     else {
       const first5YearsDays = 5 * 21; // 105 days
       const remainingYears = totalYearsOfService - 5;
       const remainingYearsDays = Math.floor(remainingYears * 30);
       eligibleDays = first5YearsDays + remainingYearsDays;
 
-      const first5YearsAmount = dailySalary * 21 * 5;
-      const remainingYearsAmount = dailySalary * 30 * remainingYears;
+      // Calculate: (21 days for first 5 years) + (30 days for remaining years)
+      const first5YearsDaysCount = 5 * 365;
+      const first5YearsAmount = (basicSalary / 30) * 21 * (first5YearsDaysCount / 365);
+      const remainingDays = totalDays - first5YearsDaysCount;
+      const remainingYearsAmount = remainingDays > 0 ? (basicSalary / 30) * 30 * (remainingDays / 365) : 0;
       gratuityAmount = first5YearsAmount + remainingYearsAmount;
     }
 

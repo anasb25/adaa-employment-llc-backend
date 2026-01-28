@@ -364,8 +364,14 @@ export class MobilizationsService {
       }
     }
 
+    // Exclude demobilized employees: demobilization is sustained until remobilized,
+    // so they should not show in the list as "active" or anything until remobilized
+    const excludingDemobilized = effectiveMobilizations.filter(
+      (m) => m.mobStatus !== MobStatus.DEMOBILIZED,
+    );
+
     // Sort by employee name
-    const result = effectiveMobilizations.sort((a, b) => {
+    const result = excludingDemobilized.sort((a, b) => {
       const nameA = a.employee?.name || '';
       const nameB = b.employee?.name || '';
       return nameA.localeCompare(nameB);

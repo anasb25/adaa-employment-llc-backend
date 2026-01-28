@@ -301,7 +301,21 @@ export class TimesheetsService {
       }
 
       // Only include employee if they have mobilized days (not just demobilized)
+      // Exclude employees who are demobilized at end of month and have no saved entries:
+      // demobilization is sustained until remobilized, so they should not show in the project timesheet at all
       if (dailyHours.length > 0) {
+        const effectiveAtEndOfMonth = this.getEffectiveMobilizationForDate(
+          employeeMobilizations,
+          endDateStr,
+        );
+        const isDemobilizedAtEndOfMonth =
+          effectiveAtEndOfMonth?.mobStatus === MobStatus.DEMOBILIZED &&
+          effectiveAtEndOfMonth?.jobStatus !== JobStatus.IDLE;
+        const hasSavedEntryThisMonth =
+          timesheet?.entries?.some((e) => e.employeeId === employeeId) ?? false;
+        if (isDemobilizedAtEndOfMonth && !hasSavedEntryThisMonth) {
+          continue; // Skip: do not show demobilized employees until remobilized
+        }
         employees.push({
           srNo: srNo++,
           employeeId: latestMob.employee.id,
@@ -486,7 +500,7 @@ export class TimesheetsService {
 
       // Check if entry exists (date is now a string)
       const dateString = formatDateOnly(entryDate);
-      let entry = await this.entryRepository.findOne({
+      const existingEntry = await this.entryRepository.findOne({
         where: {
           timesheetId,
           employeeId: entryDto.employeeId,
@@ -494,13 +508,18 @@ export class TimesheetsService {
         },
       });
 
-      if (entry) {
+      const wasNew = !existingEntry;
+      const previousJobStatus = existingEntry?.jobStatus;
+
+      let entry: TimesheetEntry;
+      if (existingEntry) {
         // Update existing entry
-        entry.hoursWorked = entryDto.hoursWorked;
-        entry.jobStatus = entryDto.jobStatus;
-        entry.notes = entryDto.notes || null;
-        entry.tradeInSiteId = entryDto.tradeInSiteId || null;
-        entry.updatedBy = updatedBy;
+        existingEntry.hoursWorked = entryDto.hoursWorked;
+        existingEntry.jobStatus = entryDto.jobStatus;
+        existingEntry.notes = entryDto.notes || null;
+        existingEntry.tradeInSiteId = entryDto.tradeInSiteId || null;
+        existingEntry.updatedBy = updatedBy;
+        entry = existingEntry;
       } else {
         // Create new entry (date will be transformed by DateOnlyTransformer)
         entry = this.entryRepository.create({
@@ -518,12 +537,20 @@ export class TimesheetsService {
       const savedEntry = await this.entryRepository.save(entry);
       savedEntries.push(savedEntry);
 
-      // Auto-sync mobilization: If jobStatus is different from current mobilization, create new mobilization record
-      await this.syncMobilizationFromTimesheetEntry(
-        savedEntry,
-        timesheet.projectId,
-        updatedBy,
-      );
+      // Sync mobilization only for this date when the user explicitly changed this cell.
+      // Only sync when updating an existing entry and jobStatus changed — never sync for
+      // new entries, since those are often the whole month (carry-forward). That would
+      // wrongly create mobilizations for every day; we only want one mobilization record
+      // for the date the user actually edited, and rely on carry-forward for the rest.
+      const jobStatusChanged = previousJobStatus !== savedEntry.jobStatus;
+      const explicitEditOnly = !wasNew && jobStatusChanged;
+      if (explicitEditOnly) {
+        await this.syncMobilizationFromTimesheetEntry(
+          savedEntry,
+          timesheet.projectId,
+          updatedBy,
+        );
+      }
     }
 
     return savedEntries;
@@ -684,6 +711,7 @@ export class TimesheetsService {
 
   /**
    * Approve or reject timesheet
+   * When approving, annual leave days are deducted from each employee's annual_leave_balance
    */
   async approveTimesheet(
     id: number,
@@ -711,7 +739,51 @@ export class TimesheetsService {
       timesheet.notes = approveDto.notes;
     }
 
-    return await this.timesheetRepository.save(timesheet);
+    const savedTimesheet =
+      await this.timesheetRepository.save(timesheet);
+
+    // When approving, deduct annual leave days from each employee's balance
+    if (approveDto.status === TimesheetStatus.APPROVED) {
+      await this.deductAnnualLeaveFromApprovedTimesheet(id);
+    }
+
+    return savedTimesheet;
+  }
+
+  /**
+   * Deduct annual leave days from employee balances for an approved timesheet
+   */
+  private async deductAnnualLeaveFromApprovedTimesheet(
+    timesheetId: number,
+  ): Promise<void> {
+    const entries = await this.entryRepository.find({
+      where: {
+        timesheetId,
+        jobStatus: 'annual_leave' as any,
+      },
+    });
+
+    // Group by employeeId, count days (each entry = 1 day)
+    const daysByEmployee = new Map<number, number>();
+    for (const e of entries) {
+      const count = daysByEmployee.get(e.employeeId) ?? 0;
+      daysByEmployee.set(e.employeeId, count + 1);
+    }
+
+    for (const [employeeId, daysToDeduct] of daysByEmployee) {
+      const employee = await this.employeeRepository.findOne({
+        where: { id: employeeId },
+      });
+      if (!employee) continue;
+
+      const currentBalance = Number(employee.annual_leave_balance ?? 0);
+      const newBalance = Math.max(0, currentBalance - daysToDeduct);
+      employee.annual_leave_balance = newBalance;
+      await this.employeeRepository.save(employee);
+      this.logger.log(
+        `Deducted ${daysToDeduct} annual leave day(s) from employee ${employeeId}: balance ${currentBalance} -> ${newBalance}`,
+      );
+    }
   }
 
   /**

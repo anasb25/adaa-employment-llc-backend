@@ -587,7 +587,12 @@ export class PayrollService {
         continue;
       }
 
-      // Count absent days (absent, sick leave, casual leave, urgent leave)
+      // Annual leave is paid leave – do not count as deductible
+      if (jobStatus === 'annual_leave') {
+        continue;
+      }
+
+      // Count absent days (absent, sick leave, casual leave, urgent leave) – these are deductible
       if (
         jobStatus === 'absent' ||
         jobStatus === 'sick_leave' ||

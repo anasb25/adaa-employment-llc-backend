@@ -73,6 +73,10 @@ export class CreateSettlementDto {
   @IsInt()
   totalDaysAbsent?: number;
 
+  @IsOptional()
+  @IsBoolean()
+  lastMonthSalaryPaid?: boolean;
+
   @IsBoolean()
   eligibleForGratuity: boolean;
 

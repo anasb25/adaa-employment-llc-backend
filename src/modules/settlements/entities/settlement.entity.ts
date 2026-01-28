@@ -59,6 +59,10 @@ export class Settlement extends BaseEntity {
   @Column({ type: 'int', default: 0 })
   totalDaysAbsent: number;
 
+  // Last month salary payment status
+  @Column({ type: 'boolean', default: false })
+  lastMonthSalaryPaid: boolean;
+
   // Gratuity eligibility
   @Column({ default: false })
   eligibleForGratuity: boolean;
