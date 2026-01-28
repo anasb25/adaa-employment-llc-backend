@@ -1,20 +1,10 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class AddProjectOffDayVariant1767200000000
-  implements MigrationInterface
-{
-  name = 'AddProjectOffDayVariant1767200000000';
+export class SeedProjectOffDayVariant1773162600002 implements MigrationInterface {
+  name = 'SeedProjectOffDayVariant1773162600002';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
-    // Add isSystem column to rate_variants table
-    await queryRunner.query(
-      `ALTER TABLE "rate_variants" ADD "isSystem" boolean NOT NULL DEFAULT false`,
-    );
-    await queryRunner.query(
-      `COMMENT ON COLUMN "rate_variants"."isSystem" IS 'System-defined variant that cannot be deleted or edited (except multiplier)'`,
-    );
-
-    // Insert the "Project Off Day" variant
+    // Insert the "Project Off Day" variant (isSystem column comes from schema migration)
     await queryRunner.query(`
       INSERT INTO "rate_variants" (
         "name",
@@ -45,15 +35,8 @@ export class AddProjectOffDayVariant1767200000000
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    // Remove the "Project Off Day" variant
     await queryRunner.query(
       `DELETE FROM "rate_variants" WHERE "name" = 'Project Off Day' AND "isSystem" = true`,
     );
-
-    // Remove isSystem column
-    await queryRunner.query(
-      `ALTER TABLE "rate_variants" DROP COLUMN IF EXISTS "isSystem"`,
-    );
   }
 }
-

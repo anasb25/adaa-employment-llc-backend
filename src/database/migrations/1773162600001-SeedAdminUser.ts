@@ -1,6 +1,8 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class SeedAdminUser1761315590839 implements MigrationInterface {
+export class SeedAdminUser1773162600001 implements MigrationInterface {
+  name = 'SeedAdminUser1773162600001';
+
   public async up(queryRunner: QueryRunner): Promise<void> {
     // Get the admin role ID
     const adminRole = await queryRunner.query(

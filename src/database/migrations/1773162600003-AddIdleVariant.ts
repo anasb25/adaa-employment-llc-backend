@@ -1,7 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class AddIdleVariant1767200100000 implements MigrationInterface {
-  name = 'AddIdleVariant1767200100000';
+export class AddIdleVariant1773162600003 implements MigrationInterface {
+  name = 'AddIdleVariant1773162600003';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     // Insert the "Idle" variant
@@ -41,4 +41,3 @@ export class AddIdleVariant1767200100000 implements MigrationInterface {
     );
   }
 }
-

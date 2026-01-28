@@ -1,7 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
-export class AddRolesAndPermissions1761279000364 implements MigrationInterface {
-  name = 'AddRolesAndPermissions1761279000364';
+export class AddRolesAndPermissions1773162600000 implements MigrationInterface {
+  name = 'AddRolesAndPermissions1773162600000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     // Insert default permissions
