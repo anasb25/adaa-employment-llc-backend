@@ -8,8 +8,11 @@ import {
   Put,
   Query,
   ParseIntPipe,
+  Res,
 } from '@nestjs/common';
+import type { Response } from 'express';
 import { SettlementsService } from './settlements.service';
+import { SettlementExcelService } from './services/settlement-excel.service';
 import { Settlement } from './entities/settlement.entity';
 import { CreateSettlementDto } from './dto/create-settlement.dto';
 import { UpdateSettlementDto } from './dto/update-settlement.dto';
@@ -22,7 +25,10 @@ import {
 
 @Controller('settlements')
 export class SettlementsController {
-  constructor(private readonly settlementsService: SettlementsService) {}
+  constructor(
+    private readonly settlementsService: SettlementsService,
+    private readonly settlementExcelService: SettlementExcelService,
+  ) {}
 
   @Permissions('settlement:read')
   @Get()
@@ -142,5 +148,26 @@ export class SettlementsController {
     @CurrentUser() user: User,
   ): Promise<Settlement> {
     return await this.settlementsService.markAsPaid(id, user.id);
+  }
+
+
+  @Permissions('settlement:read')
+  @Get(':id/excel')
+  async downloadExcel(
+    @Param('id', ParseIntPipe) id: number,
+    @Res() res: Response,
+  ) {
+    const settlement = await this.settlementsService.findOne(id);
+    const excelBuffer = await this.settlementExcelService.generateExcel(settlement);
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    );
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename=Settlement-${settlement.empCode}-${settlement.id}.xlsx`,
+    );
+    res.send(excelBuffer);
   }
 }
