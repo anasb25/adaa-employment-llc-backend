@@ -397,6 +397,7 @@ export class MobilizationsService {
       'absent',
       'sick_leave',
       'casual_leave',
+      'urgent_leave',
     ];
 
     // If the latest mobilization is on the exact date we're looking at -> use it as-is
@@ -631,12 +632,15 @@ export class MobilizationsService {
         .length,
       absconded: mobilizations.filter((m) => m.jobStatus === 'absconded')
         .length,
-      on_vacation: mobilizations.filter((m) => m.jobStatus === 'on_vacation')
-        .length,
+      annual_leave: mobilizations.filter(
+        (m) => m.jobStatus === 'annual_leave',
+      ).length,
       absent: mobilizations.filter((m) => m.jobStatus === 'absent').length,
       sick_leave: mobilizations.filter((m) => m.jobStatus === 'sick_leave')
         .length,
       casual_leave: mobilizations.filter((m) => m.jobStatus === 'casual_leave')
+        .length,
+      urgent_leave: mobilizations.filter((m) => m.jobStatus === 'urgent_leave')
         .length,
       notice_period: mobilizations.filter(
         (m) => m.jobStatus === 'notice_period',
@@ -721,7 +725,7 @@ export class MobilizationsService {
         // Validate STATUS field
         if (!mappedData._validation.jobStatusValid) {
           validationErrors.push(
-            `Invalid STATUS value: "${mappedData._validation.originalStatus}". Valid values are: Active, On Vacation, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle`,
+            `Invalid STATUS value: "${mappedData._validation.originalStatus}". Valid values are: Active, Annual Leave, Urgent Leave, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle`,
           );
         }
 

@@ -44,6 +44,22 @@ export class PayrollController {
   }
 
   /**
+   * Check if payroll exists for an employee and month
+   */
+  @Get('check/:employeeId/:month')
+  @Permissions('payroll:read')
+  async checkPayrollExists(
+    @Param('employeeId', ParseIntPipe) employeeId: number,
+    @Param('month') month: string,
+  ) {
+    const payroll = await this.payrollService.findByEmployeeAndMonth(
+      employeeId,
+      month,
+    );
+    return { exists: !!payroll, payroll: payroll || null };
+  }
+
+  /**
    * Get a single payroll by ID
    */
   @Get(':id')

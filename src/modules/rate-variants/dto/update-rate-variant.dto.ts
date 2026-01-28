@@ -5,3 +5,5 @@ export class UpdateRateVariantDto extends PartialType(CreateRateVariantDto) {}
 
 
 
+
+

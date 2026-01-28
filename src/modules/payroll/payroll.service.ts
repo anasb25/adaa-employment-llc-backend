@@ -587,11 +587,12 @@ export class PayrollService {
         continue;
       }
 
-      // Count absent days (absent, sick leave, casual leave, on_vacation)
+      // Count absent days (absent, sick leave, casual leave, urgent leave)
       if (
         jobStatus === 'absent' ||
         jobStatus === 'sick_leave' ||
-        jobStatus === 'casual_leave'
+        jobStatus === 'casual_leave' ||
+        jobStatus === 'urgent_leave'
       ) {
         absentDays++;
         continue;

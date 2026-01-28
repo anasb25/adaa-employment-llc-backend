@@ -75,4 +75,12 @@ export class CreateEmployeeDto {
   @IsOptional()
   @IsNumber()
   other_allowance?: number;
+
+  @IsOptional()
+  @IsNumber()
+  air_tickets?: number;
+
+  @IsOptional()
+  @IsNumber()
+  annual_leave_balance?: number;
 }

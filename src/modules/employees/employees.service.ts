@@ -76,8 +76,41 @@ export class EmployeesService {
     });
   }
 
+  /**
+   * Calculate air tickets based on years of service from date of joining
+   */
+  private calculateAirTickets(dateOfJoining: string | null): number {
+    if (!dateOfJoining) return 0;
+    const joinDate = new Date(dateOfJoining);
+    const today = new Date();
+    const yearsOfService = (today.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+    return Math.floor(yearsOfService);
+  }
+
+  /**
+   * Calculate annual leave balance based on years of service from date of joining
+   * Each year adds 30 days
+   */
+  private calculateAnnualLeaveBalance(dateOfJoining: string | null): number {
+    if (!dateOfJoining) return 0;
+    const joinDate = new Date(dateOfJoining);
+    const today = new Date();
+    const yearsOfService = (today.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+    return Math.floor(yearsOfService) * 30;
+  }
+
   async create(employeeData: Partial<Employee>): Promise<Employee> {
     try {
+      // Auto-calculate air_tickets and annual_leave_balance if date_of_joining is provided
+      // But allow manual override if provided in employeeData
+      if (employeeData.date_of_joining) {
+        if (employeeData.air_tickets === undefined) {
+          employeeData.air_tickets = this.calculateAirTickets(employeeData.date_of_joining);
+        }
+        if (employeeData.annual_leave_balance === undefined) {
+          employeeData.annual_leave_balance = this.calculateAnnualLeaveBalance(employeeData.date_of_joining);
+        }
+      }
       const employee = this.employeeRepository.create(employeeData);
       return await this.employeeRepository.save(employee);
     } catch (error) {
@@ -88,6 +121,16 @@ export class EmployeesService {
 
   async update(id: number, employeeData: Partial<Employee>): Promise<Employee> {
     try {
+      // If date_of_joining is being updated, recalculate air_tickets and annual_leave_balance
+      // But only if they're not explicitly provided (allow manual override)
+      if (employeeData.date_of_joining) {
+        if (employeeData.air_tickets === undefined) {
+          employeeData.air_tickets = this.calculateAirTickets(employeeData.date_of_joining);
+        }
+        if (employeeData.annual_leave_balance === undefined) {
+          employeeData.annual_leave_balance = this.calculateAnnualLeaveBalance(employeeData.date_of_joining);
+        }
+      }
       await this.employeeRepository.update(id, employeeData);
       return (await this.findOne(id)) as Employee;
     } catch (error) {
@@ -98,6 +141,16 @@ export class EmployeesService {
 
   async remove(id: number): Promise<void> {
     await this.employeeRepository.softDelete(id);
+  }
+
+  async decrementAirTicket(id: number): Promise<Employee> {
+    const employee = await this.findOne(id);
+    if (!employee) {
+      throw new BadRequestException(`Employee with ID ${id} not found`);
+    }
+    const newCount = Math.max(0, (employee.air_tickets || 0) - 1);
+    await this.employeeRepository.update(id, { air_tickets: newCount });
+    return (await this.findOne(id)) as Employee;
   }
 
   async getEmployeesWithTimesheetStatus(

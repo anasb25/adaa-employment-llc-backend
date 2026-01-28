@@ -5,7 +5,7 @@ import { DateOnlyTransformer } from '../../../common/transformers/date.transform
 
 export enum EmployeeStatus {
   ACTIVE = 'active',
-  ON_VACATION = 'on_vacation',
+  ANNUAL_LEAVE = 'annual_leave',
 }
 
 @Entity('employees')
@@ -70,6 +70,12 @@ export class Employee extends BaseEntity {
 
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true, comment: 'Other allowances' })
   other_allowance: number | null;
+
+  @Column({ type: 'int', default: 0, comment: 'Air tickets count - auto-increments every year from date of joining' })
+  air_tickets: number;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0, comment: 'Annual leave balance in days - auto-adds 30 days every year from date of joining' })
+  annual_leave_balance: number;
 
   @OneToMany(() => EmployeeSkill, (employeeSkill) => employeeSkill.employee)
   employeeSkills: EmployeeSkill[];

@@ -162,10 +162,11 @@ export class MobilizationExcelUtil {
       jobStatus = 'active';
       jobStatusValid = true;
     } else if (
+      statusValue.includes('annual') ||
       statusValue.includes('vacation') ||
       statusValue.includes('on vacation')
     ) {
-      jobStatus = 'on_vacation';
+      jobStatus = 'annual_leave';
       jobStatusValid = true;
     } else if (statusValue.includes('cancel')) {
       jobStatus = 'cancelled';
@@ -178,6 +179,9 @@ export class MobilizationExcelUtil {
       jobStatusValid = true;
     } else if (statusValue.includes('casual')) {
       jobStatus = 'casual_leave';
+      jobStatusValid = true;
+    } else if (statusValue.includes('urgent')) {
+      jobStatus = 'urgent_leave';
       jobStatusValid = true;
     } else if (statusValue.includes('notice')) {
       jobStatus = 'notice_period';
@@ -275,7 +279,7 @@ export class MobilizationExcelUtil {
         Field: 'STATUS',
         Description: 'Job Status (Required)',
         'Valid Values':
-          'Active, On Vacation, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle',
+          'Active, Annual Leave, Urgent Leave, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle',
       },
       {
         Field: 'MOB-DEM',
@@ -317,8 +321,8 @@ export class MobilizationExcelUtil {
       let reason = 'Active';
       if (mob.jobStatus === 'active') {
         reason = 'Active';
-      } else if (mob.jobStatus === 'on_vacation') {
-        reason = 'On Vacation';
+      } else if (mob.jobStatus === 'annual_leave') {
+        reason = 'Annual Leave';
       } else if (mob.jobStatus === 'cancelled') {
         reason = 'Cancelled';
       } else if (mob.jobStatus === 'absconded') {
@@ -329,6 +333,8 @@ export class MobilizationExcelUtil {
         reason = 'Sick Leave';
       } else if (mob.jobStatus === 'casual_leave') {
         reason = 'Casual Leave';
+      } else if (mob.jobStatus === 'urgent_leave') {
+        reason = 'Urgent Leave';
       } else if (mob.jobStatus === 'notice_period') {
         reason = 'Notice Period';
       } else if (mob.jobStatus === 'resigned') {

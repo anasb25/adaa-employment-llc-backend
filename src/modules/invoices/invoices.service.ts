@@ -318,14 +318,16 @@ export class InvoicesService {
           const hours = Number(dayData.hoursWorked);
           const jobStatus = dayData.jobStatus?.toLowerCase() || '';
 
-          // Skip if no hours or if demobilized/absent/idle
+          // Skip if no hours or if demobilized/leave/absent/idle
           if (
             hours <= 0 ||
             !jobStatus ||
             jobStatus === 'demobilized' ||
+            jobStatus === 'annual_leave' ||
             jobStatus === 'absent' ||
             jobStatus === 'sick_leave' ||
             jobStatus === 'casual_leave' ||
+            jobStatus === 'urgent_leave' ||
             jobStatus === 'idle'
           ) {
             continue;

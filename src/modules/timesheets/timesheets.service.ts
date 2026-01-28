@@ -192,12 +192,23 @@ export class TimesheetsService {
 
         const hasSavedHours =
           existingEntry && Number(existingEntry.hoursWorked) > 0;
+        const hasSavedEntry = !!existingEntry;
 
-        // Only include dates where employee is mobilized OR idle OR has saved work hours
-        if (isMobilizedToProject || isIdleEmployee || hasSavedHours) {
-          // If demobilized but has saved hours or is idle, show those hours
-          // If demobilized with no saved hours and not idle, don't show the day at all
-          if (!isMobilizedToProject && !hasSavedHours && !isIdleEmployee) {
+        // Only include dates where employee is mobilized OR idle OR has saved work hours OR has any saved entry (e.g. sick leave with 0 hours)
+        if (
+          isMobilizedToProject ||
+          isIdleEmployee ||
+          hasSavedHours ||
+          hasSavedEntry
+        ) {
+          // If demobilized but has saved hours/entry or is idle, show those hours
+          // If demobilized with no saved hours/entry and not idle, don't show the day at all
+          if (
+            !isMobilizedToProject &&
+            !hasSavedHours &&
+            !isIdleEmployee &&
+            !hasSavedEntry
+          ) {
             continue; // Skip this day
           }
 
@@ -333,7 +344,12 @@ export class TimesheetsService {
     const latestMobDateStr = formatDateOnly(latestMob.actionDate);
 
     // List of temporary one-day statuses that should not carry forward
-    const temporaryStatuses = ['absent', 'sick_leave', 'casual_leave'];
+    const temporaryStatuses = [
+      'absent',
+      'sick_leave',
+      'casual_leave',
+      'urgent_leave',
+    ];
 
     // If the latest mobilization is:
     // 1. On the exact date we're looking at -> use it
@@ -379,7 +395,8 @@ export class TimesheetsService {
       case 'active':
       case 'notice_period':
         return 10;
-      case 'on_vacation':
+      case 'annual_leave':
+      case 'urgent_leave':
       case 'cancelled':
       case 'absconded':
       case 'absent':
@@ -515,7 +532,7 @@ export class TimesheetsService {
   /**
    * Auto-sync mobilization record when timesheet entry status changes
    * Creates a new mobilization record if the job status differs from the current mobilization
-   * Automatically demobilizes employee if status is: cancelled, absconded, on_vacation, resigned, or idle
+   * Automatically demobilizes employee if status is: cancelled, absconded, annual_leave, resigned, or idle
    */
   private async syncMobilizationFromTimesheetEntry(
     entry: TimesheetEntry,
@@ -528,13 +545,13 @@ export class TimesheetsService {
       const entryDate = parseDateOnly(dateStr);
 
       // Define statuses that should trigger automatic demobilization
-      const demobilizingStatuses = [
-        'cancelled',
-        'absconded',
-        'on_vacation',
-        'resigned',
-        'idle',
-      ];
+    const demobilizingStatuses = [
+      'cancelled',
+      'absconded',
+      'annual_leave',
+      'resigned',
+      'idle',
+    ];
 
       // Determine if this status should demobilize the employee
       const shouldDemobilize = demobilizingStatuses.includes(
@@ -573,14 +590,19 @@ export class TimesheetsService {
         const statusChanged = exactDateMob.jobStatus !== entry.jobStatus;
         const mobStatusChanged =
           shouldDemobilize && exactDateMob.mobStatus !== MobStatus.DEMOBILIZED;
+        const projectMismatch = exactDateMob.projectId !== projectId;
 
-        if (statusChanged || mobStatusChanged) {
+        if (statusChanged || mobStatusChanged || projectMismatch) {
           exactDateMob.jobStatus = entry.jobStatus as JobStatus;
 
           // Auto-demobilize if status requires it
           if (shouldDemobilize) {
             exactDateMob.mobStatus = MobStatus.DEMOBILIZED;
             exactDateMob.projectId = null; // Remove project assignment when demobilized
+          } else {
+            // Ensure projectId is set when editing from timesheet (e.g. sick leave, absent)
+            exactDateMob.mobStatus = MobStatus.MOBILIZED;
+            exactDateMob.projectId = projectId;
           }
 
           exactDateMob.updatedBy = createdBy;

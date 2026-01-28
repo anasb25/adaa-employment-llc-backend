@@ -23,6 +23,8 @@ import { RateVariantsModule } from './modules/rate-variants/rate-variants.module
 import { PayrollModule } from './modules/payroll/payroll.module';
 import { InvoicesModule } from './modules/invoices/invoices.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { SettlementsModule } from './modules/settlements/settlements.module';
+import { Employee } from './modules/employees/entities/employee.entity';
 import appConfig from './config/app.config';
 import databaseConfig from './config/database.config';
 import authConfig from './config/auth.config';
@@ -45,6 +47,9 @@ import mailConfig from './config/mail.config';
 
     // Scheduler Module
     ScheduleModule.forRoot(),
+
+    // TypeORM Module for shared entities (used by cron jobs, etc.)
+    TypeOrmModule.forFeature([Employee]),
 
     // TypeORM Module
     TypeOrmModule.forRootAsync({
@@ -83,6 +88,7 @@ import mailConfig from './config/mail.config';
     PayrollModule,
     InvoicesModule,
     DashboardModule,
+    SettlementsModule,
   ],
   controllers: [AppController],
   providers: [

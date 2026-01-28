@@ -222,4 +222,11 @@ export class EmployeesController {
   remove(@Param('id') id: string) {
     return this.employeesService.remove(+id);
   }
+
+  @Roles('admin', 'manager')
+  @Permissions('employee:update')
+  @Post(':id/actions/decrement-air-ticket')
+  decrementAirTicket(@Param('id') id: string) {
+    return this.employeesService.decrementAirTicket(+id);
+  }
 }
