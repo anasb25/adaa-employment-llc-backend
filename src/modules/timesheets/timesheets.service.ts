@@ -33,6 +33,12 @@ import {
   parseDateOnly,
   compareDateOnly,
 } from '../../common/utils/date.util';
+import {
+  DailyUtilizationReport,
+  ClientUtilization,
+  ProjectUtilization,
+  TradeUtilization,
+} from './dto/daily-utilization.dto';
 
 export interface MonthlyProjectTimesheetData {
   timesheet: Timesheet | null;
@@ -572,13 +578,13 @@ export class TimesheetsService {
       const entryDate = parseDateOnly(dateStr);
 
       // Define statuses that should trigger automatic demobilization
-    const demobilizingStatuses = [
-      'cancelled',
-      'absconded',
-      'annual_leave',
-      'resigned',
-      'idle',
-    ];
+      const demobilizingStatuses = [
+        'cancelled',
+        'absconded',
+        'annual_leave',
+        'resigned',
+        'idle',
+      ];
 
       // Determine if this status should demobilize the employee
       const shouldDemobilize = demobilizingStatuses.includes(
@@ -739,8 +745,7 @@ export class TimesheetsService {
       timesheet.notes = approveDto.notes;
     }
 
-    const savedTimesheet =
-      await this.timesheetRepository.save(timesheet);
+    const savedTimesheet = await this.timesheetRepository.save(timesheet);
 
     // When approving, deduct annual leave days from each employee's balance
     if (approveDto.status === TimesheetStatus.APPROVED) {
@@ -860,5 +865,152 @@ export class TimesheetsService {
     timesheet.deletedAt = new Date();
 
     await this.timesheetRepository.save(timesheet);
+  }
+
+  /**
+   * Get daily utilization report
+   * Shows employee distribution across clients/projects/trades for a specific date
+   */
+  async getDailyUtilizationReport(
+    date: string, // YYYY-MM-DD format
+  ): Promise<DailyUtilizationReport> {
+    const targetDate = parseDateOnly(date);
+
+    // Get all mobilizations that are effective on the target date
+    // We need the most recent mobilization for each employee up to and including the target date
+    const mobilizations = await this.mobilizationRepository
+      .createQueryBuilder('m')
+      .leftJoinAndSelect('m.employee', 'employee')
+      .leftJoinAndSelect('m.project', 'project')
+      .leftJoinAndSelect('project.client', 'client')
+      .leftJoinAndSelect('m.mobilizedTrade', 'trade')
+      .where('m.actionDate <= :targetDate', { targetDate: date })
+      .orderBy('m.employeeId', 'ASC')
+      .addOrderBy('m.actionDate', 'DESC')
+      .getMany();
+
+    // Get the latest mobilization for each employee
+    const employeeLatestMob = new Map<number, any>();
+    for (const mob of mobilizations) {
+      if (!employeeLatestMob.has(mob.employeeId)) {
+        employeeLatestMob.set(mob.employeeId, mob);
+      }
+    }
+
+    // Filter to only include mobilized employees with active status on active projects
+    const activeMobilizations = Array.from(employeeLatestMob.values()).filter(
+      (mob) =>
+        mob.mobStatus === MobStatus.MOBILIZED &&
+        mob.jobStatus === JobStatus.ACTIVE &&
+        mob.project !== null,
+    );
+
+    // Group by client -> project -> trade
+    const clientMap = new Map<
+      number,
+      {
+        clientId: number;
+        clientName: string;
+        projects: Map<
+          number,
+          {
+            projectId: number;
+            projectName: string;
+            location: string | null;
+            fat: string | null;
+            trades: Map<string, number>;
+          }
+        >;
+      }
+    >();
+
+    for (const mob of activeMobilizations) {
+      const clientId = mob.project.clientId;
+      const clientName = mob.project.client?.name || 'Unknown Client';
+      const projectId = mob.project.id;
+      const projectName = mob.project.name;
+      const location = mob.project.location || null;
+      const fat = mob.project.fat || null;
+      const tradeName = mob.mobilizedTrade?.skill || 'Unknown Trade';
+
+      // Get or create client entry
+      if (!clientMap.has(clientId)) {
+        clientMap.set(clientId, {
+          clientId,
+          clientName,
+          projects: new Map(),
+        });
+      }
+      const client = clientMap.get(clientId)!;
+
+      // Get or create project entry
+      if (!client.projects.has(projectId)) {
+        client.projects.set(projectId, {
+          projectId,
+          projectName,
+          location,
+          fat,
+          trades: new Map(),
+        });
+      }
+      const project = client.projects.get(projectId)!;
+
+      // Increment trade count
+      const currentCount = project.trades.get(tradeName) || 0;
+      project.trades.set(tradeName, currentCount + 1);
+    }
+
+    // Convert to output format
+    const clients: ClientUtilization[] = [];
+    let totalManpower = 0;
+
+    for (const [clientId, clientData] of clientMap) {
+      const projects: ProjectUtilization[] = [];
+      let clientTotal = 0;
+
+      for (const [projectId, projectData] of clientData.projects) {
+        const trades: TradeUtilization[] = [];
+
+        for (const [tradeName, headCount] of projectData.trades) {
+          trades.push({
+            tradeInSite: tradeName,
+            headCount,
+          });
+          clientTotal += headCount;
+        }
+
+        // Sort trades alphabetically
+        trades.sort((a, b) => a.tradeInSite.localeCompare(b.tradeInSite));
+
+        projects.push({
+          projectId: projectData.projectId,
+          projectName: projectData.projectName,
+          location: projectData.location,
+          fat: projectData.fat,
+          trades,
+        });
+      }
+
+      // Sort projects by name
+      projects.sort((a, b) => a.projectName.localeCompare(b.projectName));
+
+      clients.push({
+        clientId,
+        clientName: clientData.clientName,
+        projects,
+        total: clientTotal,
+      });
+
+      totalManpower += clientTotal;
+    }
+
+    // Sort clients by name
+    clients.sort((a, b) => a.clientName.localeCompare(b.clientName));
+
+    return {
+      date,
+      clients,
+      totalManpower,
+    };
   }
 }

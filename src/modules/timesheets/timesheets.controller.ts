@@ -23,11 +23,21 @@ import {
   ApproveTimesheetDto,
 } from './dto/update-timesheet.dto';
 import { TimesheetFiltersDto } from './dto/timesheet-filters.dto';
+import { DailyUtilizationQueryDto } from './dto/daily-utilization.dto';
 
 @Controller('timesheets')
 @UseGuards(JwtAuthGuard)
 export class TimesheetsController {
   constructor(private readonly timesheetsService: TimesheetsService) {}
+
+  /**
+   * Get daily utilization report
+   * GET /timesheets/daily-utilization?date=YYYY-MM-DD
+   */
+  @Get('daily-utilization')
+  async getDailyUtilizationReport(@Query() query: DailyUtilizationQueryDto) {
+    return await this.timesheetsService.getDailyUtilizationReport(query.date);
+  }
 
   /**
    * Get monthly project timesheet with data
