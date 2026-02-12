@@ -1,10 +1,11 @@
 import { Injectable, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, ILike } from 'typeorm';
+import { Repository, ILike, In } from 'typeorm';
 import { Employee } from './entities/employee.entity';
 import { Timesheet } from '../timesheets/entities/timesheet.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
+import { Mobilization } from '../mobilizations/entities/mobilization.entity';
 import {
   PaginationUtil,
   PaginationOptions,
@@ -26,47 +27,135 @@ export class EmployeesService {
     private readonly skillRepository: Repository<Skill>,
     @InjectRepository(EmployeeSkill)
     private readonly employeeSkillRepository: Repository<EmployeeSkill>,
+    @InjectRepository(Mobilization)
+    private readonly mobilizationRepository: Repository<Mobilization>,
   ) {}
+
+  /**
+   * Get the latest mobilization status for a list of employee IDs.
+   * Returns a map of employeeId -> { jobStatus, mobStatus, projectName }
+   */
+  private async getLatestMobilizationStatuses(
+    employeeIds: number[],
+  ): Promise<
+    Map<
+      number,
+      { jobStatus: string; mobStatus: string; projectName: string | null }
+    >
+  > {
+    const statusMap = new Map<
+      number,
+      { jobStatus: string; mobStatus: string; projectName: string | null }
+    >();
+
+    if (employeeIds.length === 0) return statusMap;
+
+    // For each employee, get their latest mobilization record (by actionDate DESC, id DESC)
+    const latestMobilizations = await this.mobilizationRepository
+      .createQueryBuilder('mob')
+      .leftJoinAndSelect('mob.project', 'project')
+      .where((qb) => {
+        const subQuery = qb
+          .subQuery()
+          .select('m2.id')
+          .from(Mobilization, 'm2')
+          .where('m2.employeeId = mob.employeeId')
+          .andWhere('m2.deletedAt IS NULL')
+          .orderBy('m2.actionDate', 'DESC')
+          .addOrderBy('m2.id', 'DESC')
+          .limit(1)
+          .getQuery();
+        return `mob.id = ${subQuery}`;
+      })
+      .andWhere('mob.employeeId IN (:...employeeIds)', { employeeIds })
+      .andWhere('mob.deletedAt IS NULL')
+      .getMany();
+
+    for (const mob of latestMobilizations) {
+      statusMap.set(mob.employeeId, {
+        jobStatus: mob.jobStatus,
+        mobStatus: mob.mobStatus,
+        projectName: mob.project?.name || null,
+      });
+    }
+
+    return statusMap;
+  }
+
+  /**
+   * Enrich employee objects with their latest mobilization status.
+   * Adds latestMobilization field to each employee.
+   */
+  private async enrichWithMobilizationStatus(
+    employees: Employee[],
+  ): Promise<any[]> {
+    if (employees.length === 0) return employees;
+
+    const employeeIds = employees.map((e) => e.id);
+    const statusMap = await this.getLatestMobilizationStatuses(employeeIds);
+
+    return employees.map((employee) => {
+      const mobStatus = statusMap.get(employee.id);
+      return {
+        ...employee,
+        latestMobilization: mobStatus || null,
+      };
+    });
+  }
 
   async findAllPaginated(
     options: PaginationOptions,
-  ): Promise<PaginatedResponse<Employee>> {
-    return await PaginationUtil.paginate(this.employeeRepository, options, {
-      relations: [
-        'employeeSkills',
-        'employeeSkills.skill',
-        'employeeSkills.skill.skillType',
-      ],
-      order: { createdAt: 'DESC' },
-    });
+  ): Promise<PaginatedResponse<any>> {
+    const result = await PaginationUtil.paginate(
+      this.employeeRepository,
+      options,
+      {
+        relations: [
+          'employeeSkills',
+          'employeeSkills.skill',
+          'employeeSkills.skill.skillType',
+        ],
+        order: { createdAt: 'DESC' },
+      },
+    );
+
+    const enrichedData = await this.enrichWithMobilizationStatus(result.data);
+    return { ...result, data: enrichedData };
   }
 
   async searchEmployees(
     query: string,
     options: PaginationOptions,
-  ): Promise<PaginatedResponse<Employee>> {
+  ): Promise<PaginatedResponse<any>> {
     const searchTerm = `%${query}%`;
 
-    return await PaginationUtil.paginate(this.employeeRepository, options, {
-      relations: [
-        'employeeSkills',
-        'employeeSkills.skill',
-        'employeeSkills.skill.skillType',
-      ],
-      where: [
-        { name: ILike(searchTerm) },
-        { adaa_emp_code: ILike(searchTerm) },
-        { pp_no: ILike(searchTerm) },
-        { emirates_id: ILike(searchTerm) },
-        { contact_no: ILike(searchTerm) },
-        { personal_code: ILike(searchTerm) },
-      ],
-      order: { createdAt: 'DESC' },
-    });
+    const result = await PaginationUtil.paginate(
+      this.employeeRepository,
+      options,
+      {
+        relations: [
+          'employeeSkills',
+          'employeeSkills.skill',
+          'employeeSkills.skill.skillType',
+        ],
+        where: [
+          { name: ILike(searchTerm) },
+          { adaa_emp_code: ILike(searchTerm) },
+          { pp_no: ILike(searchTerm) },
+          { emirates_id: ILike(searchTerm) },
+          { contact_no: ILike(searchTerm) },
+          { personal_code: ILike(searchTerm) },
+        ],
+        order: { createdAt: 'DESC' },
+      },
+    );
+
+    const enrichedData = await this.enrichWithMobilizationStatus(result.data);
+    return { ...result, data: enrichedData };
   }
 
-  async findOne(id: number): Promise<Employee | null> {
-    return await this.employeeRepository.findOne({
+  async findOne(id: number): Promise<any | null> {
+    const employee = await this.employeeRepository.findOne({
       where: { id },
       relations: [
         'employeeSkills',
@@ -74,6 +163,11 @@ export class EmployeesService {
         'employeeSkills.skill.skillType',
       ],
     });
+
+    if (!employee) return null;
+
+    const enriched = await this.enrichWithMobilizationStatus([employee]);
+    return enriched[0];
   }
 
   /**
@@ -83,7 +177,8 @@ export class EmployeesService {
     if (!dateOfJoining) return 0;
     const joinDate = new Date(dateOfJoining);
     const today = new Date();
-    const yearsOfService = (today.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+    const yearsOfService =
+      (today.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
     return Math.floor(yearsOfService);
   }
 
@@ -95,7 +190,8 @@ export class EmployeesService {
     if (!dateOfJoining) return 0;
     const joinDate = new Date(dateOfJoining);
     const today = new Date();
-    const yearsOfService = (today.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+    const yearsOfService =
+      (today.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
     return Math.floor(yearsOfService) * 30;
   }
 
@@ -105,10 +201,14 @@ export class EmployeesService {
       // But allow manual override if provided in employeeData
       if (employeeData.date_of_joining) {
         if (employeeData.air_tickets === undefined) {
-          employeeData.air_tickets = this.calculateAirTickets(employeeData.date_of_joining);
+          employeeData.air_tickets = this.calculateAirTickets(
+            employeeData.date_of_joining,
+          );
         }
         if (employeeData.annual_leave_balance === undefined) {
-          employeeData.annual_leave_balance = this.calculateAnnualLeaveBalance(employeeData.date_of_joining);
+          employeeData.annual_leave_balance = this.calculateAnnualLeaveBalance(
+            employeeData.date_of_joining,
+          );
         }
       }
       const employee = this.employeeRepository.create(employeeData);
@@ -125,10 +225,14 @@ export class EmployeesService {
       // But only if they're not explicitly provided (allow manual override)
       if (employeeData.date_of_joining) {
         if (employeeData.air_tickets === undefined) {
-          employeeData.air_tickets = this.calculateAirTickets(employeeData.date_of_joining);
+          employeeData.air_tickets = this.calculateAirTickets(
+            employeeData.date_of_joining,
+          );
         }
         if (employeeData.annual_leave_balance === undefined) {
-          employeeData.annual_leave_balance = this.calculateAnnualLeaveBalance(employeeData.date_of_joining);
+          employeeData.annual_leave_balance = this.calculateAnnualLeaveBalance(
+            employeeData.date_of_joining,
+          );
         }
       }
       await this.employeeRepository.update(id, employeeData);
@@ -236,7 +340,10 @@ export class EmployeesService {
       }
 
       // Check which field is causing the duplicate
-      if (message.includes('UQ_a8de3ddfd53ca6daf6ba8dd6b93') || message.includes('adaa_emp_code')) {
+      if (
+        message.includes('UQ_a8de3ddfd53ca6daf6ba8dd6b93') ||
+        message.includes('adaa_emp_code')
+      ) {
         return `Duplicate ADAA Employee Code${duplicateValue}. This code already exists in the system.`;
       }
       if (message.includes('emirates_id')) {
@@ -251,7 +358,7 @@ export class EmployeesService {
       if (message.includes('personal_code')) {
         return `Duplicate Personal Code${duplicateValue}. This personal code already exists in the system.`;
       }
-      
+
       // If we can't determine the specific field, try to extract it from the constraint name
       const constraintMatch = message.match(/constraint "([^"]+)"/);
       if (constraintMatch) {
@@ -264,7 +371,7 @@ export class EmployeesService {
         }
         if (constraint.includes('pp_no')) {
           return `Duplicate Passport Number${duplicateValue}. This passport number already exists.`;
-      }
+        }
         if (constraint.includes('work_permit_no')) {
           return `Duplicate Work Permit Number${duplicateValue}. This work permit number already exists.`;
         }

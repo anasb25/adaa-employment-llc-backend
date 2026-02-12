@@ -80,7 +80,10 @@ export class MobilizationsController {
   @Get('effective-status-on-date')
   @Roles('admin', 'manager', 'supervisor')
   @Permissions('employee:read')
-  async getEffectiveStatusForAllEmployeesOnDate(@Query('date') date: string) {
+  async getEffectiveStatusForAllEmployeesOnDate(
+    @Query('date') date: string,
+    @Query('includeDemobilized') includeDemobilized?: string,
+  ) {
     if (!date) {
       throw new BadRequestException('Date query parameter is required');
     }
@@ -90,6 +93,7 @@ export class MobilizationsController {
     }
     return await this.mobilizationsService.getEffectiveStatusForAllEmployeesOnDate(
       targetDate,
+      includeDemobilized === 'true',
     );
   }
 

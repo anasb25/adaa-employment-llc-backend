@@ -6,6 +6,7 @@ import { Employee } from './entities/employee.entity';
 import { Timesheet } from '../timesheets/entities/timesheet.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
+import { Mobilization } from '../mobilizations/entities/mobilization.entity';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity
       Timesheet,
       Skill,
       EmployeeSkill,
+      Mobilization,
     ]),
   ],
   controllers: [EmployeesController],

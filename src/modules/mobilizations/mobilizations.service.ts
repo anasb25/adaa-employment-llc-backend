@@ -323,9 +323,11 @@ export class MobilizationsService {
    * Get effective status for all employees on a specific date (smart carry-forward logic)
    * Returns the most recent mobilization for each employee on or before the given date
    * Temporary statuses (absent, sick_leave, casual_leave) don't carry forward
+   * @param includeDemobilized If true, includes employees whose effective status is DEMOBILIZED
    */
   async getEffectiveStatusForAllEmployeesOnDate(
     date: Date,
+    includeDemobilized: boolean = false,
   ): Promise<Mobilization[]> {
     // Fetch all mobilizations up to and including the specified date
     // actionDate is now a string, so we use string comparison
@@ -364,14 +366,18 @@ export class MobilizationsService {
       }
     }
 
-    // Exclude demobilized employees: demobilization is sustained until remobilized,
-    // so they should not show in the list as "active" or anything until remobilized
-    const excludingDemobilized = effectiveMobilizations.filter(
-      (m) => m.mobStatus !== MobStatus.DEMOBILIZED,
-    );
+    // Optionally exclude demobilized employees: demobilization is sustained until remobilized.
+    // For "current status" views (dashboard), we exclude them.
+    // For daily mobilization management (carry-forward view), we include them so users can
+    // see demobilization events that happened on a specific date.
+    const filtered = includeDemobilized
+      ? effectiveMobilizations
+      : effectiveMobilizations.filter(
+          (m) => m.mobStatus !== MobStatus.DEMOBILIZED,
+        );
 
     // Sort by employee name
-    const result = excludingDemobilized.sort((a, b) => {
+    const result = filtered.sort((a, b) => {
       const nameA = a.employee?.name || '';
       const nameB = b.employee?.name || '';
       return nameA.localeCompare(nameB);
@@ -638,9 +644,8 @@ export class MobilizationsService {
         .length,
       absconded: mobilizations.filter((m) => m.jobStatus === 'absconded')
         .length,
-      annual_leave: mobilizations.filter(
-        (m) => m.jobStatus === 'annual_leave',
-      ).length,
+      annual_leave: mobilizations.filter((m) => m.jobStatus === 'annual_leave')
+        .length,
       absent: mobilizations.filter((m) => m.jobStatus === 'absent').length,
       sick_leave: mobilizations.filter((m) => m.jobStatus === 'sick_leave')
         .length,
@@ -918,7 +923,7 @@ export class MobilizationsService {
           const previousDayObj = new Date(
             actionDateObj.getTime() - 24 * 60 * 60 * 1000,
           );
-          
+
           const previousMobilization = await this.getEffectiveStatusOnDate(
             employee.id,
             previousDayObj,

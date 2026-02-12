@@ -94,6 +94,7 @@ export class TimesheetsService {
     const startDate = new Date(year, monthNum - 1, 1);
     const endDate = new Date(year, monthNum, 0); // Last day of month
     const daysInMonth = endDate.getDate();
+    const endDateStr = formatDateOnly(endDate);
 
     // Get project
     const project = await this.projectRepository.findOne({
@@ -106,14 +107,12 @@ export class TimesheetsService {
     }
 
     // Get or create timesheet
-    let timesheet = await this.timesheetRepository.findOne({
+    const timesheet = await this.timesheetRepository.findOne({
       where: { projectId, month },
       relations: ['entries', 'entries.employee'],
     });
 
-    // Get all mobilizations for this project
-    // actionDate is now a string, so we use string comparison
-    const endDateStr = formatDateOnly(endDate);
+    // Get all mobilizations for this project (to find which employees belong here)
     const mobilizations = await this.mobilizationRepository.find({
       where: {
         projectId: project.id,
@@ -138,36 +137,74 @@ export class TimesheetsService {
       }
     }
 
+    const employeeIds = Array.from(employeeMap.keys());
+
+    // ---- BATCH: Fetch ALL mobilizations for all employees at once ----
+    const allEmployeeMobilizations =
+      employeeIds.length > 0
+        ? await this.mobilizationRepository
+            .createQueryBuilder('mob')
+            .where('mob.employeeId IN (:...employeeIds)', { employeeIds })
+            .andWhere('mob.actionDate <= :endDate', { endDate: endDateStr })
+            .andWhere('mob.deletedAt IS NULL')
+            .orderBy('mob.actionDate', 'DESC')
+            .addOrderBy('mob.createdAt', 'DESC')
+            .getMany()
+        : [];
+
+    // Group mobilizations by employeeId for fast lookup
+    const mobilizationsByEmployee = new Map<number, Mobilization[]>();
+    for (const mob of allEmployeeMobilizations) {
+      let list = mobilizationsByEmployee.get(mob.employeeId);
+      if (!list) {
+        list = [];
+        mobilizationsByEmployee.set(mob.employeeId, list);
+      }
+      list.push(mob);
+    }
+
+    // ---- BATCH: Pre-fetch special day rates for the entire month ----
+    const specialDayRatesMap =
+      await this.specialDaysService.getSpecialDayRatesForRange(
+        startDate,
+        endDate,
+      );
+
+    // Pre-compute day-of-week names for each day in the month (avoids repeated Date operations)
+    const dayInfo: Array<{
+      dateStr: string;
+      dayOfWeekName: string;
+      day: number;
+    }> = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      const currentDate = parseDateOnly(dateStr);
+      const dayOfWeekName = currentDate.toLocaleDateString('en-US', {
+        weekday: 'long',
+      });
+      dayInfo.push({ dateStr, dayOfWeekName, day });
+    }
+
     const employees: any[] = [];
     let srNo = 1;
 
     for (const [employeeId, latestMob] of employeeMap.entries()) {
-      // Get all mobilizations for this employee to determine status for each day
-      // actionDate is now a string, so we use string comparison
-      const employeeMobilizations = await this.mobilizationRepository.find({
-        where: {
-          employeeId,
-          actionDate: LessThanOrEqual(endDateStr) as any,
-        },
-        order: {
-          actionDate: 'DESC',
-          createdAt: 'DESC',
-        },
-      });
+      // Use pre-fetched mobilizations for this employee
+      const employeeMobilizations =
+        mobilizationsByEmployee.get(employeeId) || [];
 
       // Build daily hours
       const dailyHours: any[] = [];
 
-      for (let day = 1; day <= daysInMonth; day++) {
-        const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      // Track whether this employee has been demobilized from this project.
+      // Once demobilized, all subsequent days in the month show as "-" (no entry).
+      let demobilizedFromProject = false;
 
-        // Create date at UTC midnight for timezone-neutral operations
-        const currentDate = parseDateOnly(dateStr);
-
-        // Get day of week name (e.g., 'Monday', 'Tuesday', etc.)
-        const dayOfWeekName = currentDate.toLocaleDateString('en-US', {
-          weekday: 'long',
-        });
+      for (const { dateStr, dayOfWeekName, day } of dayInfo) {
+        // If already demobilized in a previous day this month, skip remaining days
+        if (demobilizedFromProject) {
+          continue;
+        }
 
         // Find effective mobilization for this date with smart carry-forward logic
         const effectiveMob = this.getEffectiveMobilizationForDate(
@@ -181,18 +218,51 @@ export class TimesheetsService {
             e.employeeId === employeeId && formatDateOnly(e.date) === dateStr,
         );
 
+        // Pre-compute: is this the exact date of a mobilization/demobilization record?
+        const effectiveMobDateStr = effectiveMob
+          ? formatDateOnly(effectiveMob.actionDate)
+          : null;
+        const isActualMobilizationForThisDate = effectiveMobDateStr === dateStr;
+
+        // Check if this is the day the employee was demobilized from THIS project.
+        // mobStatus === DEMOBILIZED is the authoritative signal — the jobStatus (idle,
+        // cancelled, absconded, etc.) only tells us WHY, it doesn't override the demob.
+        // We must also verify projectId matches so a demobilization from a DIFFERENT
+        // project doesn't incorrectly mark this project as demobilized.
+        const isDemobilizationDay =
+          effectiveMob &&
+          effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
+          effectiveMob.projectId === project.id &&
+          isActualMobilizationForThisDate;
+
+        // If demobilized today, mark the flag so all subsequent days are skipped
+        if (isDemobilizationDay) {
+          demobilizedFromProject = true;
+          // Show "demobilized" entry for this day (0 hours)
+          dailyHours.push({
+            date: dateStr,
+            day,
+            hoursWorked: 0,
+            jobStatus: 'demobilized',
+            isOffDay: false,
+            notes: existingEntry?.notes || null,
+            entryId: existingEntry?.id || null,
+          });
+          continue;
+        }
+
         // Determine if employee should appear in timesheet for this date
-        // Only show if:
-        // 1. Currently mobilized to this project, OR
-        // 2. Has saved timesheet entries with hours > 0, OR
-        // 3. Has idle status (idle employees should show even if demobilized)
         const isMobilizedToProject =
           effectiveMob &&
           effectiveMob.mobStatus === MobStatus.MOBILIZED &&
           effectiveMob.projectId === project.id;
 
+        // An idle employee on the project: must be MOBILIZED (not DEMOBILIZED) with IDLE job status.
+        // A DEMOBILIZED record with jobStatus IDLE means the employee LEFT the project as idle,
+        // not that they are idle on the project.
         const isIdleEmployee =
           effectiveMob &&
+          effectiveMob.mobStatus === MobStatus.MOBILIZED &&
           effectiveMob.jobStatus === JobStatus.IDLE &&
           effectiveMob.projectId === project.id;
 
@@ -200,128 +270,92 @@ export class TimesheetsService {
           existingEntry && Number(existingEntry.hoursWorked) > 0;
         const hasSavedEntry = !!existingEntry;
 
-        // Only include dates where employee is mobilized OR idle OR has saved work hours OR has any saved entry (e.g. sick leave with 0 hours)
+        // If the employee is demobilized (carried forward from earlier) and has no saved data, skip
         if (
-          isMobilizedToProject ||
-          isIdleEmployee ||
-          hasSavedHours ||
-          hasSavedEntry
+          !isMobilizedToProject &&
+          !isIdleEmployee &&
+          !hasSavedHours &&
+          !hasSavedEntry
         ) {
-          // If demobilized but has saved hours/entry or is idle, show those hours
-          // If demobilized with no saved hours/entry and not idle, don't show the day at all
+          // Check if the carry-forward status is DEMOBILIZED from THIS project —
+          // means they left this specific project before this date.
+          // We must check projectId so a demobilization from a DIFFERENT project
+          // (e.g. A102) doesn't incorrectly mark this project (e.g. DIBBA) as demobilized.
           if (
-            !isMobilizedToProject &&
-            !hasSavedHours &&
-            !isIdleEmployee &&
-            !hasSavedEntry
-          ) {
-            continue; // Skip this day
-          }
-
-          // Check if the effective mobilization is from this exact date (user-entered)
-          // or carried forward from a previous date (using timezone-neutral comparison)
-          const effectiveMobDateStr = effectiveMob
-            ? formatDateOnly(effectiveMob.actionDate)
-            : null;
-          const isActualMobilizationForThisDate =
-            effectiveMobDateStr === dateStr;
-
-          // If this is the first day of demobilization (but not idle), show "demobilized" status
-          // Idle employees should show with their idle hours, not as demobilized
-          const isDemobilizationDay =
             effectiveMob &&
             effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
-            effectiveMob.jobStatus !== JobStatus.IDLE &&
-            isActualMobilizationForThisDate;
-
-          // Check for special days first (higher priority) - using timezone-neutral date
-          // Pass projectId to get project-specific client rate multiplier
-          const specialDayRates =
-            await this.specialDaysService.getSpecialDayRates(
-              currentDate,
-              project.id,
-            );
-
-          // Check if this day is a project off day
-          const isProjectOffDay =
-            project.offDays &&
-            Array.isArray(project.offDays) &&
-            project.offDays.includes(dayOfWeekName);
-
-          let hours: number;
-          let jobStatus: string;
-
-          if (isDemobilizationDay) {
-            // First day of demobilization - show as "demobilized" with 0 hours
-            hours = 0;
-            jobStatus = 'demobilized';
-          } else if (existingEntry) {
-            // If user has saved a timesheet entry for this day, respect their data
-            hours = Number(existingEntry.hoursWorked);
-            jobStatus = existingEntry.jobStatus;
-          } else if (isActualMobilizationForThisDate) {
-            // There's an actual mobilization record for this specific date
-            // Use its status regardless of off-days/special days (user explicitly created this record)
-            hours = this.getDefaultHoursForStatus(effectiveMob!.jobStatus);
-            jobStatus = effectiveMob!.jobStatus;
-          } else if (
-            specialDayRates.isSpecialDay &&
-            specialDayRates.isMandatoryOff
+            effectiveMob.projectId === project.id
           ) {
-            // Mandatory off day - must be off
-            hours = 0;
-            jobStatus = JobStatus.OFF;
-          } else if (
-            specialDayRates.isSpecialDay &&
-            (specialDayRates.dayType === SpecialDayType.OPTIONAL_OFF ||
-              specialDayRates.isDefaultOff)
-          ) {
-            // Optional off day or default off
-            hours = 0;
-            jobStatus = JobStatus.OFF;
-          } else if (isProjectOffDay) {
-            // No user entry, no mobilization record for today, and it's a project off day
-            // Default to "Off" status for carried-forward entries
-            hours = 0;
-            jobStatus = JobStatus.OFF;
-          } else if (effectiveMob) {
-            // No user entry, not an off day - use smart carry-forward
-            hours = this.getDefaultHoursForStatus(effectiveMob.jobStatus);
-            jobStatus = effectiveMob.jobStatus;
-          } else {
-            // No effective mobilization - skip this day
-            continue;
+            demobilizedFromProject = true;
           }
-
-          dailyHours.push({
-            date: dateStr,
-            day,
-            hoursWorked: hours,
-            jobStatus: jobStatus,
-            isOffDay: isProjectOffDay,
-            notes: existingEntry?.notes || null,
-            entryId: existingEntry?.id || null,
-          });
+          continue;
         }
-        // If not mobilized and no saved hours, don't show this day (show as "-")
+
+        // Use pre-fetched special day rates (no DB query per day)
+        const specialDayRates = specialDayRatesMap.get(dateStr) || {
+          isSpecialDay: false,
+          specialDay: null,
+          clientRateMultiplier: 1.0,
+          employeeRateMultiplier: 1.0,
+          isDefaultOff: false,
+          isMandatoryOff: false,
+          dayType: null,
+        };
+
+        // Check if this day is a project off day
+        const isProjectOffDay =
+          project.offDays &&
+          Array.isArray(project.offDays) &&
+          project.offDays.includes(dayOfWeekName);
+
+        let hours: number;
+        let jobStatus: string;
+
+        if (existingEntry) {
+          // If user has saved a timesheet entry for this day, respect their data
+          hours = Number(existingEntry.hoursWorked);
+          jobStatus = existingEntry.jobStatus;
+        } else if (isActualMobilizationForThisDate) {
+          // There's an actual mobilization record for this specific date
+          hours = this.getDefaultHoursForStatus(effectiveMob!.jobStatus);
+          jobStatus = effectiveMob!.jobStatus;
+        } else if (
+          specialDayRates.isSpecialDay &&
+          specialDayRates.isMandatoryOff
+        ) {
+          hours = 0;
+          jobStatus = JobStatus.OFF;
+        } else if (
+          specialDayRates.isSpecialDay &&
+          (specialDayRates.dayType === SpecialDayType.OPTIONAL_OFF ||
+            specialDayRates.isDefaultOff)
+        ) {
+          hours = 0;
+          jobStatus = JobStatus.OFF;
+        } else if (isProjectOffDay) {
+          hours = 0;
+          jobStatus = JobStatus.OFF;
+        } else if (effectiveMob) {
+          hours = this.getDefaultHoursForStatus(effectiveMob.jobStatus);
+          jobStatus = effectiveMob.jobStatus;
+        } else {
+          continue;
+        }
+
+        dailyHours.push({
+          date: dateStr,
+          day,
+          hoursWorked: hours,
+          jobStatus: jobStatus,
+          isOffDay: isProjectOffDay,
+          notes: existingEntry?.notes || null,
+          entryId: existingEntry?.id || null,
+        });
       }
 
-      // Only include employee if they have mobilized days (not just demobilized)
-      // Exclude employees who are demobilized at end of month and have no saved entries:
-      // demobilization is sustained until remobilized, so they should not show in the project timesheet at all
+      // Include any employee who has at least one day of data during the month,
+      // whether they are currently mobilized or were demobilized mid-month.
       if (dailyHours.length > 0) {
-        const effectiveAtEndOfMonth = this.getEffectiveMobilizationForDate(
-          employeeMobilizations,
-          endDateStr,
-        );
-        const isDemobilizedAtEndOfMonth =
-          effectiveAtEndOfMonth?.mobStatus === MobStatus.DEMOBILIZED &&
-          effectiveAtEndOfMonth?.jobStatus !== JobStatus.IDLE;
-        const hasSavedEntryThisMonth =
-          timesheet?.entries?.some((e) => e.employeeId === employeeId) ?? false;
-        if (isDemobilizedAtEndOfMonth && !hasSavedEntryThisMonth) {
-          continue; // Skip: do not show demobilized employees until remobilized
-        }
         employees.push({
           srNo: srNo++,
           employeeId: latestMob.employee.id,
@@ -339,6 +373,38 @@ export class TimesheetsService {
       project,
       employees,
     };
+  }
+
+  /**
+   * Get monthly timesheets for ALL projects in a single call.
+   * Fetches all active projects and processes them concurrently.
+   */
+  async getAllProjectTimesheets(
+    month: string,
+  ): Promise<MonthlyProjectTimesheetData[]> {
+    // Fetch all active (non-deleted) projects
+    const projects = await this.projectRepository.find({
+      relations: ['client'],
+      order: { name: 'ASC' },
+    });
+
+    // Process all projects concurrently
+    const results = await Promise.all(
+      projects.map(async (project) => {
+        try {
+          return await this.getMonthlyProjectTimesheet(project.id, month);
+        } catch (error) {
+          // If a project fails (e.g. not found), skip it
+          this.logger.warn(
+            `Failed to get timesheet for project ${project.id}: ${error.message}`,
+          );
+          return null;
+        }
+      }),
+    );
+
+    // Filter out any null results from failed projects
+    return results.filter((r): r is MonthlyProjectTimesheetData => r !== null);
   }
 
   /**

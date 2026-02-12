@@ -1,6 +1,5 @@
-import { IsString, IsOptional, IsEnum, IsDateString, IsNumber } from 'class-validator';
+import { IsString, IsOptional, IsDateString, IsNumber } from 'class-validator';
 import { Transform } from 'class-transformer';
-import { EmployeeStatus } from '../entities/employee.entity';
 
 // Convert empty string to undefined so @IsOptional() skips validation for optional date fields
 const emptyStringToUndefined = ({ value }: { value: unknown }) =>
@@ -61,10 +60,6 @@ export class CreateEmployeeDto {
   @IsOptional()
   @IsString()
   contact_no?: string;
-
-  @IsOptional()
-  @IsEnum(EmployeeStatus)
-  status?: EmployeeStatus;
 
   @IsOptional()
   @Transform(emptyStringToUndefined)

@@ -141,7 +141,6 @@ export class ExcelValidatorUtil {
       work_permit_expiry: this.excelDateToISO(row['WP EXPIRY']),
       personal_code: toNullIfEmpty(row['PERSONAL CODE']),
       contact_no: toNullIfEmpty(row['CONTACT NO']),
-      status: 'active', // Default status
       date_of_joining: this.excelDateToISO(row['DOJ']),
       date_of_arrival: null, // Not in Excel
 

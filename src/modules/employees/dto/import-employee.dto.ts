@@ -1,5 +1,4 @@
-import { IsString, IsOptional, IsEnum, IsDateString } from 'class-validator';
-import { EmployeeStatus } from '../entities/employee.entity';
+import { IsString, IsOptional, IsDateString } from 'class-validator';
 
 export class ImportEmployeeDto {
   @IsString()
@@ -53,10 +52,6 @@ export class ImportEmployeeDto {
   contact_no?: string;
 
   @IsOptional()
-  @IsEnum(EmployeeStatus)
-  status?: EmployeeStatus;
-
-  @IsOptional()
   @IsDateString()
   date_of_joining?: string;
 
@@ -75,4 +70,3 @@ export interface ImportResult {
   }>;
   imported: any[];
 }
-

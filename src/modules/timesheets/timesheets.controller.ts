@@ -40,6 +40,16 @@ export class TimesheetsController {
   }
 
   /**
+   * Get monthly timesheets for ALL projects in a single call
+   * GET /timesheets/all-projects/month/:month
+   * Example: /timesheets/all-projects/month/2026-02
+   */
+  @Get('all-projects/month/:month')
+  async getAllProjectTimesheets(@Param('month') month: string) {
+    return await this.timesheetsService.getAllProjectTimesheets(month);
+  }
+
+  /**
    * Get monthly project timesheet with data
    * GET /timesheets/project/:projectId/month/:month
    * Example: /timesheets/project/1/month/2024-01
