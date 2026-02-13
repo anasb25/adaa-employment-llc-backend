@@ -244,7 +244,7 @@ export class EmployeesService {
   }
 
   async remove(id: number): Promise<void> {
-    await this.employeeRepository.softDelete(id);
+    await this.employeeRepository.delete(id);
   }
 
   async decrementAirTicket(id: number): Promise<Employee> {

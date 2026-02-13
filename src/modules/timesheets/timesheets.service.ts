@@ -912,9 +912,9 @@ export class TimesheetsService {
   }
 
   /**
-   * Delete a timesheet (soft delete)
+   * Delete a timesheet (hard delete)
    */
-  async remove(id: number, deletedBy: number): Promise<void> {
+  async remove(id: number, _deletedBy?: number): Promise<void> {
     const timesheet = await this.timesheetRepository.findOne({
       where: { id },
     });
@@ -927,10 +927,7 @@ export class TimesheetsService {
       throw new BadRequestException('Cannot delete an approved timesheet');
     }
 
-    timesheet.deletedBy = deletedBy;
-    timesheet.deletedAt = new Date();
-
-    await this.timesheetRepository.save(timesheet);
+    await this.timesheetRepository.delete(id);
   }
 
   /**

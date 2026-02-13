@@ -599,16 +599,15 @@ export class MobilizationsService {
   }
 
   /**
-   * Soft delete mobilization
+   * Delete mobilization (hard delete)
    */
-  async remove(id: number, deletedBy: number): Promise<void> {
+  async remove(id: number, _deletedBy?: number): Promise<void> {
     const existing = await this.findOne(id);
     if (!existing) {
       throw new NotFoundException('Mobilization not found');
     }
 
-    await this.mobilizationRepository.update(id, { deletedBy });
-    await this.mobilizationRepository.softDelete(id);
+    await this.mobilizationRepository.delete(id);
   }
 
   /**
