@@ -235,14 +235,124 @@ export class PayrollService {
     }
 
     const payrolls: Payroll[] = [];
+    const seenPayrollIds = new Set<number>();
 
-    // Process each approved timesheet (project)
+    // 1) Process each approved project timesheet
     for (const timesheet of approvedTimesheets) {
+      if (timesheet.projectId == null) continue;
       const projectPayrolls = await this.calculatePayrollForProject(
         timesheet.projectId,
         month,
       );
-      payrolls.push(...projectPayrolls);
+      for (const p of projectPayrolls) {
+        payrolls.push(p);
+        seenPayrollIds.add(p.id);
+      }
+    }
+
+    // 2) Process approved idle timesheet (add idle days to payroll; merge into existing or create)
+    const idlePayrolls = await this.calculatePayrollFromIdleTimesheet(month);
+    for (const p of idlePayrolls) {
+      if (!seenPayrollIds.has(p.id)) {
+        payrolls.push(p);
+        seenPayrollIds.add(p.id);
+      }
+    }
+
+    return payrolls;
+  }
+
+  /**
+   * Calculate payroll from the approved idle-employees timesheet.
+   * For each employee with idle days: merge idle hours into existing payroll for the month, or create one if none exists.
+   */
+  async calculatePayrollFromIdleTimesheet(month: string): Promise<Payroll[]> {
+    const timesheetData =
+      await this.timesheetsService.getMonthlyIdleTimesheetData(month);
+
+    if (!timesheetData.timesheet) {
+      return [];
+    }
+    if (timesheetData.timesheet.status !== TimesheetStatus.APPROVED) {
+      return [];
+    }
+
+    const payrolls: Payroll[] = [];
+
+    for (const employee of timesheetData.employees) {
+      const calculations = await this.calculateEmployeePayrollFromTimesheetData(
+        employee.employeeId,
+        employee.skillId,
+        employee.dailyHours,
+      );
+
+      const existingPayroll = await this.payrollRepository.findOne({
+        where: {
+          employeeId: employee.employeeId,
+          month,
+        },
+      });
+
+      if (existingPayroll) {
+        // Merge idle hours into existing payroll
+        const existingBreakdown = existingPayroll.hoursBreakdown || {
+          regular: [],
+          specialDays: [],
+          offDays: [],
+          idle: [],
+        };
+        const mergedIdle = [
+          ...(existingBreakdown.idle || []),
+          ...(calculations.hoursBreakdown.idle || []),
+        ];
+        const idleAmount = (calculations.hoursBreakdown.idle || []).reduce(
+          (sum: number, row: any) => sum + (row.amount || 0),
+          0,
+        );
+
+        existingPayroll.totalIdleDayHours =
+          Number(existingPayroll.totalIdleDayHours) +
+          Number(calculations.totalIdleDayHours);
+        existingPayroll.totalHours =
+          Number(existingPayroll.totalHours) +
+          Number(calculations.totalIdleDayHours);
+        existingPayroll.totalGrossSalary =
+          Number(existingPayroll.totalGrossSalary) + idleAmount;
+        existingPayroll.hoursBreakdown = {
+          ...existingBreakdown,
+          idle: mergedIdle,
+        };
+        existingPayroll.notes = [
+          existingPayroll.notes,
+          'Idle days from approved idle timesheet.',
+        ]
+          .filter(Boolean)
+          .join(' ');
+
+        const netSalary = await this.calculateNetSalary(existingPayroll as any);
+        existingPayroll.netSalary = netSalary;
+
+        const updated = await this.payrollRepository.save(existingPayroll);
+        payrolls.push(updated);
+      } else {
+        // No existing payroll: create one from idle only
+        const payrollData: CreatePayrollDto = {
+          employeeId: employee.employeeId,
+          month,
+          totalHours: calculations.totalIdleDayHours,
+          totalOtHours: 0,
+          totalOffdaysWorkedHours: 0,
+          totalIdleDayHours: calculations.totalIdleDayHours,
+          absentDaysDeductible: 0,
+          hoursBreakdown: calculations.hoursBreakdown,
+          baseHourlyRate: calculations.baseHourlyRate,
+          totalGrossSalary: calculations.totalGrossSalary,
+          notes: 'Calculated from approved idle timesheet.',
+        };
+
+        const payroll = await this.createOrUpdate(payrollData);
+        payrolls.push(payroll);
+      }
     }
 
     return payrolls;

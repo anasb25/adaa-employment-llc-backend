@@ -40,9 +40,16 @@ import {
   TradeUtilization,
 } from './dto/daily-utilization.dto';
 
+/** Virtual project for the "Idle Employees" accordion (no real project row) */
+export const IDLE_PROJECT_VIRTUAL = {
+  id: 0,
+  name: 'Idle Employees',
+  client: { id: 0, name: '' },
+} as const;
+
 export interface MonthlyProjectTimesheetData {
   timesheet: Timesheet | null;
-  project: Project;
+  project: Project | typeof IDLE_PROJECT_VIRTUAL;
   employees: Array<{
     srNo: number;
     employeeId: number;
@@ -144,6 +151,8 @@ export class TimesheetsService {
       employeeIds.length > 0
         ? await this.mobilizationRepository
             .createQueryBuilder('mob')
+            .leftJoinAndSelect('mob.mobilizedTrade', 'mobilizedTrade')
+            .leftJoinAndSelect('mob.project', 'project')
             .where('mob.employeeId IN (:...employeeIds)', { employeeIds })
             .andWhere('mob.actionDate <= :endDate', { endDate: endDateStr })
             .andWhere('mob.deletedAt IS NULL')
@@ -342,6 +351,24 @@ export class TimesheetsService {
           continue;
         }
 
+        // Flag discrepancy when saved entry differs from effective mobilization.
+        // Only count trade mismatch when both sides have a value (entry often has null trade when not sent from frontend).
+        const timesheetProjectId = project.id === IDLE_PROJECT_VIRTUAL.id ? null : project.id;
+        const projectMismatch = effectiveMob && (effectiveMob.projectId ?? null) !== timesheetProjectId;
+        const statusMismatch = effectiveMob && existingEntry && effectiveMob.jobStatus !== existingEntry.jobStatus;
+        const entryTrade = existingEntry?.tradeInSiteId ?? null;
+        const mobTrade = effectiveMob?.mobilizedTradeId ?? null;
+        const tradeMismatch = effectiveMob && existingEntry && entryTrade != null && mobTrade != null && entryTrade !== mobTrade;
+        const discrepancyWithMobilization = !!(existingEntry && effectiveMob && (projectMismatch || statusMismatch || tradeMismatch));
+        const effectiveMobilizationSnapshot = discrepancyWithMobilization && effectiveMob
+          ? {
+              projectId: effectiveMob.projectId ?? null,
+              projectName: (effectiveMob as any).project?.name ?? null,
+              jobStatus: effectiveMob.jobStatus,
+              tradeName: (effectiveMob as any).mobilizedTrade?.skill ?? null,
+            }
+          : undefined;
+
         dailyHours.push({
           date: dateStr,
           day,
@@ -350,6 +377,8 @@ export class TimesheetsService {
           isOffDay: isProjectOffDay,
           notes: existingEntry?.notes || null,
           entryId: existingEntry?.id || null,
+          discrepancyWithMobilization,
+          ...(effectiveMobilizationSnapshot && { effectiveMobilizationSnapshot }),
         });
       }
 
@@ -404,7 +433,150 @@ export class TimesheetsService {
     );
 
     // Filter out any null results from failed projects
-    return results.filter((r): r is MonthlyProjectTimesheetData => r !== null);
+    const projectResults = results.filter(
+      (r): r is MonthlyProjectTimesheetData => r !== null,
+    );
+
+    // Append "Idle Employees" timesheet at the end (one accordion for idle employee-days)
+    const idleData = await this.getMonthlyIdleTimesheetData(month);
+    return [...projectResults, idleData];
+  }
+
+  /**
+   * Get monthly timesheet for idle employees (not on any project; job status idle).
+   * One timesheet per month with projectId = null; employees are those with at least one idle day.
+   */
+  async getMonthlyIdleTimesheetData(
+    month: string,
+  ): Promise<MonthlyProjectTimesheetData> {
+    const [year, monthNum] = month.split('-').map(Number);
+    const endDate = new Date(year, monthNum, 0);
+    const daysInMonth = endDate.getDate();
+    const endDateStr = formatDateOnly(endDate);
+
+    const timesheet = await this.timesheetRepository.findOne({
+      where: { projectId: null as any, month },
+      relations: ['entries', 'entries.employee'],
+    });
+
+    const dayInfo: Array<{ dateStr: string; dayOfWeekName: string; day: number }> = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      const currentDate = parseDateOnly(dateStr);
+      const dayOfWeekName = currentDate.toLocaleDateString('en-US', {
+        weekday: 'long',
+      });
+      dayInfo.push({ dateStr, dayOfWeekName, day });
+    }
+
+    const allMobilizations = await this.mobilizationRepository
+      .createQueryBuilder('mob')
+      .where('mob.actionDate <= :endDate', { endDate: endDateStr })
+      .andWhere('mob.deletedAt IS NULL')
+      .leftJoinAndSelect('mob.employee', 'employee')
+      .leftJoinAndSelect('mob.mobilizedTrade', 'mobilizedTrade')
+      .leftJoinAndSelect('mob.project', 'project')
+      .orderBy('mob.employeeId')
+      .addOrderBy('mob.actionDate', 'DESC')
+      .addOrderBy('mob.createdAt', 'DESC')
+      .getMany();
+
+    const mobilizationsByEmployee = new Map<number, Mobilization[]>();
+    for (const mob of allMobilizations) {
+      if (!mob.employee) continue;
+      let list = mobilizationsByEmployee.get(mob.employeeId);
+      if (!list) {
+        list = [];
+        mobilizationsByEmployee.set(mob.employeeId, list);
+      }
+      list.push(mob);
+    }
+
+    const employees: any[] = [];
+    let srNo = 1;
+
+    for (const [employeeId, employeeMobilizations] of mobilizationsByEmployee) {
+      const dailyHours: any[] = [];
+      const latestMob = employeeMobilizations[0];
+      const employee = latestMob.employee;
+      const trade = latestMob.mobilizedTrade?.skill || '';
+      const skillId = latestMob.mobilizedTradeId;
+
+      for (const { dateStr, day } of dayInfo) {
+        const effectiveMob = this.getEffectiveMobilizationForDate(
+          employeeMobilizations,
+          dateStr,
+        );
+
+        const isIdleDay =
+          effectiveMob &&
+          effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
+          effectiveMob.jobStatus === JobStatus.IDLE;
+
+        if (!isIdleDay) continue;
+
+        const existingEntry = timesheet?.entries?.find(
+          (e) =>
+            e.employeeId === employeeId && formatDateOnly(e.date) === dateStr,
+        );
+
+        const hours = existingEntry
+          ? Number(existingEntry.hoursWorked)
+          : this.getDefaultHoursForStatus(JobStatus.IDLE);
+        const jobStatus = existingEntry?.jobStatus ?? JobStatus.IDLE;
+
+        const timesheetProjectId = null; // Idle timesheet
+        const projectMismatch = effectiveMob && (effectiveMob.projectId ?? null) !== timesheetProjectId;
+        const statusMismatch = effectiveMob && existingEntry && effectiveMob.jobStatus !== existingEntry.jobStatus;
+        const entryTradeIdle = existingEntry?.tradeInSiteId ?? null;
+        const mobTradeIdle = effectiveMob?.mobilizedTradeId ?? null;
+        const tradeMismatch = effectiveMob && existingEntry && entryTradeIdle != null && mobTradeIdle != null && entryTradeIdle !== mobTradeIdle;
+        const discrepancyWithMobilization = !!(existingEntry && effectiveMob && (projectMismatch || statusMismatch || tradeMismatch));
+        const effectiveMobilizationSnapshot = discrepancyWithMobilization && effectiveMob
+          ? {
+              projectId: effectiveMob.projectId ?? null,
+              projectName: (effectiveMob as any).project?.name ?? null,
+              jobStatus: effectiveMob.jobStatus,
+              tradeName: (effectiveMob as any).mobilizedTrade?.skill ?? null,
+            }
+          : undefined;
+
+        dailyHours.push({
+          date: dateStr,
+          day,
+          hoursWorked: hours,
+          jobStatus,
+          isOffDay: false,
+          notes: existingEntry?.notes || null,
+          entryId: existingEntry?.id || null,
+          discrepancyWithMobilization,
+          ...(effectiveMobilizationSnapshot && { effectiveMobilizationSnapshot }),
+        });
+      }
+
+      if (dailyHours.length > 0) {
+        employees.push({
+          srNo: srNo++,
+          employeeId: employee.id,
+          idNo: employee.adaa_emp_code,
+          name: employee.name,
+          trade,
+          skillId,
+          dailyHours,
+        });
+      }
+    }
+
+    employees.sort((a, b) => a.name.localeCompare(b.name));
+    employees.forEach((emp, idx) => {
+      emp.srNo = idx + 1;
+    });
+
+    return {
+      timesheet: timesheet || null,
+      project: IDLE_PROJECT_VIRTUAL,
+      employees,
+    };
   }
 
   /**
@@ -499,27 +671,31 @@ export class TimesheetsService {
   }
 
   /**
-   * Create or get a timesheet
+   * Create or get a timesheet. When projectId is null/undefined, returns the "idle employees" timesheet for the month.
    */
   async createOrGetTimesheet(
     createTimesheetDto: CreateTimesheetDto,
     createdBy: number,
   ): Promise<Timesheet> {
-    // Check if timesheet already exists
+    const projectId =
+      createTimesheetDto.projectId !== undefined &&
+      createTimesheetDto.projectId !== null
+        ? createTimesheetDto.projectId
+        : null;
+
     let timesheet = await this.timesheetRepository.findOne({
-      where: {
-        projectId: createTimesheetDto.projectId,
-        month: createTimesheetDto.month,
-      },
+      where:
+        projectId === null
+          ? { projectId: null as any, month: createTimesheetDto.month }
+          : { projectId, month: createTimesheetDto.month },
     });
 
     if (timesheet) {
       return timesheet;
     }
 
-    // Create new timesheet
     timesheet = this.timesheetRepository.create({
-      projectId: createTimesheetDto.projectId,
+      projectId,
       month: createTimesheetDto.month,
       notes: createTimesheetDto.notes,
       createdBy,
@@ -580,9 +756,6 @@ export class TimesheetsService {
         },
       });
 
-      const wasNew = !existingEntry;
-      const previousJobStatus = existingEntry?.jobStatus;
-
       let entry: TimesheetEntry;
       if (existingEntry) {
         // Update existing entry
@@ -609,23 +782,71 @@ export class TimesheetsService {
       const savedEntry = await this.entryRepository.save(entry);
       savedEntries.push(savedEntry);
 
-      // Sync mobilization only for this date when the user explicitly changed this cell.
-      // Only sync when updating an existing entry and jobStatus changed — never sync for
-      // new entries, since those are often the whole month (carry-forward). That would
-      // wrongly create mobilizations for every day; we only want one mobilization record
-      // for the date the user actually edited, and rely on carry-forward for the rest.
-      const jobStatusChanged = previousJobStatus !== savedEntry.jobStatus;
-      const explicitEditOnly = !wasNew && jobStatusChanged;
-      if (explicitEditOnly) {
-        await this.syncMobilizationFromTimesheetEntry(
-          savedEntry,
-          timesheet.projectId,
-          updatedBy,
-        );
-      }
+      // Keep timesheet and mobilizations in sync: create or update a mobilization for this
+      // date when the saved entry's status differs from the current effective mobilization.
+      // (Sync runs for both new and updated entries; inside sync we only create/update when
+      // status actually differs, so bulk save without changes does not create duplicate mobilizations.)
+      await this.syncMobilizationFromTimesheetEntry(
+        savedEntry,
+        timesheet.projectId ?? null,
+        updatedBy,
+      );
     }
 
     return savedEntries;
+  }
+
+  /**
+   * Sync mobilization to match this timesheet entry (use timesheet as source of truth).
+   * Call this when user chooses "Sync mobilization with timesheet".
+   */
+  async syncMobilizationFromEntry(
+    entryId: number,
+    updatedBy: number,
+  ): Promise<{ message: string }> {
+    const entry = await this.entryRepository.findOne({
+      where: { id: entryId },
+      relations: ['timesheet'],
+    });
+    if (!entry) {
+      throw new NotFoundException('Timesheet entry not found');
+    }
+    const timesheet = entry.timesheet;
+    if (!timesheet) {
+      throw new NotFoundException('Timesheet not found');
+    }
+    if (timesheet.status === TimesheetStatus.SUBMITTED) {
+      throw new BadRequestException(
+        'Cannot sync while timesheet is pending approval',
+      );
+    }
+    await this.syncMobilizationFromTimesheetEntry(
+      entry,
+      timesheet.projectId ?? null,
+      updatedBy,
+    );
+    return { message: 'Mobilization updated to match timesheet' };
+  }
+
+  /**
+   * Remove the timesheet entry so the cell will show mobilization data (use mobilization as source of truth).
+   * Call this when user chooses "Sync timesheet with mobilization".
+   */
+  async removeEntryUseMobilization(entryId: number): Promise<{ message: string }> {
+    const entry = await this.entryRepository.findOne({
+      where: { id: entryId },
+      relations: ['timesheet'],
+    });
+    if (!entry) {
+      throw new NotFoundException('Timesheet entry not found');
+    }
+    if (entry.timesheet?.status === TimesheetStatus.SUBMITTED) {
+      throw new BadRequestException(
+        'Cannot remove entry while timesheet is pending approval',
+      );
+    }
+    await this.entryRepository.remove(entry);
+    return { message: 'Entry removed; data will show from mobilization' };
   }
 
   /**
@@ -635,7 +856,7 @@ export class TimesheetsService {
    */
   private async syncMobilizationFromTimesheetEntry(
     entry: TimesheetEntry,
-    projectId: number,
+    projectId: number | null,
     createdBy: number,
   ): Promise<void> {
     try {
@@ -689,17 +910,17 @@ export class TimesheetsService {
         const statusChanged = exactDateMob.jobStatus !== entry.jobStatus;
         const mobStatusChanged =
           shouldDemobilize && exactDateMob.mobStatus !== MobStatus.DEMOBILIZED;
-        const projectMismatch = exactDateMob.projectId !== projectId;
+        const projectMismatch =
+          (exactDateMob.projectId ?? null) !== (projectId ?? null);
 
         if (statusChanged || mobStatusChanged || projectMismatch) {
           exactDateMob.jobStatus = entry.jobStatus as JobStatus;
 
           // Auto-demobilize if status requires it
-          if (shouldDemobilize) {
+          if (shouldDemobilize || projectId === null) {
             exactDateMob.mobStatus = MobStatus.DEMOBILIZED;
-            exactDateMob.projectId = null; // Remove project assignment when demobilized
+            exactDateMob.projectId = null;
           } else {
-            // Ensure projectId is set when editing from timesheet (e.g. sick leave, absent)
             exactDateMob.mobStatus = MobStatus.MOBILIZED;
             exactDateMob.projectId = projectId;
           }
@@ -724,10 +945,11 @@ export class TimesheetsService {
           const newMob = this.mobilizationRepository.create({
             employeeId: entry.employeeId,
             mobilizedTradeId: currentMob.mobilizedTradeId,
-            projectId: shouldDemobilize ? null : projectId, // Remove project if demobilizing
-            mobStatus: shouldDemobilize
-              ? MobStatus.DEMOBILIZED
-              : MobStatus.MOBILIZED,
+            projectId: shouldDemobilize || projectId === null ? null : projectId,
+            mobStatus:
+              shouldDemobilize || projectId === null
+                ? MobStatus.DEMOBILIZED
+                : MobStatus.MOBILIZED,
             jobStatus: entry.jobStatus as JobStatus,
             actionDate: dateStr as any, // TypeORM will handle the transformer
             notes:

@@ -132,6 +132,32 @@ export class TimesheetsController {
   }
 
   /**
+   * Sync mobilization to match this timesheet entry (use timesheet as source of truth).
+   * POST /timesheets/entries/:entryId/sync-to-mobilization
+   */
+  @Post('entries/:entryId/sync-to-mobilization')
+  async syncMobilizationFromEntry(
+    @Param('entryId', ParseIntPipe) entryId: number,
+    @Request() req,
+  ) {
+    return await this.timesheetsService.syncMobilizationFromEntry(
+      entryId,
+      req.user.userId,
+    );
+  }
+
+  /**
+   * Remove timesheet entry so cell shows mobilization data (use mobilization as source of truth).
+   * POST /timesheets/entries/:entryId/sync-from-mobilization
+   */
+  @Post('entries/:entryId/sync-from-mobilization')
+  async removeEntryUseMobilization(
+    @Param('entryId', ParseIntPipe) entryId: number,
+  ) {
+    return await this.timesheetsService.removeEntryUseMobilization(entryId);
+  }
+
+  /**
    * Get all timesheets with filters
    * GET /timesheets
    */

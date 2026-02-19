@@ -18,10 +18,9 @@ export enum TimesheetStatus {
 }
 
 @Entity('timesheets')
-@Index(['projectId', 'month'], { unique: true })
 export class Timesheet extends BaseEntity {
-  @Column({ type: 'integer' })
-  projectId: number;
+  @Column({ type: 'integer', nullable: true })
+  projectId: number | null; // null = "Idle Employees" timesheet for the month
 
   @Column({ length: 7 }) // Format: YYYY-MM
   month: string;
@@ -48,10 +47,10 @@ export class Timesheet extends BaseEntity {
   @Column({ type: 'text', nullable: true })
   notes: string | null;
 
-  // Relations
-  @ManyToOne(() => Project, { onDelete: 'CASCADE' })
+  // Relations (project is null for idle-employees timesheet)
+  @ManyToOne(() => Project, { onDelete: 'CASCADE', nullable: true })
   @JoinColumn({ name: 'projectId' })
-  project: Project;
+  project: Project | null;
 
   @OneToMany(() => TimesheetEntry, (entry) => entry.timesheet)
   entries: TimesheetEntry[];

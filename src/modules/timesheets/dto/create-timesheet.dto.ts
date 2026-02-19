@@ -1,4 +1,10 @@
-import { IsNumber, IsString, IsOptional, IsArray, ValidateNested } from 'class-validator';
+import {
+  IsNumber,
+  IsString,
+  IsOptional,
+  IsArray,
+  ValidateNested,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 
 export class TimesheetEntryDto {
@@ -24,8 +30,9 @@ export class TimesheetEntryDto {
 }
 
 export class CreateTimesheetDto {
+  @IsOptional()
   @IsNumber()
-  projectId: number;
+  projectId?: number | null; // null = idle employees timesheet
 
   @IsString()
   month: string; // Format: YYYY-MM
