@@ -235,6 +235,9 @@ export class ProjectsService {
   }
 
   async remove(id: number): Promise<void> {
-    await this.projectRepository.softDelete(id);
+    // Hard delete so DB CASCADE runs: mobilizations, timesheets (+ entries),
+    // project_skills, project_special_day_rates, project_rate_variant_rates, invoices.
+    // Employees and client are not affected.
+    await this.projectRepository.delete(id);
   }
 }

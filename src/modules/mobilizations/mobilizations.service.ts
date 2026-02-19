@@ -725,30 +725,23 @@ export class MobilizationsService {
           validationErrors.push('DATE is required');
         }
 
-        // Validate MOB-DEM field
-        if (!mappedData._validation.mobStatusValid) {
-          validationErrors.push(
-            `Invalid MOB-DEM value: "${mappedData._validation.originalMobDem}". Valid values are: "Mobilized" or "Demobilized"`,
-          );
-        }
-
-        // Validate STATUS field
+        // Validate STATUS field (mobStatus is derived from STATUS, no MOB-DEM column needed)
         if (!mappedData._validation.jobStatusValid) {
           validationErrors.push(
-            `Invalid STATUS value: "${mappedData._validation.originalStatus}". Valid values are: Active, Annual Leave, Urgent Leave, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle`,
+            `Invalid STATUS value: "${mappedData._validation.originalStatus}". Valid values are: Active, Annual Leave, Urgent Leave, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle, Off`,
           );
         }
 
-        // Validate CLIENT and SITE when MOB-DEM is "Mobilized"
+        // Validate CLIENT and SITE when status implies Mobilized
         if (mappedData.mobStatus === 'mobilized') {
           if (!mappedData.clientName) {
             validationErrors.push(
-              'CLIENT is required when MOB-DEM is "Mobilized"',
+              'CLIENT is required when STATUS implies Mobilized',
             );
           }
           if (!mappedData.siteName) {
             validationErrors.push(
-              'SITE is required when MOB-DEM is "Mobilized"',
+              'SITE is required when STATUS implies Mobilized',
             );
           }
         }

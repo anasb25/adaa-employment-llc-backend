@@ -10,7 +10,29 @@ export interface ExcelValidationResult {
   data?: any[];
 }
 
-export const REQUIRED_HEADERS = ['ID NO', 'STATUS', 'MOB-DEM', 'DATE'];
+/** Mobilization status is derived from STATUS (job status). Not required as a column. */
+export const REQUIRED_HEADERS = ['ID NO', 'STATUS', 'DATE'];
+
+/** Job status -> mob status: M = mobilized, D = demobilized (same as frontend mapping) */
+const JOB_STATUS_TO_MOB: Record<string, string> = {
+  active: 'mobilized',
+  cancelled: 'demobilized',
+  absconded: 'demobilized',
+  annual_leave: 'demobilized',
+  absent: 'mobilized',
+  sick_leave: 'mobilized',
+  casual_leave: 'mobilized',
+  urgent_leave: 'demobilized',
+  notice_period: 'mobilized',
+  resigned: 'demobilized',
+  idle: 'demobilized',
+  off: 'mobilized',
+};
+
+function getMobStatusFromJobStatus(jobStatus: string | null): string | null {
+  if (!jobStatus) return null;
+  return JOB_STATUS_TO_MOB[jobStatus] ?? null;
+}
 
 export const CONDITIONALLY_REQUIRED_HEADERS = ['CLIENT', 'SITE'];
 
@@ -85,13 +107,10 @@ export class MobilizationExcelUtil {
       }
 
       // Validate conditionally required headers (CLIENT and SITE) for mobilized records
-      // Only check if headers exist, not values (row-level validation happens during import)
-      // Check if there are any mobilized records in the file
+      // Mobilization status is derived from STATUS (job status), so check derived value per row
       const hasMobilizedRecords = data.some((row: any) => {
-        const mobDemValue =
-          row['MOB-DEM']?.toString().trim().toLowerCase() || '';
-        // Use exact match to avoid "demobilized" matching "mobilized"
-        return mobDemValue === 'mobilized';
+        const mapped = MobilizationExcelUtil.mapRowToMobilization(row);
+        return mapped.mobStatus === 'mobilized';
       });
 
       // If there are mobilized records, CLIENT and SITE headers must exist
@@ -136,21 +155,6 @@ export class MobilizationExcelUtil {
    */
   static mapRowToMobilization(row: any): any {
     const originalStatusValue = row['STATUS']?.toString().trim() || '';
-    const originalMobDemValue = row['MOB-DEM']?.toString().trim() || '';
-
-    // Map MOB-DEM to mobStatus
-    const mobDemValue = originalMobDemValue.toLowerCase();
-    let mobStatus: string | null = null;
-    let mobStatusValid = false;
-
-    // Use exact match to avoid "demobilized" matching "mobilized"
-    if (mobDemValue === 'mobilized') {
-      mobStatus = 'mobilized';
-      mobStatusValid = true;
-    } else if (mobDemValue === 'demobilized') {
-      mobStatus = 'demobilized';
-      mobStatusValid = true;
-    }
 
     // Map STATUS to jobStatus with strict validation
     const statusValue = originalStatusValue.toLowerCase();
@@ -200,6 +204,9 @@ export class MobilizationExcelUtil {
       jobStatusValid = true;
     }
 
+    // Derive mobStatus from jobStatus (no MOB-DEM column needed)
+    const mobStatus = jobStatus ? getMobStatusFromJobStatus(jobStatus) : null;
+
     // Get mobilized trade
     const mobilizedTradeValue = row['MOBILIZED TRADE']?.toString().trim() || '';
 
@@ -220,9 +227,7 @@ export class MobilizationExcelUtil {
       // Validation info
       _validation: {
         originalStatus: originalStatusValue,
-        originalMobDem: originalMobDemValue,
         jobStatusValid,
-        mobStatusValid,
       },
     };
   }
@@ -239,7 +244,6 @@ export class MobilizationExcelUtil {
         CLIENT: 'ABC Company',
         SITE: 'Dubai Marina Project',
         STATUS: 'Active',
-        'MOB-DEM': 'Mobilized',
         DATE: '2024-01-15',
       },
       {
@@ -248,12 +252,11 @@ export class MobilizationExcelUtil {
         CLIENT: '',
         SITE: '',
         STATUS: 'Idle',
-        'MOB-DEM': 'Demobilized',
         DATE: '2024-01-20',
       },
     ];
 
-    // Create instructions sheet with valid values
+    // Create instructions sheet with valid values (Mobilization status is derived from STATUS)
     const instructionsData = [
       {
         Field: 'ID NO',
@@ -267,24 +270,19 @@ export class MobilizationExcelUtil {
       },
       {
         Field: 'CLIENT',
-        Description: 'Client name (Required when MOB-DEM is Mobilized)',
+        Description: 'Client name (Required when STATUS implies Mobilized)',
         'Valid Values': 'Any client name',
       },
       {
         Field: 'SITE',
-        Description: 'Site/Project name (Required when MOB-DEM is Mobilized)',
+        Description: 'Site/Project name (Required when STATUS implies Mobilized)',
         'Valid Values': 'Any site name',
       },
       {
         Field: 'STATUS',
-        Description: 'Job Status (Required)',
+        Description: 'Job Status (Required). Mobilization status is set automatically from this.',
         'Valid Values':
-          'Active, Annual Leave, Urgent Leave, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle',
-      },
-      {
-        Field: 'MOB-DEM',
-        Description: 'Mobilization Status (Required)',
-        'Valid Values': 'Mobilized, Demobilized',
+          'Active, Annual Leave, Urgent Leave, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle, Off',
       },
       {
         Field: 'DATE',
