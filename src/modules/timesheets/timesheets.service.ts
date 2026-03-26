@@ -1159,10 +1159,7 @@ export class TimesheetsService {
   async getDailyUtilizationReport(
     date: string, // YYYY-MM-DD format
   ): Promise<DailyUtilizationReport> {
-    const targetDate = parseDateOnly(date);
-
-    // Get all mobilizations that are effective on the target date
-    // We need the most recent mobilization for each employee up to and including the target date
+    // Get all mobilizations up to and including the target date
     const mobilizations = await this.mobilizationRepository
       .createQueryBuilder('m')
       .leftJoinAndSelect('m.employee', 'employee')
@@ -1170,25 +1167,41 @@ export class TimesheetsService {
       .leftJoinAndSelect('project.client', 'client')
       .leftJoinAndSelect('m.mobilizedTrade', 'trade')
       .where('m.actionDate <= :targetDate', { targetDate: date })
+      .andWhere('m.deletedAt IS NULL')
       .orderBy('m.employeeId', 'ASC')
       .addOrderBy('m.actionDate', 'DESC')
+      .addOrderBy('m.createdAt', 'DESC')
       .getMany();
 
-    // Get the latest mobilization for each employee
-    const employeeLatestMob = new Map<number, any>();
+    // Group mobilizations by employee (list is already sorted DESC per employee)
+    const mobilizationsByEmployee = new Map<number, Mobilization[]>();
     for (const mob of mobilizations) {
-      if (!employeeLatestMob.has(mob.employeeId)) {
-        employeeLatestMob.set(mob.employeeId, mob);
+      let list = mobilizationsByEmployee.get(mob.employeeId);
+      if (!list) {
+        list = [];
+        mobilizationsByEmployee.set(mob.employeeId, list);
       }
+      list.push(mob);
     }
 
-    // Filter to only include mobilized employees with active status on active projects
-    const activeMobilizations = Array.from(employeeLatestMob.values()).filter(
-      (mob) =>
-        mob.mobStatus === MobStatus.MOBILIZED &&
-        mob.jobStatus === JobStatus.ACTIVE &&
-        mob.project !== null,
-    );
+    // For each employee apply carry-forward logic so that temporary one-day statuses
+    // (absent, sick_leave, casual_leave, urgent_leave) do not incorrectly exclude them.
+    // Count as mobilized if the effective status is MOBILIZED and the employee is on a project —
+    // matching the same logic used by the Daily Mobilization Management page.
+    const activeMobilizations: Mobilization[] = [];
+    for (const [, employeeMobilizations] of mobilizationsByEmployee) {
+      const effectiveMob = this.getEffectiveMobilizationForDate(
+        employeeMobilizations,
+        date,
+      );
+      if (
+        effectiveMob &&
+        effectiveMob.mobStatus === MobStatus.MOBILIZED &&
+        effectiveMob.project !== null
+      ) {
+        activeMobilizations.push(effectiveMob);
+      }
+    }
 
     // Group by client -> project -> trade
     const clientMap = new Map<
@@ -1210,6 +1223,7 @@ export class TimesheetsService {
     >();
 
     for (const mob of activeMobilizations) {
+      if (!mob.project) continue;
       const clientId = mob.project.clientId;
       const clientName = mob.project.client?.name || 'Unknown Client';
       const projectId = mob.project.id;
