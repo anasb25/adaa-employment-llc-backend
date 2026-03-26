@@ -51,10 +51,10 @@ export class InvoicePdfService {
     // Read header image and convert to base64
     // Try multiple paths to support both dev and production
     const possiblePaths = [
-      path.join(__dirname, '../../../assets/invoice-header.png'), // compiled (dist)
-      path.join(__dirname, '../../../../src/assets/invoice-header.png'), // compiled -> src
-      path.join(process.cwd(), 'src/assets/invoice-header.png'), // from project root
-      path.join(process.cwd(), 'dist/assets/invoice-header.png'), // from project root (dist)
+      path.join(__dirname, '../../../assets/logo-icon.png'), // compiled (dist)
+      path.join(__dirname, '../../../../src/assets/logo-icon.png'), // compiled -> src
+      path.join(process.cwd(), 'src/assets/logo-icon.png'), // from project root
+      path.join(process.cwd(), 'dist/assets/logo-icon.png'), // from project root (dist)
     ];
 
     let headerImageBase64 = '';
@@ -113,12 +113,12 @@ export class InvoicePdfService {
     }
     
     .header-left {
-      width: 120px;
+      width: 36px;
     }
     
     .header-image {
-      width: 100%;
-      height: auto;
+      width: 36px;
+      height: 36px;
     }
     
     .header-right {
