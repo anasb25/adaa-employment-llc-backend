@@ -28,7 +28,6 @@ import { Project } from '../projects/entities/project.entity';
 import { RateVariant } from '../rate-variants/entities/rate-variant.entity';
 import { SpecialDay } from '../special-days/entities/special-day.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
-import { Skill } from '../skills/entities/skill.entity';
 import { AllowanceDeductionExcelValidator } from './utils/allowance-deduction-excel-validator.util';
 
 export interface ImportResult {
@@ -54,8 +53,6 @@ export class PayrollService {
     private readonly specialDayRepository: Repository<SpecialDay>,
     @InjectRepository(EmployeeSkill)
     private readonly employeeSkillRepository: Repository<EmployeeSkill>,
-    @InjectRepository(Skill)
-    private readonly skillRepository: Repository<Skill>,
     private readonly timesheetsService: TimesheetsService,
   ) {}
 
@@ -144,7 +141,7 @@ export class PayrollService {
     }
 
     // Calculate net salary before creating
-    const netSalary = await this.calculateNetSalary(createPayrollDto);
+    const netSalary = this.calculateNetSalary(createPayrollDto);
     const payrollWithNetSalary = { ...createPayrollDto, netSalary };
 
     const payroll = this.payrollRepository.create(payrollWithNetSalary);
@@ -170,7 +167,7 @@ export class PayrollService {
     });
 
     // Recalculate net salary with updated values
-    const netSalary = await this.calculateNetSalary(payroll as any);
+    const netSalary = this.calculateNetSalary(payroll as any);
     payroll.netSalary = netSalary;
 
     return await this.payrollRepository.save(payroll);
@@ -280,78 +277,82 @@ export class PayrollService {
     const payrolls: Payroll[] = [];
 
     for (const employee of timesheetData.employees) {
-      const calculations = await this.calculateEmployeePayrollFromTimesheetData(
-        employee.employeeId,
-        employee.skillId,
-        employee.dailyHours,
-      );
-
-      const existingPayroll = await this.payrollRepository.findOne({
-        where: {
-          employeeId: employee.employeeId,
-          month,
-        },
-      });
-
-      if (existingPayroll) {
-        // Merge idle hours into existing payroll
-        const existingBreakdown = existingPayroll.hoursBreakdown || {
-          regular: [],
-          specialDays: [],
-          offDays: [],
-          idle: [],
-        };
-        const mergedIdle = [
-          ...(existingBreakdown.idle || []),
-          ...(calculations.hoursBreakdown.idle || []),
-        ];
-        const idleAmount = (calculations.hoursBreakdown.idle || []).reduce(
-          (sum: number, row: any) => sum + (row.amount || 0),
-          0,
+      try {
+        const calculations = await this.calculateEmployeePayrollFromTimesheetData(
+          employee.employeeId,
+          employee.skillId,
+          employee.dailyHours,
         );
 
-        existingPayroll.totalIdleDayHours =
-          Number(existingPayroll.totalIdleDayHours) +
-          Number(calculations.totalIdleDayHours);
-        existingPayroll.totalHours =
-          Number(existingPayroll.totalHours) +
-          Number(calculations.totalIdleDayHours);
-        existingPayroll.totalGrossSalary =
-          Number(existingPayroll.totalGrossSalary) + idleAmount;
-        existingPayroll.hoursBreakdown = {
-          ...existingBreakdown,
-          idle: mergedIdle,
-        };
-        existingPayroll.notes = [
-          existingPayroll.notes,
-          'Idle days from approved idle timesheet.',
-        ]
-          .filter(Boolean)
-          .join(' ');
+        const existingPayroll = await this.payrollRepository.findOne({
+          where: {
+            employeeId: employee.employeeId,
+            month,
+          },
+        });
 
-        const netSalary = await this.calculateNetSalary(existingPayroll as any);
-        existingPayroll.netSalary = netSalary;
+        if (existingPayroll) {
+          // Merge idle hours into existing payroll
+          const existingBreakdown = existingPayroll.hoursBreakdown || {
+            regular: [],
+            specialDays: [],
+            offDays: [],
+            idle: [],
+          };
+          const mergedIdle = [
+            ...(existingBreakdown.idle || []),
+            ...(calculations.hoursBreakdown.idle || []),
+          ];
+          const idleAmount = (calculations.hoursBreakdown.idle || []).reduce(
+            (sum: number, row: any) => sum + (row.amount || 0),
+            0,
+          );
 
-        const updated = await this.payrollRepository.save(existingPayroll);
-        payrolls.push(updated);
-      } else {
-        // No existing payroll: create one from idle only
-        const payrollData: CreatePayrollDto = {
-          employeeId: employee.employeeId,
-          month,
-          totalHours: calculations.totalIdleDayHours,
-          totalOtHours: 0,
-          totalOffdaysWorkedHours: 0,
-          totalIdleDayHours: calculations.totalIdleDayHours,
-          absentDaysDeductible: 0,
-          hoursBreakdown: calculations.hoursBreakdown,
-          baseHourlyRate: calculations.baseHourlyRate,
-          totalGrossSalary: calculations.totalGrossSalary,
-          notes: 'Calculated from approved idle timesheet.',
-        };
+          existingPayroll.totalIdleDayHours =
+            Number(existingPayroll.totalIdleDayHours) +
+            Number(calculations.totalIdleDayHours);
+          existingPayroll.totalHours =
+            Number(existingPayroll.totalHours) +
+            Number(calculations.totalIdleDayHours);
+          existingPayroll.totalGrossSalary =
+            Number(existingPayroll.totalGrossSalary) + idleAmount;
+          existingPayroll.hoursBreakdown = {
+            ...existingBreakdown,
+            idle: mergedIdle,
+          };
+          existingPayroll.notes = [
+            existingPayroll.notes,
+            'Idle days from approved idle timesheet.',
+          ]
+            .filter(Boolean)
+            .join(' ');
 
-        const payroll = await this.createOrUpdate(payrollData);
-        payrolls.push(payroll);
+          const netSalary = this.calculateNetSalary(existingPayroll as any);
+          existingPayroll.netSalary = netSalary;
+
+          const updated = await this.payrollRepository.save(existingPayroll);
+          payrolls.push(updated);
+        } else {
+          // No existing payroll: create one from idle only
+          const payrollData: CreatePayrollDto = {
+            employeeId: employee.employeeId,
+            month,
+            totalHours: calculations.totalIdleDayHours,
+            totalOtHours: 0,
+            totalOffdaysWorkedHours: 0,
+            totalIdleDayHours: calculations.totalIdleDayHours,
+            absentDaysDeductible: 0,
+            hoursBreakdown: calculations.hoursBreakdown,
+            baseHourlyRate: calculations.baseHourlyRate,
+            totalGrossSalary: calculations.totalGrossSalary,
+            notes: 'Calculated from approved idle timesheet.',
+          };
+
+          const payroll = await this.createOrUpdate(payrollData);
+          payrolls.push(payroll);
+        }
+      } catch (error: any) {
+        // Skip this employee but continue processing others
       }
     }
 
@@ -383,76 +384,78 @@ export class PayrollService {
     }
 
     const payrolls: Payroll[] = [];
+    const warnings: string[] = [];
 
     // Calculate payroll for each employee using the timesheet data
     for (const employee of timesheetData.employees) {
-      const calculations = await this.calculateEmployeePayrollFromTimesheetData(
-        employee.employeeId,
-        employee.skillId,
-        employee.dailyHours,
-      );
+      try {
+        const calculations = await this.calculateEmployeePayrollFromTimesheetData(
+          employee.employeeId,
+          employee.skillId,
+          employee.dailyHours,
+        );
 
-      // Check if payroll already exists to preserve allowances/deductions
-      const existingPayroll = await this.payrollRepository.findOne({
-        where: {
+        // Check if payroll already exists to preserve allowances/deductions
+        const existingPayroll = await this.payrollRepository.findOne({
+          where: {
+            employeeId: employee.employeeId,
+            month,
+          },
+        });
+
+        const missingRate = calculations.baseHourlyRate === 0;
+        const notePrefix = `Calculated from approved timesheet for project ${timesheetData.project.name}`;
+        const noteWarning = missingRate
+          ? ` [Warning: No cost_price found for skill ${employee.skillId}, using rate 0]`
+          : '';
+
+        const payrollData: CreatePayrollDto = {
           employeeId: employee.employeeId,
           month,
-        },
-      });
+          totalHours: calculations.totalHours,
+          totalOtHours: calculations.totalOtHours,
+          totalOffdaysWorkedHours: calculations.totalOffdaysWorkedHours,
+          totalIdleDayHours: calculations.totalIdleDayHours,
+          absentDaysDeductible: calculations.absentDays,
+          hoursBreakdown: calculations.hoursBreakdown,
+          baseHourlyRate: calculations.baseHourlyRate,
+          totalGrossSalary: calculations.totalGrossSalary,
+          // Preserve existing allowances and deductions if they exist
+          allowances: existingPayroll?.allowances || undefined,
+          otherDeductions: existingPayroll?.otherDeductions || undefined,
+          notes: notePrefix + noteWarning,
+        };
 
-      const payrollData: CreatePayrollDto = {
-        employeeId: employee.employeeId,
-        month,
-        totalHours: calculations.totalHours,
-        totalOtHours: calculations.totalOtHours,
-        totalOffdaysWorkedHours: calculations.totalOffdaysWorkedHours,
-        totalIdleDayHours: calculations.totalIdleDayHours,
-        absentDaysDeductible: calculations.absentDays,
-        hoursBreakdown: calculations.hoursBreakdown,
-        baseHourlyRate: calculations.baseHourlyRate,
-        totalGrossSalary: calculations.totalGrossSalary,
-        // Preserve existing allowances and deductions if they exist
-        allowances: existingPayroll?.allowances || undefined,
-        otherDeductions: existingPayroll?.otherDeductions || undefined,
-        notes: `Calculated from approved timesheet for project ${timesheetData.project.name}`,
-      };
-
-      const payroll = await this.createOrUpdate(payrollData);
-      payrolls.push(payroll);
+        const payroll = await this.createOrUpdate(payrollData);
+        payrolls.push(payroll);
+      } catch (error: any) {
+        warnings.push(
+          `Skipped employee ${employee.employeeId} (${employee.name}): ${error.message}`,
+        );
+      }
     }
 
     return payrolls;
   }
 
   /**
-   * Get the base hourly rate for an employee
-   * Priority: employee_skill.cost_price > skill.cost_price
+   * Get the base hourly rate for an employee from their first employee_skill record.
+   * Returns 0 if no skill is assigned or cost_price is not set.
    */
   private async getEmployeeBaseRate(
     employeeId: number,
-    skillId: number,
+    _skillId?: number | null,
   ): Promise<number> {
-    // First, try to get employee-specific rate
     const employeeSkill = await this.employeeSkillRepository.findOne({
-      where: { employeeId, skillId },
+      where: { employeeId },
+      order: { id: 'ASC' },
     });
 
     if (employeeSkill && employeeSkill.cost_price) {
       return Number(employeeSkill.cost_price);
     }
 
-    // Fallback to skill's base cost_price
-    const skill = await this.skillRepository.findOne({
-      where: { id: skillId },
-    });
-
-    if (skill && skill.cost_price) {
-      return Number(skill.cost_price);
-    }
-
-    throw new BadRequestException(
-      `No cost_price found for employee ${employeeId} and skill ${skillId}`,
-    );
+    return 0;
   }
 
   /**
@@ -625,7 +628,7 @@ export class PayrollService {
    */
   private async calculateEmployeePayrollFromTimesheetData(
     employeeId: number,
-    skillId: number,
+    skillId: number | null | undefined,
     dailyHours: Array<{
       date: string;
       day: number;
@@ -956,7 +959,7 @@ export class PayrollService {
         payroll.otherDeductions = deductionsObj;
 
         // Recalculate net salary with updated allowances and deductions
-        const netSalary = await this.calculateNetSalary(payroll);
+        const netSalary = this.calculateNetSalary(payroll);
         payroll.netSalary = netSalary;
 
         await this.payrollRepository.save(payroll);
@@ -988,30 +991,14 @@ export class PayrollService {
   }
 
   /**
-   * Calculate net salary from payroll data
-   * Net Salary = Total Gross Salary + Employee Salary Components + Allowances - Deductions - Absent Days Deductible
-   * Employee Salary Components = Basic Salary + HRA + Other Allowance
+   * Calculate net salary from payroll data (hours-based only).
+   * Fixed monthly salary (basic/HRA/other on employee) is not included — it is the 260h entitlement reference only.
+   * Net Salary = Total Gross Salary (from hours) + Allowances - Deductions - Absent Days Deductible
    */
-  private async calculateNetSalary(
+  private calculateNetSalary(
     payrollData: CreatePayrollDto | Payroll,
-  ): Promise<number> {
+  ): number {
     const grossSalary = Number(payrollData.totalGrossSalary || 0);
-
-    // Fetch employee data to get salary components
-    const employee = await this.payrollRepository.manager
-      .getRepository('employees')
-      .findOne({
-        where: { id: payrollData.employeeId },
-      });
-
-    // Calculate employee fixed salary components
-    let employeeSalaryComponents = 0;
-    if (employee) {
-      const basicSalary = Number(employee.basic_salary || 0);
-      const hra = Number(employee.hra || 0);
-      const otherAllowance = Number(employee.other_allowance || 0);
-      employeeSalaryComponents = basicSalary + hra + otherAllowance;
-    }
 
     // Calculate total allowances from payroll
     let totalAllowances = 0;
@@ -1034,13 +1021,8 @@ export class PayrollService {
     // Add absent days deductible to deductions
     const absentDaysDeductible = Number(payrollData.absentDaysDeductible || 0);
 
-    // Calculate net salary
     const netSalary =
-      grossSalary +
-      employeeSalaryComponents +
-      totalAllowances -
-      totalDeductions -
-      absentDaysDeductible;
+      grossSalary + totalAllowances - totalDeductions - absentDaysDeductible;
 
     return Math.round(netSalary * 100) / 100; // Round to 2 decimal places
   }

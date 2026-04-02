@@ -8,7 +8,6 @@ import { Payroll } from './entities/payroll.entity';
 import { RateVariant } from '../rate-variants/entities/rate-variant.entity';
 import { SpecialDay } from '../special-days/entities/special-day.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
-import { Skill } from '../skills/entities/skill.entity';
 import { TimesheetsModule } from '../timesheets/timesheets.module';
 
 @Module({
@@ -20,7 +19,6 @@ import { TimesheetsModule } from '../timesheets/timesheets.module';
       RateVariant,
       SpecialDay,
       EmployeeSkill,
-      Skill,
     ]),
     TimesheetsModule,
   ],
