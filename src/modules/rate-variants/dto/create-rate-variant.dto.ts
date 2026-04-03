@@ -23,8 +23,7 @@ export class CreateRateVariantDto {
 
   @IsOptional()
   @IsNumber()
-  @Min(0)
-  employeeRateMultiplier?: number;
+  employeeAdditionalAmount?: number;
 
   @IsOptional()
   @IsNumber()

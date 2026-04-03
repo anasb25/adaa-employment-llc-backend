@@ -47,9 +47,7 @@ export class CreateSpecialDayDto {
 
   @IsOptional()
   @IsNumber()
-  @Min(0)
-  @Max(10)
-  employeeRateMultiplier?: number; // Max 10x (1000% increase)
+  employeeAdditionalAmount?: number;
 
   @IsOptional()
   @IsNumber()

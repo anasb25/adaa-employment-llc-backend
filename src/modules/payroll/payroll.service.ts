@@ -299,7 +299,13 @@ export class PayrollService {
             offDays: [],
             idle: [],
           };
-          const mergedIdle = [
+          const mergedIdle: Array<{
+            date: string;
+            hours: number;
+            additionalAmount: number;
+            hourlyRate: number;
+            amount: number;
+          }> = [
             ...(existingBreakdown.idle || []),
             ...(calculations.hoursBreakdown.idle || []),
           ];
@@ -586,35 +592,11 @@ export class PayrollService {
   }
 
   /**
-   * Check if a date is a special day and return the employee rate multiplier
-   * Returns the multiplier (default 1.0 if not a special day)
-   */
-  private async getSpecialDayMultiplier(date: string): Promise<number> {
-    // Find all active special days
-    const specialDays = await this.specialDayRepository.find({
-      where: { isActive: true },
-    });
-
-    // Check if date falls within any special day
-    for (const specialDay of specialDays) {
-      const targetDate = new Date(date);
-      const start = new Date(specialDay.startDate);
-      const end = specialDay.endDate ? new Date(specialDay.endDate) : start;
-
-      if (targetDate >= start && targetDate <= end) {
-        return Number(specialDay.employeeRateMultiplier || 1.0);
-      }
-    }
-
-    return 1.0; // No special day, return base multiplier
-  }
-
-  /**
-   * Check if a date is a special day (with premium rates)
+   * Check if a date is a special day (with premium or modified rates)
    */
   private async isSpecialDay(date: string): Promise<boolean> {
-    const multiplier = await this.getSpecialDayMultiplier(date);
-    return multiplier !== 1.0;
+    const specialDay = await this.getSpecialDayForDate(date);
+    return specialDay !== null;
   }
 
   /**
@@ -622,9 +604,10 @@ export class PayrollService {
    * This uses the same data structure that's displayed in the UI
    *
    * Rate calculation logic:
-   * - Base rate: employee_skill.cost_price OR skill.cost_price
-   * - For special days: Apply special day employee multiplier ONLY (no rate variants)
-   * - For regular days: Apply rate variant employee multiplier based on hours worked
+   * - Base rate: employee_skill.cost_price (first assigned skill)
+   * - For special days: hourlyRate = baseRate + specialDay.employeeAdditionalAmount
+   * - For regular days: hourlyRate = baseRate + variant.employeeAdditionalAmount
+   * - Sale price still uses clientRateMultiplier (multiplier, not flat)
    */
   private async calculateEmployeePayrollFromTimesheetData(
     employeeId: number,
@@ -647,38 +630,37 @@ export class PayrollService {
     // Get base hourly rate for this employee
     const baseRate = await this.getEmployeeBaseRate(employeeId, skillId);
 
-    // Detailed breakdown tracking
+    // Detailed breakdown tracking (additionalAmount = flat AED/hr on top of baseRate)
     const regularHoursMap = new Map<
       string,
-      { hours: number; rateMultiplier: number }
+      { hours: number; additionalAmount: number }
     >();
     const specialDaysMap = new Map<
       string,
-      { hours: number; rateMultiplier: number }
+      { hours: number; additionalAmount: number }
     >();
     const offDaysBreakdown: Array<{
       date: string;
       hours: number;
-      rateMultiplier: number;
+      additionalAmount: number;
     }> = [];
     const idleDaysBreakdown: Array<{
       date: string;
       hours: number;
-      rateMultiplier: number;
+      additionalAmount: number;
     }> = [];
-    let idleMultiplier = 0.5; // Default to 50%
 
     // Get the "Project Off Day" variant
     const projectOffDayVariant = await this.getProjectOffDayVariant();
-    const offDayMultiplier = projectOffDayVariant
-      ? Number(projectOffDayVariant.employeeRateMultiplier)
-      : 1.0;
+    const offDayAdditional = projectOffDayVariant
+      ? Number(projectOffDayVariant.employeeAdditionalAmount)
+      : 0;
 
     // Get the "Idle" variant
     const idleVariant = await this.getIdleVariant();
-    idleMultiplier = idleVariant
-      ? Number(idleVariant.employeeRateMultiplier)
-      : 0.5;
+    const idleAdditional = idleVariant
+      ? Number(idleVariant.employeeAdditionalAmount)
+      : 0;
 
     for (const dayData of dailyHours) {
       const hours = Number(dayData.hoursWorked);
@@ -690,7 +672,7 @@ export class PayrollService {
         idleDaysBreakdown.push({
           date: dayData.date,
           hours,
-          rateMultiplier: idleMultiplier,
+          additionalAmount: idleAdditional,
         });
         continue;
       }
@@ -723,7 +705,7 @@ export class PayrollService {
 
       // If working on a special day
       if (specialDay && hours > 0) {
-        const specialDayMultiplier = Number(specialDay.employeeRateMultiplier);
+        const specialDayAdditional = Number(specialDay.employeeAdditionalAmount || 0);
 
         // Track by special day name (consolidate hours for the same special day)
         const existing = specialDaysMap.get(specialDay.name);
@@ -732,7 +714,7 @@ export class PayrollService {
         } else {
           specialDaysMap.set(specialDay.name, {
             hours,
-            rateMultiplier: specialDayMultiplier,
+            additionalAmount: specialDayAdditional,
           });
         }
 
@@ -745,7 +727,7 @@ export class PayrollService {
         offDaysBreakdown.push({
           date: dayData.date,
           hours,
-          rateMultiplier: offDayMultiplier,
+          additionalAmount: offDayAdditional,
         });
         totalOffdaysWorkedHours += hours;
         continue;
@@ -757,9 +739,9 @@ export class PayrollService {
         const hoursSplit = await this.splitHoursAcrossRateVariants(hours);
 
         for (const { variant, hours: hoursForVariant } of hoursSplit) {
-          const rateMultiplier = variant
-            ? Number(variant.employeeRateMultiplier)
-            : 1.0;
+          const additionalAmount = variant
+            ? Number(variant.employeeAdditionalAmount || 0)
+            : 0;
           const rateVariantName = variant ? variant.name : 'Regular';
 
           // Track by rate variant
@@ -769,7 +751,7 @@ export class PayrollService {
           } else {
             regularHoursMap.set(rateVariantName, {
               hours: hoursForVariant,
-              rateMultiplier,
+              additionalAmount,
             });
           }
 
@@ -785,37 +767,37 @@ export class PayrollService {
       }
     }
 
-    // Build detailed breakdown with amounts
+    // Build detailed breakdown with amounts (cost = (baseRate + additionalAmount) * hours)
     const hoursBreakdown = {
       regular: Array.from(regularHoursMap.entries()).map(([name, data]) => ({
         rateVariantName: name,
         hours: Math.round(data.hours * 100) / 100,
-        rateMultiplier: data.rateMultiplier,
-        hourlyRate: Math.round(baseRate * data.rateMultiplier * 100) / 100,
+        additionalAmount: data.additionalAmount,
+        hourlyRate: Math.round((baseRate + data.additionalAmount) * 100) / 100,
         amount:
-          Math.round(baseRate * data.rateMultiplier * data.hours * 100) / 100,
+          Math.round((baseRate + data.additionalAmount) * data.hours * 100) / 100,
       })),
       specialDays: Array.from(specialDaysMap.entries()).map(([name, data]) => ({
         specialDayName: name,
         hours: Math.round(data.hours * 100) / 100,
-        rateMultiplier: data.rateMultiplier,
-        hourlyRate: Math.round(baseRate * data.rateMultiplier * 100) / 100,
+        additionalAmount: data.additionalAmount,
+        hourlyRate: Math.round((baseRate + data.additionalAmount) * 100) / 100,
         amount:
-          Math.round(baseRate * data.rateMultiplier * data.hours * 100) / 100,
+          Math.round((baseRate + data.additionalAmount) * data.hours * 100) / 100,
       })),
       offDays: offDaysBreakdown.map((od) => ({
         date: od.date,
         hours: Math.round(od.hours * 100) / 100,
-        rateMultiplier: od.rateMultiplier,
-        hourlyRate: Math.round(baseRate * od.rateMultiplier * 100) / 100,
-        amount: Math.round(baseRate * od.rateMultiplier * od.hours * 100) / 100,
+        additionalAmount: od.additionalAmount,
+        hourlyRate: Math.round((baseRate + od.additionalAmount) * 100) / 100,
+        amount: Math.round((baseRate + od.additionalAmount) * od.hours * 100) / 100,
       })),
       idle: idleDaysBreakdown.map((id) => ({
         date: id.date,
         hours: Math.round(id.hours * 100) / 100,
-        rateMultiplier: id.rateMultiplier,
-        hourlyRate: Math.round(baseRate * id.rateMultiplier * 100) / 100,
-        amount: Math.round(baseRate * id.rateMultiplier * id.hours * 100) / 100,
+        additionalAmount: id.additionalAmount,
+        hourlyRate: Math.round((baseRate + id.additionalAmount) * 100) / 100,
+        amount: Math.round((baseRate + id.additionalAmount) * id.hours * 100) / 100,
       })),
     };
 

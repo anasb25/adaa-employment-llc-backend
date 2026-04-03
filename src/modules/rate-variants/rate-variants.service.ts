@@ -9,7 +9,7 @@ import { ProjectRateVariantRate } from '../projects/entities/project-rate-varian
 export interface RateVariantRates {
   rateVariant: RateVariant;
   clientRateMultiplier: number;
-  employeeRateMultiplier: number;
+  employeeAdditionalAmount: number;
 }
 
 @Injectable()
@@ -58,15 +58,13 @@ export class RateVariantsService {
   ): Promise<RateVariant> {
     const rateVariant = await this.findOne(id);
 
-    // For system variants, only allow updating employeeRateMultiplier and clientRateMultiplier
+    // For system variants, only allow updating rate fields
     if (rateVariant.isSystem) {
-      const allowedFields = ['employeeRateMultiplier', 'clientRateMultiplier'];
+      const allowedFields = ['employeeAdditionalAmount', 'clientRateMultiplier'];
       const disallowedChanges: string[] = [];
 
-      // Check which fields are actually being changed
       for (const [key, value] of Object.entries(updateDto)) {
         if (value !== undefined && !allowedFields.includes(key)) {
-          // Check if the value is actually different from the current value
           if (rateVariant[key] !== value) {
             disallowedChanges.push(key);
           }
@@ -75,13 +73,12 @@ export class RateVariantsService {
 
       if (disallowedChanges.length > 0) {
         throw new BadRequestException(
-          `System variants can only have their multipliers updated. Cannot modify: ${disallowedChanges.join(', ')}`,
+          `System variants can only have their rates updated. Cannot modify: ${disallowedChanges.join(', ')}`,
         );
       }
 
-      // Only update the allowed fields
-      if (updateDto.employeeRateMultiplier !== undefined) {
-        rateVariant.employeeRateMultiplier = updateDto.employeeRateMultiplier;
+      if (updateDto.employeeAdditionalAmount !== undefined) {
+        rateVariant.employeeAdditionalAmount = updateDto.employeeAdditionalAmount;
       }
       if (updateDto.clientRateMultiplier !== undefined) {
         rateVariant.clientRateMultiplier = updateDto.clientRateMultiplier;
@@ -138,13 +135,12 @@ export class RateVariantsService {
       }
     }
 
-    // Employee rate multiplier always comes from global rate variant
-    const employeeRateMultiplier = Number(rateVariant.employeeRateMultiplier);
+    const employeeAdditionalAmount = Number(rateVariant.employeeAdditionalAmount || 0);
 
     return {
       rateVariant,
       clientRateMultiplier,
-      employeeRateMultiplier,
+      employeeAdditionalAmount,
     };
   }
 }

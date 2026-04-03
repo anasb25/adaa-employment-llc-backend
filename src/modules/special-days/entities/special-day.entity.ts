@@ -44,8 +44,17 @@ export class SpecialDay extends BaseEntity {
   })
   dayType: SpecialDayType;
 
+  @Column({
+    type: 'decimal',
+    precision: 10,
+    scale: 2,
+    default: 0,
+    comment: 'Flat additional AED/hr added to employee base rate for this special day',
+  })
+  employeeAdditionalAmount: number;
+
   @Column({ type: 'decimal', precision: 5, scale: 2, default: 1.0 })
-  employeeRateMultiplier: number; // e.g., 1.05 = 105% (5% extra pay to employee)
+  employeeRateMultiplier: number; // Legacy — no longer used for cost calculations
 
   @Column({
     type: 'decimal',

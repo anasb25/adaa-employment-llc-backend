@@ -20,10 +20,19 @@ export class RateVariant extends BaseEntity {
 
   @Column({
     type: 'decimal',
+    precision: 10,
+    scale: 2,
+    default: 0,
+    comment: 'Flat additional AED/hr added to employee base rate for this variant (e.g., 2 = base + 2 AED/hr)',
+  })
+  employeeAdditionalAmount: number;
+
+  @Column({
+    type: 'decimal',
     precision: 5,
     scale: 2,
     default: 1.0,
-    comment: 'Employee rate multiplier for this rate variant (e.g., 1.05 = 105% = 5% extra pay to employee)',
+    comment: 'Legacy multiplier field — no longer used for cost calculations',
   })
   employeeRateMultiplier: number;
 

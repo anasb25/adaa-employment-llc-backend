@@ -305,7 +305,7 @@ export class TimesheetsService {
           isSpecialDay: false,
           specialDay: null,
           clientRateMultiplier: 1.0,
-          employeeRateMultiplier: 1.0,
+          employeeAdditionalAmount: 0,
           isDefaultOff: false,
           isMandatoryOff: false,
           dayType: null,

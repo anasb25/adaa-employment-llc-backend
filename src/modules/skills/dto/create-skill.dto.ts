@@ -17,9 +17,5 @@ export class CreateSkillDto {
 
   @IsOptional()
   @IsNumber()
-  cost_price?: number;
-
-  @IsOptional()
-  @IsNumber()
   sale_price?: number;
 }

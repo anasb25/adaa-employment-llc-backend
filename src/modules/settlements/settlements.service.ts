@@ -222,27 +222,19 @@ export class SettlementsService {
   }
 
   /**
-   * Get employee's hourly rate using the same logic as payroll
-   * Priority: employee_skill.cost_price > skill.cost_price
+   * Get employee's hourly rate from their first employee_skill record.
+   * Returns 0 if no skill is assigned or cost_price is not set.
    */
   private async getEmployeeHourlyRate(employeeId: number): Promise<number> {
-    // Get employee's primary skill (first one assigned)
     const employeeSkill = await this.employeeSkillRepository.findOne({
       where: { employeeId },
-      relations: ['skill'],
-      order: { id: 'ASC' }, // Get the first/primary skill
+      order: { id: 'ASC' },
     });
 
     if (employeeSkill && employeeSkill.cost_price) {
       return Number(employeeSkill.cost_price);
     }
 
-    // Fallback to skill's base cost_price
-    if (employeeSkill?.skill && employeeSkill.skill.cost_price) {
-      return Number(employeeSkill.skill.cost_price);
-    }
-
-    // If no skill rate found, return 0
     return 0;
   }
 

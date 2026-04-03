@@ -16,7 +16,7 @@ export interface SpecialDayRates {
   isSpecialDay: boolean;
   specialDay: SpecialDay | null;
   clientRateMultiplier: number;
-  employeeRateMultiplier: number;
+  employeeAdditionalAmount: number;
   isDefaultOff: boolean;
   isMandatoryOff: boolean;
   dayType: SpecialDayType | null;
@@ -199,7 +199,7 @@ export class SpecialDaysService {
         isSpecialDay: false,
         specialDay: null,
         clientRateMultiplier: 1.0,
-        employeeRateMultiplier: 1.0,
+        employeeAdditionalAmount: 0,
         isDefaultOff: false,
         isMandatoryOff: false,
         dayType: null,
@@ -207,7 +207,7 @@ export class SpecialDaysService {
     }
 
     // Get client rate multiplier - project-specific takes precedence, then global, then 1.0
-    let clientRateMultiplier = Number(specialDay.clientRateMultiplier) || 1.0; // Start with global default
+    let clientRateMultiplier = Number(specialDay.clientRateMultiplier) || 1.0;
     if (projectId) {
       const projectRate = await this.projectSpecialDayRateRepository.findOne({
         where: {
@@ -220,14 +220,13 @@ export class SpecialDaysService {
       }
     }
 
-    // Employee rate multiplier always comes from global special day
-    const employeeRateMultiplier = Number(specialDay.employeeRateMultiplier);
+    const employeeAdditionalAmount = Number(specialDay.employeeAdditionalAmount || 0);
 
     return {
       isSpecialDay: true,
       specialDay,
       clientRateMultiplier,
-      employeeRateMultiplier,
+      employeeAdditionalAmount,
       isDefaultOff: specialDay.isDefaultOff,
       isMandatoryOff: specialDay.dayType === SpecialDayType.MANDATORY_OFF,
       dayType: specialDay.dayType,
@@ -262,9 +261,9 @@ export class SpecialDaysService {
           isSpecialDay: true,
           specialDay: applicableSpecialDay,
           clientRateMultiplier:
-            Number(applicableSpecialDay.clientRateMultiplier) || 1.0, // Use global multiplier, project-specific rates are handled separately
-          employeeRateMultiplier: Number(
-            applicableSpecialDay.employeeRateMultiplier,
+            Number(applicableSpecialDay.clientRateMultiplier) || 1.0,
+          employeeAdditionalAmount: Number(
+            applicableSpecialDay.employeeAdditionalAmount || 0,
           ),
           isDefaultOff: applicableSpecialDay.isDefaultOff,
           isMandatoryOff:
@@ -276,7 +275,7 @@ export class SpecialDaysService {
           isSpecialDay: false,
           specialDay: null,
           clientRateMultiplier: 1.0,
-          employeeRateMultiplier: 1.0,
+          employeeAdditionalAmount: 0,
           isDefaultOff: false,
           isMandatoryOff: false,
           dayType: null,
