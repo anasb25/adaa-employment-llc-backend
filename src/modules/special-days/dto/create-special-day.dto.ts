@@ -60,6 +60,21 @@ export class CreateSpecialDayDto {
   isDefaultOff?: boolean;
 
   @IsOptional()
+  @IsNumber()
+  @Min(0)
+  minBillingHours?: number | null;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  billingHoursThreshold?: number | null;
+
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  additionalHoursAboveThreshold?: number | null;
+
+  @IsOptional()
   @IsString()
   notes?: string;
 }

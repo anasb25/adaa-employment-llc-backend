@@ -69,6 +69,15 @@ export class SpecialDay extends BaseEntity {
   @Column({ default: false })
   isDefaultOff: boolean; // If true, default to off status (but can be overridden if not mandatory)
 
+  @Column({ type: 'decimal', precision: 5, scale: 2, nullable: true, default: null })
+  minBillingHours: number | null;
+
+  @Column({ type: 'decimal', precision: 5, scale: 2, nullable: true, default: null })
+  billingHoursThreshold: number | null;
+
+  @Column({ type: 'decimal', precision: 5, scale: 2, nullable: true, default: null })
+  additionalHoursAboveThreshold: number | null;
+
   @Column({ type: 'text', nullable: true })
   notes: string; // Internal notes for admins
 }

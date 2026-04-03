@@ -345,14 +345,15 @@ export class InvoicesService {
               specialDay.id,
               specialDay.clientRateMultiplier,
             );
+            const billedHours = this.getSpecialDayBilledHours(specialDay, hours);
             const key = specialDay.name;
             const existing = rateVariantHours.get(key);
             if (existing) {
-              existing.hours += hours;
+              existing.hours += billedHours;
             } else {
               rateVariantHours.set(key, {
-                hours,
-                variantId: null, // Special days don't have variant IDs
+                hours: billedHours,
+                variantId: null,
                 multiplier,
               });
             }
@@ -617,6 +618,33 @@ export class InvoicesService {
 
     // No special variants apply, all hours at base/regular rate
     return [{ variant: null, hours: hoursWorked }];
+  }
+
+  /**
+   * Calculate billed hours for a special day (per employee, per day).
+   * If the special day has billing rules configured:
+   *   actual ≤ threshold → bill minBillingHours
+   *   actual > threshold → bill actual + additionalHoursAboveThreshold
+   * Otherwise returns actual hours unchanged.
+   */
+  private getSpecialDayBilledHours(
+    specialDay: SpecialDay,
+    actualHours: number,
+  ): number {
+    const threshold = specialDay.billingHoursThreshold;
+    const minBilling = specialDay.minBillingHours;
+    const additionalAbove = specialDay.additionalHoursAboveThreshold;
+
+    if (threshold == null || minBilling == null) {
+      return actualHours;
+    }
+
+    if (actualHours <= Number(threshold)) {
+      return Number(minBilling);
+    }
+
+    const extra = additionalAbove != null ? Number(additionalAbove) : 0;
+    return actualHours + extra;
   }
 
   /**
