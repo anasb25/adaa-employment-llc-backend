@@ -664,7 +664,7 @@ export class TimesheetsService {
       case 'off':
         return 0;
       case 'idle':
-        return 10;
+        return 4;
       default:
         return 10;
     }
