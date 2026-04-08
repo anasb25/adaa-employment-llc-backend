@@ -7,7 +7,7 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, ILike, LessThanOrEqual } from 'typeorm';
+import { Repository, ILike, LessThanOrEqual, MoreThanOrEqual, Not, Like } from 'typeorm';
 import {
   Mobilization,
   MobStatus,
@@ -97,6 +97,7 @@ export class MobilizationsService {
 
     const saved = await this.mobilizationRepository.save(mobilization);
 
+    await this.cleanupConflictingAutoSyncedMobs(saved.employeeId, saved.projectId, saved.actionDate);
     await this.autoSyncTimesheet(saved.employeeId, saved.actionDate);
 
     const result = await this.findOne(saved.id);
@@ -156,6 +157,7 @@ export class MobilizationsService {
     const saved = await this.mobilizationRepository.save(entities);
 
     for (const mob of saved) {
+      await this.cleanupConflictingAutoSyncedMobs(mob.employeeId, mob.projectId, mob.actionDate);
       await this.autoSyncTimesheet(mob.employeeId, mob.actionDate);
     }
 
@@ -605,6 +607,7 @@ export class MobilizationsService {
       throw new NotFoundException('Failed to retrieve updated mobilization');
     }
 
+    await this.cleanupConflictingAutoSyncedMobs(result.employeeId, result.projectId, result.actionDate);
     await this.autoSyncTimesheet(result.employeeId, result.actionDate);
 
     return result;
@@ -974,6 +977,7 @@ export class MobilizationsService {
           }
         }
 
+        await this.cleanupConflictingAutoSyncedMobs(employee.id, mappedData.projectId, mappedData.actionDate);
         await this.autoSyncTimesheet(employee.id, mappedData.actionDate);
 
         result.success++;
@@ -1000,6 +1004,44 @@ export class MobilizationsService {
     } catch (error) {
       this.logger.error(
         `Failed to auto-sync timesheet for employee ${employeeId} on ${actionDate}: ${error.message}`,
+      );
+    }
+  }
+
+  /**
+   * When a mobilization is created/updated, delete any auto-synced mob records
+   * for the same employee on DIFFERENT projects that have dates >= this mobilization's date.
+   * This handles backdated transfers: e.g. employee was on project A with auto-synced mobs
+   * for April 12, 15, 20 — then user creates a mobilization to project B on April 10 —
+   * those stale auto-synced mobs on project A must be removed.
+   */
+  private async cleanupConflictingAutoSyncedMobs(
+    employeeId: number,
+    projectId: number | null,
+    actionDate: string,
+  ): Promise<void> {
+    try {
+      if (!projectId) return;
+
+      const deleted = await this.mobilizationRepository
+        .createQueryBuilder()
+        .delete()
+        .from(Mobilization)
+        .where('employeeId = :employeeId', { employeeId })
+        .andWhere('projectId != :projectId', { projectId })
+        .andWhere('actionDate >= :actionDate', { actionDate })
+        .andWhere('notes LIKE :pattern', { pattern: 'Auto-synced from timesheet%' })
+        .execute();
+
+      if (deleted.affected && deleted.affected > 0) {
+        this.logger.log(
+          `Cleaned up ${deleted.affected} conflicting auto-synced mobilization(s) ` +
+          `for employee ${employeeId} on/after ${actionDate}`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to cleanup conflicting auto-synced mobs for employee ${employeeId}: ${error.message}`,
       );
     }
   }
