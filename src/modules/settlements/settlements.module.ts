@@ -6,11 +6,12 @@ import { Settlement } from './entities/settlement.entity';
 import { Employee } from '../employees/entities/employee.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
 import { Skill } from '../skills/entities/skill.entity';
+import { Mobilization } from '../mobilizations/entities/mobilization.entity';
 import { SettlementExcelService } from './services/settlement-excel.service';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Settlement, Employee, EmployeeSkill, Skill]),
+    TypeOrmModule.forFeature([Settlement, Employee, EmployeeSkill, Skill, Mobilization]),
   ],
   controllers: [SettlementsController],
   providers: [SettlementsService, SettlementExcelService],

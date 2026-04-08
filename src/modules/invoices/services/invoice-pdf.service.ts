@@ -455,12 +455,12 @@ export class InvoicePdfService {
       <div class="totals-row grand-total">
         <span></span>
         <span>Total</span>
-        <span>AED${this.formatCurrency(totalAmount)}</span>
+        <span>AED ${this.formatCurrency(totalAmount)}</span>
       </div>
       <div class="totals-row" style="margin-top: 8px;">
         <span></span>
         <span>Balance Due</span>
-        <span style="font-weight: bold;">AED${this.formatCurrency(totalAmount)}</span>
+        <span style="font-weight: bold;">AED ${this.formatCurrency(totalAmount)}</span>
       </div>
     </div>
   </div>

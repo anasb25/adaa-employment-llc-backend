@@ -5,7 +5,7 @@ import { Employee } from './entities/employee.entity';
 import { Timesheet } from '../timesheets/entities/timesheet.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
-import { Mobilization } from '../mobilizations/entities/mobilization.entity';
+import { Mobilization, JobStatus } from '../mobilizations/entities/mobilization.entity';
 import {
   PaginationUtil,
   PaginationOptions,
@@ -171,27 +171,32 @@ export class EmployeesService {
   }
 
   /**
-   * Calculate air tickets based on years of service from date of joining
+   * Get the cancellation date for an employee from their latest cancelled mobilization.
+   * Returns null if the employee is not cancelled.
    */
-  private calculateAirTickets(dateOfJoining: string | null): number {
+  private async getCancellationDate(employeeId: number): Promise<Date | null> {
+    const cancelledMob = await this.mobilizationRepository.findOne({
+      where: { employeeId, jobStatus: JobStatus.CANCELLED },
+      order: { actionDate: 'DESC', id: 'DESC' },
+    });
+    return cancelledMob ? new Date(cancelledMob.actionDate) : null;
+  }
+
+  private calculateAirTickets(dateOfJoining: string | null, serviceEndDate?: Date | null): number {
     if (!dateOfJoining) return 0;
     const joinDate = new Date(dateOfJoining);
-    const today = new Date();
+    const endDate = serviceEndDate ?? new Date();
     const yearsOfService =
-      (today.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+      (endDate.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
     return Math.floor(yearsOfService);
   }
 
-  /**
-   * Calculate annual leave balance based on years of service from date of joining
-   * Each year adds 30 days
-   */
-  private calculateAnnualLeaveBalance(dateOfJoining: string | null): number {
+  private calculateAnnualLeaveBalance(dateOfJoining: string | null, serviceEndDate?: Date | null): number {
     if (!dateOfJoining) return 0;
     const joinDate = new Date(dateOfJoining);
-    const today = new Date();
+    const endDate = serviceEndDate ?? new Date();
     const yearsOfService =
-      (today.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+      (endDate.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
     return Math.floor(yearsOfService) * 30;
   }
 
@@ -221,17 +226,18 @@ export class EmployeesService {
 
   async update(id: number, employeeData: Partial<Employee>): Promise<Employee> {
     try {
-      // If date_of_joining is being updated, recalculate air_tickets and annual_leave_balance
-      // But only if they're not explicitly provided (allow manual override)
       if (employeeData.date_of_joining) {
+        const cancellationDate = await this.getCancellationDate(id);
         if (employeeData.air_tickets === undefined) {
           employeeData.air_tickets = this.calculateAirTickets(
             employeeData.date_of_joining,
+            cancellationDate,
           );
         }
         if (employeeData.annual_leave_balance === undefined) {
           employeeData.annual_leave_balance = this.calculateAnnualLeaveBalance(
             employeeData.date_of_joining,
+            cancellationDate,
           );
         }
       }

@@ -3,6 +3,7 @@ import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Employee } from '../modules/employees/entities/employee.entity';
+import { Mobilization, JobStatus } from '../modules/mobilizations/entities/mobilization.entity';
 
 @Injectable()
 export class CronjobsService {
@@ -11,6 +12,8 @@ export class CronjobsService {
   constructor(
     @InjectRepository(Employee)
     private readonly employeeRepository: Repository<Employee>,
+    @InjectRepository(Mobilization)
+    private readonly mobilizationRepository: Repository<Mobilization>,
   ) {}
 
   // Example cron job - runs every day at midnight
@@ -34,6 +37,9 @@ export class CronjobsService {
         .where('employee.date_of_joining IS NOT NULL')
         .getMany();
 
+      const employeeIds = employees.map((e) => e.id);
+      const cancellationDateMap = await this.getCancellationDates(employeeIds);
+
       const today = new Date();
       let updatedCount = 0;
 
@@ -41,11 +47,11 @@ export class CronjobsService {
         if (!employee.date_of_joining) continue;
 
         const joinDate = new Date(employee.date_of_joining);
-        const yearsOfService = (today.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+        const endDate = cancellationDateMap.get(employee.id) ?? today;
+        const yearsOfService = (endDate.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
         const expectedAirTickets = Math.floor(yearsOfService);
         const expectedAnnualLeave = Math.floor(yearsOfService) * 30;
 
-        // Only update if the calculated values are different from current values
         if (
           employee.air_tickets !== expectedAirTickets ||
           employee.annual_leave_balance !== expectedAnnualLeave
@@ -70,5 +76,28 @@ export class CronjobsService {
         error,
       );
     }
+  }
+
+  /**
+   * For each employee, find their latest cancelled mobilization actionDate.
+   * Returns a map of employeeId -> cancellation Date.
+   */
+  private async getCancellationDates(employeeIds: number[]): Promise<Map<number, Date>> {
+    const map = new Map<number, Date>();
+    if (employeeIds.length === 0) return map;
+
+    const cancelledMobs = await this.mobilizationRepository
+      .createQueryBuilder('mob')
+      .select(['mob.employeeId', 'MAX(mob.actionDate) as "cancellationDate"'])
+      .where('mob.employeeId IN (:...employeeIds)', { employeeIds })
+      .andWhere('mob.jobStatus = :status', { status: JobStatus.CANCELLED })
+      .andWhere('mob.deletedAt IS NULL')
+      .groupBy('mob.employeeId')
+      .getRawMany();
+
+    for (const row of cancelledMobs) {
+      map.set(row.mob_employeeId, new Date(row.cancellationDate));
+    }
+    return map;
   }
 }

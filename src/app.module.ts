@@ -25,6 +25,7 @@ import { InvoicesModule } from './modules/invoices/invoices.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { SettlementsModule } from './modules/settlements/settlements.module';
 import { Employee } from './modules/employees/entities/employee.entity';
+import { Mobilization } from './modules/mobilizations/entities/mobilization.entity';
 import appConfig from './config/app.config';
 import databaseConfig from './config/database.config';
 import authConfig from './config/auth.config';
@@ -49,7 +50,7 @@ import mailConfig from './config/mail.config';
     ScheduleModule.forRoot(),
 
     // TypeORM Module for shared entities (used by cron jobs, etc.)
-    TypeOrmModule.forFeature([Employee]),
+    TypeOrmModule.forFeature([Employee, Mobilization]),
 
     // TypeORM Module
     TypeOrmModule.forRootAsync({

@@ -9,6 +9,7 @@ import { Settlement, SettlementStatus } from './entities/settlement.entity';
 import { Employee } from '../employees/entities/employee.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
 import { Skill } from '../skills/entities/skill.entity';
+import { Mobilization, JobStatus } from '../mobilizations/entities/mobilization.entity';
 import { CreateSettlementDto } from './dto/create-settlement.dto';
 import { UpdateSettlementDto } from './dto/update-settlement.dto';
 import {
@@ -28,6 +29,8 @@ export class SettlementsService {
     private readonly employeeSkillRepository: Repository<EmployeeSkill>,
     @InjectRepository(Skill)
     private readonly skillRepository: Repository<Skill>,
+    @InjectRepository(Mobilization)
+    private readonly mobilizationRepository: Repository<Mobilization>,
   ) {}
 
   async findAllPaginated(
@@ -265,7 +268,15 @@ export class SettlementsService {
     }
 
     const joinDate = new Date(employee.date_of_joining);
-    const endDate = lastDateOfWork || new Date();
+
+    let endDate = lastDateOfWork || null;
+    if (!endDate) {
+      const cancelledMob = await this.mobilizationRepository.findOne({
+        where: { employeeId, jobStatus: JobStatus.CANCELLED },
+        order: { actionDate: 'DESC', id: 'DESC' },
+      });
+      endDate = cancelledMob ? new Date(cancelledMob.actionDate) : new Date();
+    }
 
     // Calculate years of service
     const millisecondsPerYear = 365.25 * 24 * 60 * 60 * 1000;
