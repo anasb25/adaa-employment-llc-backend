@@ -351,24 +351,6 @@ export class TimesheetsService {
           continue;
         }
 
-        // Flag discrepancy when saved entry differs from effective mobilization.
-        // Only count trade mismatch when both sides have a value (entry often has null trade when not sent from frontend).
-        const timesheetProjectId = project.id === IDLE_PROJECT_VIRTUAL.id ? null : project.id;
-        const projectMismatch = effectiveMob && (effectiveMob.projectId ?? null) !== timesheetProjectId;
-        const statusMismatch = effectiveMob && existingEntry && effectiveMob.jobStatus !== existingEntry.jobStatus;
-        const entryTrade = existingEntry?.tradeInSiteId ?? null;
-        const mobTrade = effectiveMob?.mobilizedTradeId ?? null;
-        const tradeMismatch = effectiveMob && existingEntry && entryTrade != null && mobTrade != null && entryTrade !== mobTrade;
-        const discrepancyWithMobilization = !!(existingEntry && effectiveMob && (projectMismatch || statusMismatch || tradeMismatch));
-        const effectiveMobilizationSnapshot = discrepancyWithMobilization && effectiveMob
-          ? {
-              projectId: effectiveMob.projectId ?? null,
-              projectName: (effectiveMob as any).project?.name ?? null,
-              jobStatus: effectiveMob.jobStatus,
-              tradeName: (effectiveMob as any).mobilizedTrade?.skill ?? null,
-            }
-          : undefined;
-
         dailyHours.push({
           date: dateStr,
           day,
@@ -377,8 +359,6 @@ export class TimesheetsService {
           isOffDay: isProjectOffDay,
           notes: existingEntry?.notes || null,
           entryId: existingEntry?.id || null,
-          discrepancyWithMobilization,
-          ...(effectiveMobilizationSnapshot && { effectiveMobilizationSnapshot }),
         });
       }
 
@@ -525,22 +505,6 @@ export class TimesheetsService {
           : this.getDefaultHoursForStatus(JobStatus.IDLE);
         const jobStatus = existingEntry?.jobStatus ?? JobStatus.IDLE;
 
-        const timesheetProjectId = null; // Idle timesheet
-        const projectMismatch = effectiveMob && (effectiveMob.projectId ?? null) !== timesheetProjectId;
-        const statusMismatch = effectiveMob && existingEntry && effectiveMob.jobStatus !== existingEntry.jobStatus;
-        const entryTradeIdle = existingEntry?.tradeInSiteId ?? null;
-        const mobTradeIdle = effectiveMob?.mobilizedTradeId ?? null;
-        const tradeMismatch = effectiveMob && existingEntry && entryTradeIdle != null && mobTradeIdle != null && entryTradeIdle !== mobTradeIdle;
-        const discrepancyWithMobilization = !!(existingEntry && effectiveMob && (projectMismatch || statusMismatch || tradeMismatch));
-        const effectiveMobilizationSnapshot = discrepancyWithMobilization && effectiveMob
-          ? {
-              projectId: effectiveMob.projectId ?? null,
-              projectName: (effectiveMob as any).project?.name ?? null,
-              jobStatus: effectiveMob.jobStatus,
-              tradeName: (effectiveMob as any).mobilizedTrade?.skill ?? null,
-            }
-          : undefined;
-
         dailyHours.push({
           date: dateStr,
           day,
@@ -549,8 +513,6 @@ export class TimesheetsService {
           isOffDay: false,
           notes: existingEntry?.notes || null,
           entryId: existingEntry?.id || null,
-          discrepancyWithMobilization,
-          ...(effectiveMobilizationSnapshot && { effectiveMobilizationSnapshot }),
         });
       }
 
@@ -758,7 +720,6 @@ export class TimesheetsService {
 
       let entry: TimesheetEntry;
       if (existingEntry) {
-        // Update existing entry
         existingEntry.hoursWorked = entryDto.hoursWorked;
         existingEntry.jobStatus = entryDto.jobStatus;
         existingEntry.notes = entryDto.notes || null;
@@ -766,11 +727,10 @@ export class TimesheetsService {
         existingEntry.updatedBy = updatedBy;
         entry = existingEntry;
       } else {
-        // Create new entry (date will be transformed by DateOnlyTransformer)
         entry = this.entryRepository.create({
           timesheetId,
           employeeId: entryDto.employeeId,
-          date: dateString as any, // TypeORM will handle the transformer
+          date: dateString as any,
           hoursWorked: entryDto.hoursWorked,
           jobStatus: entryDto.jobStatus,
           notes: entryDto.notes,
@@ -782,10 +742,9 @@ export class TimesheetsService {
       const savedEntry = await this.entryRepository.save(entry);
       savedEntries.push(savedEntry);
 
-      // Keep timesheet and mobilizations in sync: create or update a mobilization for this
-      // date when the saved entry's status differs from the current effective mobilization.
-      // (Sync runs for both new and updated entries; inside sync we only create/update when
-      // status actually differs, so bulk save without changes does not create duplicate mobilizations.)
+      // Sync to mobilization when the entry's status differs from the effective
+      // mobilization. The sync function only reacts to status changes (not project),
+      // so saving default entries won't break carry-forward logic.
       await this.syncMobilizationFromTimesheetEntry(
         savedEntry,
         timesheet.projectId ?? null,
@@ -850,6 +809,26 @@ export class TimesheetsService {
   }
 
   /**
+   * Auto-remove timesheet entries for an employee on a specific date so the grid
+   * falls back to mobilization-derived data. Skips submitted/approved timesheets.
+   * Called by MobilizationsService when a mobilization is created or updated.
+   */
+  async syncTimesheetFromMobilization(employeeId: number, date: string): Promise<void> {
+    const entries = await this.entryRepository.find({
+      where: { employeeId, date: date as any },
+      relations: ['timesheet'],
+    });
+
+    for (const entry of entries) {
+      const status = entry.timesheet?.status;
+      if (status === TimesheetStatus.SUBMITTED || status === TimesheetStatus.APPROVED) {
+        continue;
+      }
+      await this.entryRepository.remove(entry);
+    }
+  }
+
+  /**
    * Auto-sync mobilization record when timesheet entry status changes
    * Creates a new mobilization record if the job status differs from the current mobilization
    * Automatically demobilizes employee if status is: cancelled, absconded, annual_leave, resigned, or idle
@@ -904,25 +883,20 @@ export class TimesheetsService {
         return mobDateStr === dateStr;
       });
 
-      // If job status is different, create/update mobilization
+      // Only sync when the job STATUS actually changed — not project.
+      // Project is determined by mobilization data, not by which timesheet the entry lives in.
+      // This prevents default entries from creating spurious mobilization records.
       if (exactDateMob) {
-        // Mobilization exists for this date - update it if status changed
         const statusChanged = exactDateMob.jobStatus !== entry.jobStatus;
         const mobStatusChanged =
           shouldDemobilize && exactDateMob.mobStatus !== MobStatus.DEMOBILIZED;
-        const projectMismatch =
-          (exactDateMob.projectId ?? null) !== (projectId ?? null);
 
-        if (statusChanged || mobStatusChanged || projectMismatch) {
+        if (statusChanged || mobStatusChanged) {
           exactDateMob.jobStatus = entry.jobStatus as JobStatus;
 
-          // Auto-demobilize if status requires it
-          if (shouldDemobilize || projectId === null) {
+          if (shouldDemobilize) {
             exactDateMob.mobStatus = MobStatus.DEMOBILIZED;
             exactDateMob.projectId = null;
-          } else {
-            exactDateMob.mobStatus = MobStatus.MOBILIZED;
-            exactDateMob.projectId = projectId;
           }
 
           exactDateMob.updatedBy = createdBy;
@@ -940,18 +914,15 @@ export class TimesheetsService {
           shouldDemobilize && currentMob.mobStatus !== MobStatus.DEMOBILIZED;
 
         if (statusDiffers || needsDemobilization) {
-          // Create new mobilization record for this date with the new status
-          // actionDate is now a string (YYYY-MM-DD)
           const newMob = this.mobilizationRepository.create({
             employeeId: entry.employeeId,
             mobilizedTradeId: currentMob.mobilizedTradeId,
-            projectId: shouldDemobilize || projectId === null ? null : projectId,
-            mobStatus:
-              shouldDemobilize || projectId === null
-                ? MobStatus.DEMOBILIZED
-                : MobStatus.MOBILIZED,
+            projectId: shouldDemobilize ? null : currentMob.projectId,
+            mobStatus: shouldDemobilize
+              ? MobStatus.DEMOBILIZED
+              : currentMob.mobStatus,
             jobStatus: entry.jobStatus as JobStatus,
-            actionDate: dateStr as any, // TypeORM will handle the transformer
+            actionDate: dateStr as any,
             notes:
               `Auto-synced from timesheet${shouldDemobilize ? ' - Auto-demobilized' : ''}: ${entry.notes || ''}`.trim(),
             createdBy,

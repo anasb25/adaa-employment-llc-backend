@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Module, forwardRef } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MobilizationsService } from './mobilizations.service';
 import { MobilizationsController } from './mobilizations.controller';
@@ -8,6 +8,7 @@ import { Project } from '../projects/entities/project.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { Client } from '../clients/entities/client.entity';
 import { SpecialDaysModule } from '../special-days/special-days.module';
+import { TimesheetsModule } from '../timesheets/timesheets.module';
 
 @Module({
   imports: [
@@ -19,6 +20,7 @@ import { SpecialDaysModule } from '../special-days/special-days.module';
       Client,
     ]),
     SpecialDaysModule,
+    forwardRef(() => TimesheetsModule),
   ],
   controllers: [MobilizationsController],
   providers: [MobilizationsService],

@@ -3,6 +3,8 @@ import {
   BadRequestException,
   NotFoundException,
   Logger,
+  Inject,
+  forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike, LessThanOrEqual } from 'typeorm';
@@ -30,6 +32,7 @@ import { MobilizationExcelUtil } from './utils/mobilization-excel.util';
 import { SpecialDaysService } from '../special-days/special-days.service';
 import { SpecialDayType } from '../special-days/entities/special-day.entity';
 import { parseDateOnly, formatDateOnly } from '../../common/utils/date.util';
+import { TimesheetsService } from '../timesheets/timesheets.service';
 
 @Injectable()
 export class MobilizationsService {
@@ -47,6 +50,8 @@ export class MobilizationsService {
     @InjectRepository(Client)
     private clientRepository: Repository<Client>,
     private specialDaysService: SpecialDaysService,
+    @Inject(forwardRef(() => TimesheetsService))
+    private timesheetsService: TimesheetsService,
   ) {}
 
   /**
@@ -92,7 +97,8 @@ export class MobilizationsService {
 
     const saved = await this.mobilizationRepository.save(mobilization);
 
-    // Return with relations
+    await this.autoSyncTimesheet(saved.employeeId, saved.actionDate);
+
     const result = await this.findOne(saved.id);
     if (!result) {
       throw new NotFoundException('Failed to retrieve created mobilization');
@@ -149,11 +155,14 @@ export class MobilizationsService {
 
     const saved = await this.mobilizationRepository.save(entities);
 
+    for (const mob of saved) {
+      await this.autoSyncTimesheet(mob.employeeId, mob.actionDate);
+    }
+
     this.logger.log(
       `Created ${saved.length} mobilization records for ${createDto.employeeIds.length} employees`,
     );
 
-    // Return with relations
     return await this.mobilizationRepository.find({
       where: { id: saved.map((m) => m.id) as any },
       relations: ['employee', 'project', 'project.client', 'mobilizedTrade'],
@@ -595,6 +604,9 @@ export class MobilizationsService {
     if (!result) {
       throw new NotFoundException('Failed to retrieve updated mobilization');
     }
+
+    await this.autoSyncTimesheet(result.employeeId, result.actionDate);
+
     return result;
   }
 
@@ -962,6 +974,8 @@ export class MobilizationsService {
           }
         }
 
+        await this.autoSyncTimesheet(employee.id, mappedData.actionDate);
+
         result.success++;
         result.imported.push({
           ...mobilization,
@@ -978,6 +992,16 @@ export class MobilizationsService {
     }
 
     return result;
+  }
+
+  private async autoSyncTimesheet(employeeId: number, actionDate: string): Promise<void> {
+    try {
+      await this.timesheetsService.syncTimesheetFromMobilization(employeeId, actionDate);
+    } catch (error) {
+      this.logger.error(
+        `Failed to auto-sync timesheet for employee ${employeeId} on ${actionDate}: ${error.message}`,
+      );
+    }
   }
 
   /**
