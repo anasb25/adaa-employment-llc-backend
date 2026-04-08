@@ -247,7 +247,6 @@ export class TimesheetsService {
         // If demobilized today, mark the flag so all subsequent days are skipped
         if (isDemobilizationDay) {
           demobilizedFromProject = true;
-          // Show "demobilized" entry for this day (0 hours)
           dailyHours.push({
             date: dateStr,
             day,
@@ -257,6 +256,17 @@ export class TimesheetsService {
             notes: existingEntry?.notes || null,
             entryId: existingEntry?.id || null,
           });
+          continue;
+        }
+
+        // Employee was re-mobilized to a DIFFERENT project — they've left this one.
+        // Skip this day regardless of whether old saved entries exist.
+        if (
+          effectiveMob &&
+          effectiveMob.mobStatus === MobStatus.MOBILIZED &&
+          effectiveMob.projectId !== null &&
+          effectiveMob.projectId !== project.id
+        ) {
           continue;
         }
 
@@ -876,6 +886,21 @@ export class TimesheetsService {
       }
 
       const currentMob = currentMobilizations[0];
+
+      // Don't sync if the employee's effective mobilization is on a DIFFERENT project.
+      // This prevents stale timesheet saves from creating conflicting mob records
+      // after the employee has been transferred to another project.
+      if (
+        currentMob.mobStatus === MobStatus.MOBILIZED &&
+        currentMob.projectId !== null &&
+        currentMob.projectId !== projectId
+      ) {
+        this.logger.log(
+          `Skipping sync for employee ${entry.employeeId} on ${dateStr}: ` +
+          `employee is on project ${currentMob.projectId}, not timesheet project ${projectId}`,
+        );
+        return;
+      }
 
       // Check if there's already a mobilization record for this exact date (using timezone-neutral comparison)
       const exactDateMob = currentMobilizations.find((m) => {
