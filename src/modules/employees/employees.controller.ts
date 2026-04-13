@@ -218,6 +218,13 @@ export class EmployeesController {
 
   @Roles('admin')
   @Permissions('employee:delete')
+  @Post('actions/delete-many')
+  removeMany(@Body('ids') ids: number[]) {
+    return this.employeesService.removeMany(ids);
+  }
+
+  @Roles('admin')
+  @Permissions('employee:delete')
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.employeesService.remove(+id);

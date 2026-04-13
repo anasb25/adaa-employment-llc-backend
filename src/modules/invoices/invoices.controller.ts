@@ -73,6 +73,11 @@ export class InvoicesController {
     return this.invoicesService.markAsPaid(id, dto, user.id);
   }
 
+  @Post('actions/delete-many')
+  removeMany(@Body('ids') ids: number[]) {
+    return this.invoicesService.removeMany(ids);
+  }
+
   @Delete(':id')
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.invoicesService.remove(id);

@@ -123,6 +123,15 @@ export class SettlementsController {
   }
 
   @Permissions('settlement:delete')
+  @Post('actions/delete-many')
+  async removeMany(
+    @Body('ids') ids: number[],
+    @CurrentUser() user: User,
+  ) {
+    return await this.settlementsService.removeMany(ids, user.id);
+  }
+
+  @Permissions('settlement:delete')
   @Delete(':id')
   async remove(
     @Param('id', ParseIntPipe) id: number,

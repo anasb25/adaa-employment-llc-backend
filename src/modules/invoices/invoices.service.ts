@@ -792,4 +792,21 @@ export class InvoicesService {
 
     await this.invoiceRepository.remove(invoice);
   }
+
+  async removeMany(ids: number[]): Promise<{ deleted: number; skipped: number }> {
+    const invoices = await this.invoiceRepository.find({
+      where: ids.map((id) => ({ id })),
+    });
+
+    const deletable = invoices.filter(
+      (inv) => inv.status !== InvoiceStatus.PAID,
+    );
+    const skipped = invoices.length - deletable.length;
+
+    if (deletable.length > 0) {
+      await this.invoiceRepository.remove(deletable);
+    }
+
+    return { deleted: deletable.length, skipped };
+  }
 }

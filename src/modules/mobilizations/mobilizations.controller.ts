@@ -174,6 +174,13 @@ export class MobilizationsController {
     return await this.mobilizationsService.update(+id, updateDto, user.id);
   }
 
+  @Post('actions/delete-many')
+  @Roles('admin', 'manager')
+  @Permissions('employee:delete')
+  async removeMany(@Body('ids') ids: number[]) {
+    return await this.mobilizationsService.removeMany(ids);
+  }
+
   @Delete(':id')
   @Roles('admin', 'manager')
   @Permissions('employee:delete')

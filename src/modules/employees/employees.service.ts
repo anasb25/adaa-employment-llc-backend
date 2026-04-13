@@ -253,6 +253,11 @@ export class EmployeesService {
     await this.employeeRepository.delete(id);
   }
 
+  async removeMany(ids: number[]): Promise<{ deleted: number }> {
+    const result = await this.employeeRepository.delete(ids);
+    return { deleted: result.affected || 0 };
+  }
+
   async decrementAirTicket(id: number): Promise<Employee> {
     const employee = await this.findOne(id);
     if (!employee) {

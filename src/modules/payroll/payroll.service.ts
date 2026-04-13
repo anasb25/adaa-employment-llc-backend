@@ -197,6 +197,11 @@ export class PayrollService {
     await this.payrollRepository.softDelete(payroll.id);
   }
 
+  async removeMany(ids: number[]): Promise<{ deleted: number }> {
+    const result = await this.payrollRepository.softDelete(ids);
+    return { deleted: result.affected || 0 };
+  }
+
   /**
    * Bulk create or update payrolls for a month
    */

@@ -110,6 +110,12 @@ export class PayrollController {
   /**
    * Delete a payroll entry
    */
+  @Post('actions/delete-many')
+  @Permissions('payroll:delete')
+  async removeMany(@Body('ids') ids: number[]) {
+    return await this.payrollService.removeMany(ids);
+  }
+
   @Delete(':id')
   @Permissions('payroll:delete')
   async remove(@Param('id', ParseIntPipe) id: number) {

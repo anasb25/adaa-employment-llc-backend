@@ -70,4 +70,9 @@ export class ClientsService {
   async remove(id: number): Promise<void> {
     await this.clientRepository.softDelete(id);
   }
+
+  async removeMany(ids: number[]): Promise<{ deleted: number }> {
+    const result = await this.clientRepository.softDelete(ids);
+    return { deleted: result.affected || 0 };
+  }
 }

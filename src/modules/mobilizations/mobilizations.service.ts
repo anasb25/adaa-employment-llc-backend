@@ -625,6 +625,11 @@ export class MobilizationsService {
     await this.mobilizationRepository.delete(id);
   }
 
+  async removeMany(ids: number[]): Promise<{ deleted: number }> {
+    const result = await this.mobilizationRepository.delete(ids);
+    return { deleted: result.affected || 0 };
+  }
+
   /**
    * Get mobilization statistics
    */

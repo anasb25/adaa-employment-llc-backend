@@ -187,6 +187,29 @@ export class SettlementsService {
     await this.settlementRepository.update(id, { deletedBy: userId });
   }
 
+  async removeMany(
+    ids: number[],
+    userId: number,
+  ): Promise<{ deleted: number; skipped: number }> {
+    const settlements = await this.settlementRepository.find({
+      where: ids.map((id) => ({ id })),
+    });
+
+    const deletable = settlements.filter(
+      (s) => s.status !== SettlementStatus.PAID,
+    );
+    const skipped = settlements.length - deletable.length;
+
+    for (const settlement of deletable) {
+      await this.settlementRepository.softDelete(settlement.id);
+      await this.settlementRepository.update(settlement.id, {
+        deletedBy: userId,
+      });
+    }
+
+    return { deleted: deletable.length, skipped };
+  }
+
   async approve(id: number, userId: number): Promise<Settlement> {
     const settlement = await this.findOne(id);
 

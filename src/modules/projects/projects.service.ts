@@ -240,4 +240,9 @@ export class ProjectsService {
     // Employees and client are not affected.
     await this.projectRepository.delete(id);
   }
+
+  async removeMany(ids: number[]): Promise<{ deleted: number }> {
+    const result = await this.projectRepository.delete(ids);
+    return { deleted: result.affected || 0 };
+  }
 }

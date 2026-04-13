@@ -84,6 +84,11 @@ export class ProjectsController {
     });
   }
 
+  @Post('actions/delete-many')
+  removeMany(@Body('ids') ids: number[]) {
+    return this.projectsService.removeMany(ids);
+  }
+
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.projectsService.remove(+id);

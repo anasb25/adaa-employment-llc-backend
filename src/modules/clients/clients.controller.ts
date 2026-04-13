@@ -85,6 +85,11 @@ export class ClientsController {
     });
   }
 
+  @Post('actions/delete-many')
+  removeMany(@Body('ids') ids: number[]) {
+    return this.clientsService.removeMany(ids);
+  }
+
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.clientsService.remove(+id);
