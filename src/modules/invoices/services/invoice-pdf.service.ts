@@ -528,7 +528,7 @@ export class InvoicePdfService {
             ${lineItem.skillName}<br/>
             <span style="font-size: 7.5px; color: #666;">${variant.variantName}</span>
           </td>
-          <td class="center">${this.formatNumber(hours)}</td>
+          <td class="center">${this.decimalToHM(hours)}</td>
           <td class="right">${this.formatNumber(ratePerHour)}</td>
           <td class="center">${this.formatNumber(taxPercentage)}</td>
           <td class="right">${this.formatNumber(taxAmount)}</td>
@@ -552,7 +552,7 @@ export class InvoicePdfService {
         total += Number(variant.hours);
       }
     }
-    return this.formatNumber(total);
+    return this.decimalToHM(total);
   }
 
   /**
@@ -595,5 +595,14 @@ export class InvoicePdfService {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
+  }
+
+  private decimalToHM(decimal: number): string {
+    if (decimal == null || isNaN(decimal)) return '0';
+    const totalMinutes = Math.round(decimal * 60);
+    const h = Math.floor(totalMinutes / 60);
+    const m = totalMinutes % 60;
+    if (m === 0) return h.toString();
+    return `${h}:${m.toString().padStart(2, '0')}`;
   }
 }
