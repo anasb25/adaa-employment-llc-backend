@@ -91,9 +91,17 @@ export class Employee extends BaseEntity {
     scale: 2,
     default: 0,
     comment:
-      'Annual leave balance in days - auto-adds 30 days every year from date of joining',
+      'Annual leave balance in days - accrues 2.5 days per completed month of service from date of joining (30 days/year). Reduced by approved annual-leave timesheet entries.',
   })
   annual_leave_balance: number;
+
+  @Column({
+    type: 'int',
+    default: 0,
+    comment:
+      'Cumulative number of completed service months already credited to annual_leave_balance by the accrual cron. Prevents double-crediting and preserves timesheet deductions.',
+  })
+  annual_leave_accrued_months: number;
 
   @OneToMany(() => EmployeeSkill, (employeeSkill) => employeeSkill.employee)
   employeeSkills: EmployeeSkill[];

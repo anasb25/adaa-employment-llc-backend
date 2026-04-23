@@ -146,6 +146,52 @@ export function getMonthEnd(date: Date | string): string {
 }
 
 /**
+ * Counts the number of fully-completed calendar months between two dates.
+ *
+ * A month is "completed" once the day-of-month of `end` is greater than or
+ * equal to the day-of-month of `start`. This treats month boundaries as
+ * calendar anniversaries rather than fixed 30-day windows so accrual aligns
+ * with how HR actually tracks service length.
+ *
+ * Examples (start -> end):
+ *   2023-01-15 -> 2023-02-14  =>  0 months (anniversary not yet reached)
+ *   2023-01-15 -> 2023-02-15  =>  1 month
+ *   2023-01-15 -> 2026-01-14  =>  35 months (2 years 11 months)
+ *   2023-01-15 -> 2026-01-15  =>  36 months (3 years)
+ */
+export function completedMonthsBetween(start: Date, end: Date): number {
+  if (end.getTime() <= start.getTime()) return 0;
+
+  let months =
+    (end.getUTCFullYear() - start.getUTCFullYear()) * 12 +
+    (end.getUTCMonth() - start.getUTCMonth());
+
+  if (end.getUTCDate() < start.getUTCDate()) {
+    months -= 1;
+  }
+
+  return Math.max(0, months);
+}
+
+/**
+ * Monthly annual-leave accrual (days per completed month of service).
+ * 2.5 days/month = 30 days/year.
+ */
+export const MONTHLY_LEAVE_ACCRUAL = 2.5;
+
+/**
+ * Calculates accrued annual leave balance from date of joining.
+ * Rounded to 2 decimal places to match the DB column precision.
+ */
+export function calculateAccruedAnnualLeave(
+  dateOfJoining: Date,
+  endDate: Date,
+): number {
+  const months = completedMonthsBetween(dateOfJoining, endDate);
+  return Math.round(months * MONTHLY_LEAVE_ACCRUAL * 100) / 100;
+}
+
+/**
  * Converts a month string (YYYY-MM) to date range
  */
 export function getMonthDateRange(month: string): { start: string; end: string } {

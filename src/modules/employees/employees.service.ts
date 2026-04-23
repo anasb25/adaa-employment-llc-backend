@@ -13,6 +13,10 @@ import {
 } from '../../common/utils/pagination.util';
 import { ExcelValidatorUtil } from './utils/excel-validator.util';
 import { ImportResult } from './dto/import-employee.dto';
+import {
+  calculateAccruedAnnualLeave,
+  completedMonthsBetween,
+} from '../../common/utils/date.util';
 import { validate } from 'class-validator';
 import { plainToClass } from 'class-transformer';
 
@@ -191,19 +195,31 @@ export class EmployeesService {
     return Math.floor(yearsOfService);
   }
 
-  private calculateAnnualLeaveBalance(dateOfJoining: string | null, serviceEndDate?: Date | null): number {
+  private calculateAnnualLeaveBalance(
+    dateOfJoining: string | null,
+    serviceEndDate?: Date | null,
+  ): number {
     if (!dateOfJoining) return 0;
     const joinDate = new Date(dateOfJoining);
     const endDate = serviceEndDate ?? new Date();
-    const yearsOfService =
-      (endDate.getTime() - joinDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
-    return Math.floor(yearsOfService) * 30;
+    return calculateAccruedAnnualLeave(joinDate, endDate);
+  }
+
+  private calculateAccruedMonths(
+    dateOfJoining: string | null,
+    serviceEndDate?: Date | null,
+  ): number {
+    if (!dateOfJoining) return 0;
+    const joinDate = new Date(dateOfJoining);
+    const endDate = serviceEndDate ?? new Date();
+    return completedMonthsBetween(joinDate, endDate);
   }
 
   async create(employeeData: Partial<Employee>): Promise<Employee> {
     try {
-      // Auto-calculate air_tickets and annual_leave_balance if date_of_joining is provided
-      // But allow manual override if provided in employeeData
+      // Auto-calculate air_tickets, annual_leave_balance, and
+      // annual_leave_accrued_months if date_of_joining is provided.
+      // Manual overrides (if any) are respected.
       if (employeeData.date_of_joining) {
         if (employeeData.air_tickets === undefined) {
           employeeData.air_tickets = this.calculateAirTickets(
@@ -214,6 +230,10 @@ export class EmployeesService {
           employeeData.annual_leave_balance = this.calculateAnnualLeaveBalance(
             employeeData.date_of_joining,
           );
+        }
+        if (employeeData.annual_leave_accrued_months === undefined) {
+          employeeData.annual_leave_accrued_months =
+            this.calculateAccruedMonths(employeeData.date_of_joining);
         }
       }
       const employee = this.employeeRepository.create(employeeData);
@@ -239,6 +259,15 @@ export class EmployeesService {
             employeeData.date_of_joining,
             cancellationDate,
           );
+        }
+        // Re-sync the accrual counter to match the (possibly changed) joining
+        // date, so the cron doesn't retroactively double-credit leave.
+        if (employeeData.annual_leave_accrued_months === undefined) {
+          employeeData.annual_leave_accrued_months =
+            this.calculateAccruedMonths(
+              employeeData.date_of_joining,
+              cancellationDate,
+            );
         }
       }
       await this.employeeRepository.update(id, employeeData);
