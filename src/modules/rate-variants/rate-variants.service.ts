@@ -10,6 +10,13 @@ export interface RateVariantRates {
   rateVariant: RateVariant;
   clientRateMultiplier: number;
   employeeAdditionalAmount: number;
+  /**
+   * `false` only when the caller passed a `projectId` and the project has an
+   * explicit override row for this rate variant with `isEnabled = false`. In
+   * that case callers (invoices, payroll) must skip the variant entirely — no
+   * multiplier, no additional amount should be applied.
+   */
+  isEnabled: boolean;
 }
 
 @Injectable()
@@ -106,11 +113,16 @@ export class RateVariantsService {
   }
 
   /**
-   * Get rate variant rates for a specific variant
-   * This is the main utility method to be used by other modules (timesheets, billing)
+   * Get rate variant rates for a specific variant.
+   * Used by invoices and payroll.
    *
    * @param rateVariantId - The rate variant ID
-   * @param projectId - Optional project ID. If provided, uses project-specific client rate multiplier if available, otherwise falls back to global rate.
+   * @param projectId - Optional project ID. When provided:
+   *                    1. If the project has an override with isEnabled=false,
+   *                       the returned `isEnabled` flag is `false` and callers
+   *                       must skip this variant entirely.
+   *                    2. Otherwise, the project-specific client rate multiplier
+   *                       is used when available; falls back to the global rate.
    *                    Employee rates always come from the global rate variant.
    */
   async getRateVariantRates(
@@ -119,9 +131,10 @@ export class RateVariantsService {
   ): Promise<RateVariantRates> {
     const rateVariant = await this.findOne(rateVariantId);
 
-    // Get client rate multiplier - project-specific takes precedence, then global, then 1.0
     let clientRateMultiplier =
-      Number(rateVariant.clientRateMultiplier) || 1.0; // Start with global default
+      Number(rateVariant.clientRateMultiplier) || 1.0;
+    let isEnabled = true;
+
     if (projectId) {
       const projectRate =
         await this.projectRateVariantRateRepository.findOne({
@@ -131,17 +144,36 @@ export class RateVariantsService {
           },
         });
       if (projectRate) {
-        clientRateMultiplier = Number(projectRate.clientRateMultiplier);
+        if (projectRate.isEnabled === false) {
+          isEnabled = false;
+        } else {
+          clientRateMultiplier = Number(projectRate.clientRateMultiplier);
+        }
       }
     }
 
-    const employeeAdditionalAmount = Number(rateVariant.employeeAdditionalAmount || 0);
+    const employeeAdditionalAmount = Number(
+      rateVariant.employeeAdditionalAmount || 0,
+    );
 
     return {
       rateVariant,
       clientRateMultiplier,
       employeeAdditionalAmount,
+      isEnabled,
     };
+  }
+
+  /**
+   * Return the IDs of rate variants that are explicitly disabled for the
+   * given project. Convenience for batch paths that need to skip variants
+   * without making one `getRateVariantRates` call per variant.
+   */
+  async getDisabledRateVariantIds(projectId: number): Promise<Set<number>> {
+    const rows = await this.projectRateVariantRateRepository.find({
+      where: { projectId, isEnabled: false },
+    });
+    return new Set(rows.map((r) => r.rateVariantId));
   }
 }
 

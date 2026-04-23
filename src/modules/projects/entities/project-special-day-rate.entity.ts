@@ -34,5 +34,14 @@ export class ProjectSpecialDayRate extends BaseEntity {
     comment: 'Client rate multiplier for this special day on this project (e.g., 1.10 = 110%)',
   })
   clientRateMultiplier: number;
+
+  @Column({
+    type: 'boolean',
+    default: true,
+    comment:
+      'When false, the special day does not apply to this project at all ' +
+      '(overrides global rules, multipliers, and billing-hours behaviour).',
+  })
+  isEnabled: boolean;
 }
 

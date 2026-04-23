@@ -28,6 +28,8 @@ import { Project } from '../projects/entities/project.entity';
 import { RateVariant } from '../rate-variants/entities/rate-variant.entity';
 import { SpecialDay } from '../special-days/entities/special-day.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
+import { ProjectSpecialDayRate } from '../projects/entities/project-special-day-rate.entity';
+import { ProjectRateVariantRate } from '../projects/entities/project-rate-variant-rate.entity';
 import { AllowanceDeductionExcelValidator } from './utils/allowance-deduction-excel-validator.util';
 
 export interface ImportResult {
@@ -53,6 +55,10 @@ export class PayrollService {
     private readonly specialDayRepository: Repository<SpecialDay>,
     @InjectRepository(EmployeeSkill)
     private readonly employeeSkillRepository: Repository<EmployeeSkill>,
+    @InjectRepository(ProjectSpecialDayRate)
+    private readonly projectSpecialDayRateRepository: Repository<ProjectSpecialDayRate>,
+    @InjectRepository(ProjectRateVariantRate)
+    private readonly projectRateVariantRateRepository: Repository<ProjectRateVariantRate>,
     private readonly timesheetsService: TimesheetsService,
   ) {}
 
@@ -404,6 +410,7 @@ export class PayrollService {
           employee.employeeId,
           employee.skillId,
           employee.dailyHours,
+          projectId,
         );
 
         // Check if payroll already exists to preserve allowances/deductions
@@ -485,13 +492,21 @@ export class PayrollService {
    */
   private async splitHoursAcrossRateVariants(
     hoursWorked: number,
+    projectId?: number,
   ): Promise<
     Array<{ variant: RateVariant | null; hours: number; variantName: string }>
   > {
-    const rateVariants = await this.rateVariantRepository.find({
+    const allVariants = await this.rateVariantRepository.find({
       where: { isActive: true },
       order: { displayOrder: 'ASC' },
     });
+
+    // Exclude variants explicitly disabled for this project — their hours
+    // fall through to the regular/base rate (same policy as invoicing).
+    const disabledIds = projectId
+      ? await this.getDisabledRateVariantIdsForProject(projectId)
+      : new Set<number>();
+    const rateVariants = allVariants.filter((v) => !disabledIds.has(v.id));
 
     const result: Array<{
       variant: RateVariant | null;
@@ -625,6 +640,7 @@ export class PayrollService {
       jobStatus: string | null;
       notes: string | null;
     }>,
+    projectId?: number,
   ) {
     let totalHours = 0;
     let totalOtHours = 0;
@@ -705,8 +721,11 @@ export class PayrollService {
 
       const isOffDay = dayData.isOffDay; // Project-specific off days (e.g., Friday, Saturday)
 
-      // Check if this is a special day
-      const specialDay = await this.getSpecialDayForDate(dayData.date);
+      // Check if this is a special day (honoring project-level disable flag).
+      const specialDay = await this.getSpecialDayForDate(
+        dayData.date,
+        projectId,
+      );
 
       // If working on a special day
       if (specialDay && hours > 0) {
@@ -740,8 +759,13 @@ export class PayrollService {
 
       // Regular working day (active, notice_period, etc.)
       if (hours > 0 && !isOffDay && !specialDay) {
-        // Split hours across applicable rate variants
-        const hoursSplit = await this.splitHoursAcrossRateVariants(hours);
+        // Split hours across applicable rate variants.
+        // Variants disabled for this project are skipped so their hours fall
+        // through to the regular/base rate.
+        const hoursSplit = await this.splitHoursAcrossRateVariants(
+          hours,
+          projectId,
+        );
 
         for (const { variant, hours: hoursForVariant } of hoursSplit) {
           const additionalAmount = variant
@@ -826,14 +850,25 @@ export class PayrollService {
   }
 
   /**
-   * Get the special day for a specific date (returns full special day entity)
+   * Get the special day for a specific date (returns full special day entity).
+   * When `projectId` is supplied, special days explicitly disabled for that
+   * project (ProjectSpecialDayRate.isEnabled = false) are ignored.
    */
-  private async getSpecialDayForDate(date: string): Promise<SpecialDay | null> {
+  private async getSpecialDayForDate(
+    date: string,
+    projectId?: number,
+  ): Promise<SpecialDay | null> {
     const specialDays = await this.specialDayRepository.find({
       where: { isActive: true },
     });
 
+    const disabledIds = projectId
+      ? await this.getDisabledSpecialDayIdsForProject(projectId)
+      : new Set<number>();
+
     for (const specialDay of specialDays) {
+      if (disabledIds.has(specialDay.id)) continue;
+
       const targetDate = new Date(date);
       const start = new Date(specialDay.startDate);
       const end = specialDay.endDate ? new Date(specialDay.endDate) : start;
@@ -844,6 +879,24 @@ export class PayrollService {
     }
 
     return null;
+  }
+
+  private async getDisabledSpecialDayIdsForProject(
+    projectId: number,
+  ): Promise<Set<number>> {
+    const rows = await this.projectSpecialDayRateRepository.find({
+      where: { projectId, isEnabled: false },
+    });
+    return new Set(rows.map((r) => r.specialDayId));
+  }
+
+  private async getDisabledRateVariantIdsForProject(
+    projectId: number,
+  ): Promise<Set<number>> {
+    const rows = await this.projectRateVariantRateRepository.find({
+      where: { projectId, isEnabled: false },
+    });
+    return new Set(rows.map((r) => r.rateVariantId));
   }
 
   /**

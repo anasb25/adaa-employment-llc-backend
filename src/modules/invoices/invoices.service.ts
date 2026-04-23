@@ -335,8 +335,11 @@ export class InvoicesService {
 
           const isOffDay = dayData.isOffDay;
 
-          // Check if this is a special day
-          const specialDay = await this.getSpecialDayForDate(dayData.date);
+          // Check if this is a special day (honoring project-level disable).
+          const specialDay = await this.getSpecialDayForDate(
+            dayData.date,
+            project.id,
+          );
 
           // If working on a special day (special days take precedence)
           if (specialDay && hours > 0) {
@@ -377,9 +380,14 @@ export class InvoicesService {
             continue;
           }
 
-          // Regular working day - split THIS DAY'S hours across rate variants
+          // Regular working day - split THIS DAY'S hours across rate variants.
+          // Any variant explicitly disabled for this project is skipped so its
+          // hours are billed at the regular base rate instead.
           if (hours > 0 && !isOffDay && !specialDay) {
-            const hoursSplit = await this.splitHoursAcrossRateVariants(hours);
+            const hoursSplit = await this.splitHoursAcrossRateVariants(
+              hours,
+              project.id,
+            );
 
             for (const { variant, hours: hoursForVariant } of hoursSplit) {
               const multiplier = variant
@@ -530,11 +538,20 @@ export class InvoicesService {
    */
   private async splitHoursAcrossRateVariants(
     hoursWorked: number,
+    projectId?: number,
   ): Promise<Array<{ variant: RateVariant | null; hours: number }>> {
-    const rateVariants = await this.rateVariantRepository.find({
+    const allVariants = await this.rateVariantRepository.find({
       where: { isActive: true },
       order: { displayOrder: 'ASC' },
     });
+
+    // Exclude any rate variant that has been explicitly disabled for this
+    // project. A disabled variant must not participate in the split at all —
+    // the hours it would have claimed fall through to the regular/base rate.
+    const disabledIds = projectId
+      ? await this.getDisabledRateVariantIdsForProject(projectId)
+      : new Set<number>();
+    const rateVariants = allVariants.filter((v) => !disabledIds.has(v.id));
 
     const result: Array<{ variant: RateVariant | null; hours: number }> = [];
 
@@ -648,14 +665,29 @@ export class InvoicesService {
   }
 
   /**
-   * Get special day for a specific date
+   * Get the special day matching a specific date, optionally honoring the
+   * project-level disable flag. When `projectId` is supplied and the project
+   * has a ProjectSpecialDayRate row with `isEnabled = false` for the matching
+   * special day, this returns `null` — i.e. the special day is treated as
+   * non-existent for that project.
    */
-  private async getSpecialDayForDate(date: string): Promise<SpecialDay | null> {
+  private async getSpecialDayForDate(
+    date: string,
+    projectId?: number,
+  ): Promise<SpecialDay | null> {
     const specialDays = await this.specialDayRepository.find({
       where: { isActive: true },
     });
 
+    // Pre-compute the set of disabled special-day IDs for this project so the
+    // per-day loop stays cheap.
+    const disabledIds = projectId
+      ? await this.getDisabledSpecialDayIdsForProject(projectId)
+      : new Set<number>();
+
     for (const specialDay of specialDays) {
+      if (disabledIds.has(specialDay.id)) continue;
+
       const targetDate = new Date(date);
       const start = new Date(specialDay.startDate);
       const end = specialDay.endDate ? new Date(specialDay.endDate) : start;
@@ -666,6 +698,24 @@ export class InvoicesService {
     }
 
     return null;
+  }
+
+  private async getDisabledSpecialDayIdsForProject(
+    projectId: number,
+  ): Promise<Set<number>> {
+    const rows = await this.projectSpecialDayRateRepository.find({
+      where: { projectId, isEnabled: false },
+    });
+    return new Set(rows.map((r) => r.specialDayId));
+  }
+
+  private async getDisabledRateVariantIdsForProject(
+    projectId: number,
+  ): Promise<Set<number>> {
+    const rows = await this.projectRateVariantRateRepository.find({
+      where: { projectId, isEnabled: false },
+    });
+    return new Set(rows.map((r) => r.rateVariantId));
   }
 
   /**

@@ -173,10 +173,14 @@ export class TimesheetsService {
     }
 
     // ---- BATCH: Pre-fetch special day rates for the entire month ----
+    // Pass projectId so any special day disabled for this project (via
+    // ProjectSpecialDayRate.isEnabled=false) is excluded from the map and
+    // does not force job-status / billing rules on this project.
     const specialDayRatesMap =
       await this.specialDaysService.getSpecialDayRatesForRange(
         startDate,
         endDate,
+        project.id,
       );
 
     // Pre-compute day-of-week names for each day in the month (avoids repeated Date operations)
@@ -270,19 +274,16 @@ export class TimesheetsService {
           continue;
         }
 
-        // Determine if employee should appear in timesheet for this date
+        // Determine if employee should appear in timesheet for this date.
+        // Business rule: idle = demobilized + no project. Idle employees must NEVER
+        // appear on any project's monthly timesheet; they only show up in the
+        // virtual "Idle Employees" timesheet (see getMonthlyIdleTimesheetData).
+        // If a legacy record has mobStatus=MOBILIZED with jobStatus=IDLE, treat it
+        // as not-on-this-project for rendering purposes.
         const isMobilizedToProject =
           effectiveMob &&
           effectiveMob.mobStatus === MobStatus.MOBILIZED &&
-          effectiveMob.projectId === project.id;
-
-        // An idle employee on the project: must be MOBILIZED (not DEMOBILIZED) with IDLE job status.
-        // A DEMOBILIZED record with jobStatus IDLE means the employee LEFT the project as idle,
-        // not that they are idle on the project.
-        const isIdleEmployee =
-          effectiveMob &&
-          effectiveMob.mobStatus === MobStatus.MOBILIZED &&
-          effectiveMob.jobStatus === JobStatus.IDLE &&
+          effectiveMob.jobStatus !== JobStatus.IDLE &&
           effectiveMob.projectId === project.id;
 
         const hasSavedHours =
@@ -292,7 +293,6 @@ export class TimesheetsService {
         // If the employee is demobilized (carried forward from earlier) and has no saved data, skip
         if (
           !isMobilizedToProject &&
-          !isIdleEmployee &&
           !hasSavedHours &&
           !hasSavedEntry
         ) {

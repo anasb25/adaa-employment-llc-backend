@@ -5,6 +5,7 @@ import {
   IsInt,
   IsIn,
   IsArray,
+  IsBoolean,
   IsNumber,
   Min,
   ValidateNested,
@@ -19,6 +20,10 @@ export class ProjectSpecialDayRateDto {
   @IsNumber()
   @Min(0)
   clientRateMultiplier: number;
+
+  @IsBoolean()
+  @IsOptional()
+  isEnabled?: boolean;
 }
 
 export class ProjectRateVariantRateDto {
@@ -28,6 +33,10 @@ export class ProjectRateVariantRateDto {
   @IsNumber()
   @Min(0)
   clientRateMultiplier: number;
+
+  @IsBoolean()
+  @IsOptional()
+  isEnabled?: boolean;
 }
 
 export class CreateProjectDto {

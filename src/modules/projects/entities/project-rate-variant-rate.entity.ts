@@ -34,5 +34,14 @@ export class ProjectRateVariantRate extends BaseEntity {
     comment: 'Client rate multiplier for this rate variant on this project (e.g., 1.10 = 110%)',
   })
   clientRateMultiplier: number;
+
+  @Column({
+    type: 'boolean',
+    default: true,
+    comment:
+      'When false, the rate variant is not applied to this project ' +
+      '(the variant is skipped during invoice and payroll calculations).',
+  })
+  isEnabled: boolean;
 }
 

@@ -192,12 +192,14 @@ export class ProjectsService {
       );
     }
 
-    // Create rate entities
+    // Create rate entities. When a row is present but `isEnabled` is not set,
+    // default to `true` to match the entity-level default.
     const rateEntities = rates.map((rate) =>
       this.projectSpecialDayRateRepository.create({
         projectId,
         specialDayId: rate.specialDayId,
         clientRateMultiplier: rate.clientRateMultiplier,
+        isEnabled: rate.isEnabled ?? true,
       }),
     );
 
@@ -222,12 +224,12 @@ export class ProjectsService {
       );
     }
 
-    // Create rate entities
     const rateEntities = rates.map((rate) =>
       this.projectRateVariantRateRepository.create({
         projectId,
         rateVariantId: rate.rateVariantId,
         clientRateMultiplier: rate.clientRateMultiplier,
+        isEnabled: rate.isEnabled ?? true,
       }),
     );
 

@@ -4,7 +4,7 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between, LessThanOrEqual, MoreThanOrEqual } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import { SpecialDay, SpecialDayType } from './entities/special-day.entity';
 import { CreateSpecialDayDto } from './dto/create-special-day.dto';
 import { UpdateSpecialDayDto } from './dto/update-special-day.dto';
@@ -137,36 +137,63 @@ export class SpecialDaysService {
   }
 
   /**
-   * Check if a given date falls within any special day (timezone-neutral)
+   * Check if a given date falls within any special day (timezone-neutral).
+   *
+   * @param date - The date to check
+   * @param projectId - Optional project ID. When provided, any special day that
+   *                    has been explicitly disabled for this project (via a
+   *                    ProjectSpecialDayRate row with isEnabled=false) is
+   *                    excluded from the result.
    */
-  async isSpecialDay(date: Date): Promise<SpecialDay | null> {
+  async isSpecialDay(
+    date: Date,
+    projectId?: number,
+  ): Promise<SpecialDay | null> {
     const dateStr = formatDateOnly(date);
 
-    const specialDay = await this.specialDayRepository
+    const qb = this.specialDayRepository
       .createQueryBuilder('specialDay')
       .where('specialDay.isActive = :isActive', { isActive: true })
       .andWhere(
         ':date BETWEEN specialDay.startDate AND COALESCE(specialDay.endDate, specialDay.startDate)',
-        {
-          date: dateStr,
-        },
-      )
-      .getOne();
+        { date: dateStr },
+      );
 
-    return specialDay;
+    if (projectId) {
+      // Exclude any special day explicitly disabled for this project.
+      qb.andWhere((subQb) => {
+        const sub = subQb
+          .subQuery()
+          .select('1')
+          .from(ProjectSpecialDayRate, 'psdr')
+          .where('psdr.projectId = :projectId', { projectId })
+          .andWhere('psdr.specialDayId = specialDay.id')
+          .andWhere('psdr.isEnabled = :disabledFlag', { disabledFlag: false })
+          .getQuery();
+        return `NOT EXISTS ${sub}`;
+      });
+    }
+
+    return await qb.getOne();
   }
 
   /**
-   * Get all special days within a date range (timezone-neutral)
+   * Get all special days within a date range (timezone-neutral).
+   *
+   * @param startDate - Start of the range (inclusive)
+   * @param endDate - End of the range (inclusive)
+   * @param projectId - Optional project ID. When provided, any special day
+   *                    explicitly disabled for this project is excluded.
    */
   async getSpecialDaysInRange(
     startDate: Date,
     endDate: Date,
+    projectId?: number,
   ): Promise<SpecialDay[]> {
     const startStr = formatDateOnly(startDate);
     const endStr = formatDateOnly(endDate);
 
-    return await this.specialDayRepository
+    const qb = this.specialDayRepository
       .createQueryBuilder('specialDay')
       .where('specialDay.isActive = :isActive', { isActive: true })
       .andWhere(
@@ -175,38 +202,50 @@ export class SpecialDaysService {
           start: startStr,
           end: endStr,
         },
-      )
-      .orderBy('specialDay.startDate', 'ASC')
-      .getMany();
+      );
+
+    if (projectId) {
+      qb.andWhere((subQb) => {
+        const sub = subQb
+          .subQuery()
+          .select('1')
+          .from(ProjectSpecialDayRate, 'psdr')
+          .where('psdr.projectId = :projectId', { projectId })
+          .andWhere('psdr.specialDayId = specialDay.id')
+          .andWhere('psdr.isEnabled = :disabledFlag', { disabledFlag: false })
+          .getQuery();
+        return `NOT EXISTS ${sub}`;
+      });
+    }
+
+    return await qb.orderBy('specialDay.startDate', 'ASC').getMany();
   }
 
   /**
-   * Get special day rates and rules for a specific date
-   * This is the main utility method to be used by other modules (mobilizations, timesheets, billing)
+   * Get special day rates and rules for a specific date.
+   * This is the main utility method used by other modules (mobilizations,
+   * timesheets, billing).
    *
    * @param date - The date to check
-   * @param projectId - Optional project ID. If provided, uses project-specific client rate multiplier if available, otherwise falls back to global rate.
+   * @param projectId - Optional project ID. When provided:
+   *                    1. If the project has an override row with isEnabled=false
+   *                       for the matching special day, the special day is
+   *                       treated as NOT APPLICABLE (returns a no-special-day result).
+   *                    2. Otherwise, the project-specific client rate multiplier
+   *                       is used when available; falls back to the global rate.
    *                    Employee rates always come from the global special day.
    */
   async getSpecialDayRates(
     date: Date,
     projectId?: number,
   ): Promise<SpecialDayRates> {
-    const specialDay = await this.isSpecialDay(date);
+    // When projectId is provided, isSpecialDay already filters out disabled overrides.
+    const specialDay = await this.isSpecialDay(date, projectId);
 
     if (!specialDay) {
-      return {
-        isSpecialDay: false,
-        specialDay: null,
-        clientRateMultiplier: 1.0,
-        employeeAdditionalAmount: 0,
-        isDefaultOff: false,
-        isMandatoryOff: false,
-        dayType: null,
-      };
+      return this.buildNoSpecialDayRates();
     }
 
-    // Get client rate multiplier - project-specific takes precedence, then global, then 1.0
     let clientRateMultiplier = Number(specialDay.clientRateMultiplier) || 1.0;
     if (projectId) {
       const projectRate = await this.projectSpecialDayRateRepository.findOne({
@@ -215,12 +254,16 @@ export class SpecialDaysService {
           specialDayId: specialDay.id,
         },
       });
+      // A disabled row was already excluded by isSpecialDay, so any row found
+      // here is an enabled override whose multiplier should take precedence.
       if (projectRate) {
         clientRateMultiplier = Number(projectRate.clientRateMultiplier);
       }
     }
 
-    const employeeAdditionalAmount = Number(specialDay.employeeAdditionalAmount || 0);
+    const employeeAdditionalAmount = Number(
+      specialDay.employeeAdditionalAmount || 0,
+    );
 
     return {
       isSpecialDay: true,
@@ -234,22 +277,46 @@ export class SpecialDaysService {
   }
 
   /**
-   * Batch get special day rates for multiple dates (timezone-neutral)
-   * More efficient than calling getSpecialDayRates multiple times
+   * Batch get special day rates for multiple dates (timezone-neutral).
+   * More efficient than calling `getSpecialDayRates` per day.
+   *
+   * @param projectId - Optional project ID. When provided, any special day
+   *                    disabled for this project via ProjectSpecialDayRate
+   *                    is excluded, and enabled overrides provide the client
+   *                    rate multiplier.
    */
   async getSpecialDayRatesForRange(
     startDate: Date,
     endDate: Date,
+    projectId?: number,
   ): Promise<Map<string, SpecialDayRates>> {
-    const specialDays = await this.getSpecialDaysInRange(startDate, endDate);
-    const ratesMap = new Map<string, SpecialDayRates>();
+    const specialDays = await this.getSpecialDaysInRange(
+      startDate,
+      endDate,
+      projectId,
+    );
 
-    // Create a map of all dates in range using timezone-neutral date handling
+    // Pre-load all enabled project overrides for the matching special days in
+    // one query (when projectId is provided).
+    const overrideById = new Map<number, number>();
+    if (projectId && specialDays.length > 0) {
+      const overrides = await this.projectSpecialDayRateRepository.find({
+        where: {
+          projectId,
+          specialDayId: In(specialDays.map((sd) => sd.id)),
+          isEnabled: true,
+        },
+      });
+      for (const o of overrides) {
+        overrideById.set(o.specialDayId, Number(o.clientRateMultiplier));
+      }
+    }
+
+    const ratesMap = new Map<string, SpecialDayRates>();
     const currentDate = new Date(startDate);
     while (currentDate <= endDate) {
       const dateStr = formatDateOnly(currentDate);
 
-      // Find if this date falls within any special day (using string comparison)
       const applicableSpecialDay = specialDays.find((sd) => {
         const sdStart = sd.startDate;
         const sdEnd = sd.endDate || sdStart;
@@ -257,11 +324,16 @@ export class SpecialDaysService {
       });
 
       if (applicableSpecialDay) {
+        const overrideMult = overrideById.get(applicableSpecialDay.id);
+        const clientRateMultiplier =
+          overrideMult !== undefined
+            ? overrideMult
+            : Number(applicableSpecialDay.clientRateMultiplier) || 1.0;
+
         ratesMap.set(dateStr, {
           isSpecialDay: true,
           specialDay: applicableSpecialDay,
-          clientRateMultiplier:
-            Number(applicableSpecialDay.clientRateMultiplier) || 1.0,
+          clientRateMultiplier,
           employeeAdditionalAmount: Number(
             applicableSpecialDay.employeeAdditionalAmount || 0,
           ),
@@ -271,20 +343,24 @@ export class SpecialDaysService {
           dayType: applicableSpecialDay.dayType,
         });
       } else {
-        ratesMap.set(dateStr, {
-          isSpecialDay: false,
-          specialDay: null,
-          clientRateMultiplier: 1.0,
-          employeeAdditionalAmount: 0,
-          isDefaultOff: false,
-          isMandatoryOff: false,
-          dayType: null,
-        });
+        ratesMap.set(dateStr, this.buildNoSpecialDayRates());
       }
 
       currentDate.setDate(currentDate.getDate() + 1);
     }
 
     return ratesMap;
+  }
+
+  private buildNoSpecialDayRates(): SpecialDayRates {
+    return {
+      isSpecialDay: false,
+      specialDay: null,
+      clientRateMultiplier: 1.0,
+      employeeAdditionalAmount: 0,
+      isDefaultOff: false,
+      isMandatoryOff: false,
+      dayType: null,
+    };
   }
 }

@@ -38,6 +38,26 @@ import { TimesheetsService } from '../timesheets/timesheets.service';
 export class MobilizationsService {
   private readonly logger = new Logger(MobilizationsService.name);
 
+  /**
+   * Business rule: an idle employee is, by definition, demobilized and not
+   * assigned to any project. Any write path (create / bulk / update / import)
+   * must normalize `{ jobStatus: IDLE }` to `{ mobStatus: DEMOBILIZED, projectId: null }`
+   * so idle hours never leak into a project timesheet, invoice, or report.
+   */
+  private normalizeIdleMobilization<
+    T extends {
+      jobStatus?: JobStatus | string | null;
+      mobStatus?: MobStatus | string | null;
+      projectId?: number | null;
+    },
+  >(data: T): T {
+    if (data.jobStatus === JobStatus.IDLE || data.jobStatus === 'idle') {
+      data.mobStatus = MobStatus.DEMOBILIZED;
+      data.projectId = null;
+    }
+    return data;
+  }
+
   constructor(
     @InjectRepository(Mobilization)
     private mobilizationRepository: Repository<Mobilization>,
@@ -90,8 +110,9 @@ export class MobilizationsService {
     // Note: Multiple mobilization records can exist for the same employee
     // This allows tracking mobilization history over time
 
+    const normalizedDto = this.normalizeIdleMobilization({ ...createDto });
     const mobilization = this.mobilizationRepository.create({
-      ...createDto,
+      ...normalizedDto,
       createdBy,
     });
 
@@ -141,16 +162,18 @@ export class MobilizationsService {
     }
 
     // Create mobilizations for all employees
-    const mobilizations = createDto.employeeIds.map((employeeId) => ({
-      employeeId,
-      mobilizedTradeId: createDto.mobilizedTradeId,
-      projectId: createDto.projectId,
-      mobStatus: createDto.mobStatus,
-      jobStatus: createDto.jobStatus,
-      actionDate: createDto.actionDate,
-      notes: createDto.notes,
-      createdBy,
-    }));
+    const mobilizations = createDto.employeeIds.map((employeeId) =>
+      this.normalizeIdleMobilization({
+        employeeId,
+        mobilizedTradeId: createDto.mobilizedTradeId,
+        projectId: createDto.projectId,
+        mobStatus: createDto.mobStatus,
+        jobStatus: createDto.jobStatus,
+        actionDate: createDto.actionDate,
+        notes: createDto.notes,
+        createdBy,
+      }),
+    );
 
     const entities = this.mobilizationRepository.create(mobilizations);
 
@@ -430,9 +453,14 @@ export class MobilizationsService {
     }
 
     // We're carrying forward a status from a previous date
-    // Check for special days first (higher priority than project off days)
+    // Check for special days first (higher priority than project off days).
+    // Pass the carried-forward project so a special day that has been disabled
+    // for the project (ProjectSpecialDayRate.isEnabled=false) doesn't force OFF.
     const specialDayRates =
-      await this.specialDaysService.getSpecialDayRates(targetDate);
+      await this.specialDaysService.getSpecialDayRates(
+        targetDate,
+        latestMob.projectId ?? undefined,
+      );
 
     if (specialDayRates.isSpecialDay) {
       // Handle special day logic based on day type
@@ -597,8 +625,16 @@ export class MobilizationsService {
       }
     }
 
-    await this.mobilizationRepository.update(id, {
+    // Normalize: if the effective jobStatus after this update is IDLE, force
+    // mobStatus=DEMOBILIZED and projectId=null regardless of what the caller sent.
+    const effectiveJobStatus = updateDto.jobStatus ?? existing.jobStatus;
+    const normalizedUpdate = this.normalizeIdleMobilization({
       ...updateDto,
+      jobStatus: effectiveJobStatus,
+    });
+
+    await this.mobilizationRepository.update(id, {
+      ...normalizedUpdate,
       updatedBy,
     });
 
@@ -889,15 +925,19 @@ export class MobilizationsService {
             existingMobilization.notes !== mappedData.notes;
 
           if (hasChanged) {
-            // Update existing mobilization
-            await this.mobilizationRepository.update(existingMobilization.id, {
+            // Update existing mobilization (normalized: idle => demobilized + null project)
+            const updatePayload = this.normalizeIdleMobilization({
               mobilizedTradeId: mobilizedTrade.id,
               projectId: project?.id || null,
               mobStatus: mappedData.mobStatus as MobStatus,
-              jobStatus: mappedData.jobStatus,
+              jobStatus: mappedData.jobStatus as JobStatus,
               notes: mappedData.notes,
               updatedBy: createdBy,
             });
+            await this.mobilizationRepository.update(
+              existingMobilization.id,
+              updatePayload,
+            );
 
             const updated = await this.mobilizationRepository.findOne({
               where: { id: existingMobilization.id },
@@ -951,16 +991,18 @@ export class MobilizationsService {
           if (isDifferentFromPrevious) {
             // Create new mobilization (actual change occurred)
             // actionDate is already a YYYY-MM-DD string from Excel import
-            const newMobilization = this.mobilizationRepository.create({
+            const createPayload = this.normalizeIdleMobilization({
               employeeId: employee.id,
               mobilizedTradeId: mobilizedTrade.id,
               projectId: project?.id || null,
               mobStatus: mappedData.mobStatus as MobStatus,
-              jobStatus: mappedData.jobStatus,
+              jobStatus: mappedData.jobStatus as JobStatus,
               actionDate: mappedData.actionDate as any, // TypeORM will handle the transformer
               notes: mappedData.notes,
               createdBy,
             });
+            const newMobilization =
+              this.mobilizationRepository.create(createPayload);
 
             mobilization =
               await this.mobilizationRepository.save(newMobilization);
