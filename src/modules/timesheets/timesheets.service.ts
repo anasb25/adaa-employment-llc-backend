@@ -89,6 +89,11 @@ export class TimesheetsService {
     private specialDaysService: SpecialDaysService,
   ) {}
 
+  /** Calendar Sunday for YYYY-MM-DD (UTC); matches parseDateOnly. */
+  private isUtcSunday(dateStr: string): boolean {
+    return parseDateOnly(dateStr).getUTCDay() === 0;
+  }
+
   /**
    * Get monthly project timesheet with carry-forward logic
    */
@@ -435,6 +440,7 @@ export class TimesheetsService {
   /**
    * Get monthly timesheet for idle employees (not on any project; job status idle).
    * One timesheet per month with projectId = null; employees are those with at least one idle day.
+   * Business rule: Sunday is always off (0 hours, status off); never synced to mobilizations.
    */
   async getMonthlyIdleTimesheetData(
     month: string,
@@ -510,17 +516,24 @@ export class TimesheetsService {
             e.employeeId === employeeId && formatDateOnly(e.date) === dateStr,
         );
 
-        const hours = existingEntry
+        const isSunday = this.isUtcSunday(dateStr);
+        let hours = existingEntry
           ? Number(existingEntry.hoursWorked)
           : this.getDefaultHoursForStatus(JobStatus.IDLE);
-        const jobStatus = existingEntry?.jobStatus ?? JobStatus.IDLE;
+        let jobStatus: string =
+          existingEntry?.jobStatus ?? JobStatus.IDLE;
+
+        if (isSunday) {
+          hours = 0;
+          jobStatus = JobStatus.OFF;
+        }
 
         dailyHours.push({
           date: dateStr,
           day,
           hoursWorked: hours,
           jobStatus,
-          isOffDay: false,
+          isOffDay: isSunday,
           notes: existingEntry?.notes || null,
           entryId: existingEntry?.id || null,
         });
@@ -712,6 +725,7 @@ export class TimesheetsService {
       );
     }
 
+    const isIdleTimesheet = timesheet.projectId === null;
     const savedEntries: TimesheetEntry[] = [];
 
     for (const entryDto of saveEntriesDto.entries) {
@@ -720,6 +734,13 @@ export class TimesheetsService {
 
       // Check if entry exists (date is now a string)
       const dateString = formatDateOnly(entryDate);
+      let hoursWorked = entryDto.hoursWorked;
+      let jobStatus = entryDto.jobStatus;
+      if (isIdleTimesheet && this.isUtcSunday(dateString)) {
+        hoursWorked = 0;
+        jobStatus = JobStatus.OFF;
+      }
+
       const existingEntry = await this.entryRepository.findOne({
         where: {
           timesheetId,
@@ -730,8 +751,8 @@ export class TimesheetsService {
 
       let entry: TimesheetEntry;
       if (existingEntry) {
-        existingEntry.hoursWorked = entryDto.hoursWorked;
-        existingEntry.jobStatus = entryDto.jobStatus;
+        existingEntry.hoursWorked = hoursWorked;
+        existingEntry.jobStatus = jobStatus;
         existingEntry.notes = entryDto.notes || null;
         existingEntry.tradeInSiteId = entryDto.tradeInSiteId || null;
         existingEntry.updatedBy = updatedBy;
@@ -741,8 +762,8 @@ export class TimesheetsService {
           timesheetId,
           employeeId: entryDto.employeeId,
           date: dateString as any,
-          hoursWorked: entryDto.hoursWorked,
-          jobStatus: entryDto.jobStatus,
+          hoursWorked,
+          jobStatus,
           notes: entryDto.notes,
           tradeInSiteId: entryDto.tradeInSiteId,
           createdBy: updatedBy,
@@ -755,11 +776,15 @@ export class TimesheetsService {
       // Sync to mobilization when the entry's status differs from the effective
       // mobilization. The sync function only reacts to status changes (not project),
       // so saving default entries won't break carry-forward logic.
-      await this.syncMobilizationFromTimesheetEntry(
-        savedEntry,
-        timesheet.projectId ?? null,
-        updatedBy,
-      );
+      // Idle-sheet Sundays stay off visually only — never write them to mobilization
+      // (would flip that day away from IDLE and hide the idle row incorrectly).
+      if (!(isIdleTimesheet && this.isUtcSunday(dateString))) {
+        await this.syncMobilizationFromTimesheetEntry(
+          savedEntry,
+          timesheet.projectId ?? null,
+          updatedBy,
+        );
+      }
     }
 
     return savedEntries;
@@ -851,6 +876,10 @@ export class TimesheetsService {
     try {
       // entry.date is now a string (YYYY-MM-DD) thanks to DateOnlyTransformer
       const dateStr = entry.date;
+      if (projectId === null && this.isUtcSunday(dateStr)) {
+        return;
+      }
+
       const entryDate = parseDateOnly(dateStr);
 
       // Define statuses that should trigger automatic demobilization
