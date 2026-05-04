@@ -20,7 +20,7 @@ export enum TimesheetStatus {
 @Entity('timesheets')
 export class Timesheet extends BaseEntity {
   @Column({ type: 'integer', nullable: true })
-  projectId: number | null; // null = "Idle Employees" timesheet for the month
+  projectId: number | null; // null = idle + annual-leave monthly sheet
 
   @Column({ length: 7 }) // Format: YYYY-MM
   month: string;

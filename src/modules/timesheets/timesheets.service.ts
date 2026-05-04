@@ -40,10 +40,10 @@ import {
   TradeUtilization,
 } from './dto/daily-utilization.dto';
 
-/** Virtual project for the "Idle Employees" accordion (no real project row) */
+/** Virtual project for idle & annual-leave grids (monthly timesheet projectId=null) */
 export const IDLE_PROJECT_VIRTUAL = {
   id: 0,
-  name: 'Idle Employees',
+  name: 'Idle & annual leave',
   client: { id: 0, name: '' },
 } as const;
 
@@ -282,7 +282,7 @@ export class TimesheetsService {
         // Determine if employee should appear in timesheet for this date.
         // Business rule: idle = demobilized + no project. Idle employees must NEVER
         // appear on any project's monthly timesheet; they only show up in the
-        // virtual "Idle Employees" timesheet (see getMonthlyIdleTimesheetData).
+        // virtual idle + annual-leave timesheet (see getMonthlyIdleTimesheetData).
         // If a legacy record has mobStatus=MOBILIZED with jobStatus=IDLE, treat it
         // as not-on-this-project for rendering purposes.
         const isMobilizedToProject =
@@ -428,14 +428,15 @@ export class TimesheetsService {
       (r): r is MonthlyProjectTimesheetData => r !== null,
     );
 
-    // Append "Idle Employees" timesheet at the end (one accordion for idle employee-days)
+    // Append idle + annual-leave timesheet at the end (projectId=null; one accordion)
     const idleData = await this.getMonthlyIdleTimesheetData(month);
     return [...projectResults, idleData];
   }
 
   /**
-   * Get monthly timesheet for idle employees (not on any project; job status idle).
-   * One timesheet per month with projectId = null; employees are those with at least one idle day.
+   * Monthly timesheet with projectId = null: idle employees and demobilized annual-leave days.
+   * Includes anyone with at least one idle day OR one annual_leave day carried from mobilizations.
+   * Needed so approve flow can deduct annual_leave_balance from approved annual_leave entries.
    * Business rule: Sunday is always off (0 hours, status off); never synced to mobilizations.
    */
   async getMonthlyIdleTimesheetData(
@@ -509,7 +510,16 @@ export class TimesheetsService {
           effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
           effectiveMob.jobStatus === JobStatus.IDLE;
 
-        if (!isIdleDay) continue;
+        const isAnnualLeaveDay =
+          effectiveMob &&
+          effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
+          effectiveMob.jobStatus === JobStatus.ANNUAL_LEAVE;
+
+        if (!isIdleDay && !isAnnualLeaveDay) continue;
+
+        const baselineStatus = isAnnualLeaveDay
+          ? JobStatus.ANNUAL_LEAVE
+          : JobStatus.IDLE;
 
         const existingEntry = timesheet?.entries?.find(
           (e) =>
@@ -519,8 +529,8 @@ export class TimesheetsService {
         const isSunday = this.isUtcSunday(dateStr);
         let hours = existingEntry
           ? Number(existingEntry.hoursWorked)
-          : this.getDefaultHoursForStatus(JobStatus.IDLE);
-        let jobStatus: string = existingEntry?.jobStatus ?? JobStatus.IDLE;
+          : this.getDefaultHoursForStatus(baselineStatus);
+        let jobStatus: string = existingEntry?.jobStatus ?? baselineStatus;
 
         if (isSunday) {
           hours = 0;
@@ -655,7 +665,7 @@ export class TimesheetsService {
   }
 
   /**
-   * Create or get a timesheet. When projectId is null/undefined, returns the "idle employees" timesheet for the month.
+   * Create or get a timesheet. When projectId is null/undefined, returns the monthly idle + annual-leave sheet.
    */
   async createOrGetTimesheet(
     createTimesheetDto: CreateTimesheetDto,
