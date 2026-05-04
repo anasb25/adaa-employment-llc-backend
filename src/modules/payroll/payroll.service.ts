@@ -1169,7 +1169,8 @@ export class PayrollService {
   /**
    * Calculate net salary from payroll data (hours-based only).
    * Fixed monthly salary (basic/HRA/other on employee) is not included — it is the 260h entitlement reference only.
-   * Net Salary = Total Gross Salary (from hours) + Allowances - Deductions - Absent Days Deductible
+   * Net Salary = Total Gross Salary (from hours) + Allowances - Deductions (from import).
+   * `absentDaysDeductible` is stored for records only and does not reduce net pay.
    */
   private calculateNetSalary(
     payrollData: CreatePayrollDto | Payroll,
@@ -1194,11 +1195,7 @@ export class PayrollService {
       );
     }
 
-    // Add absent days deductible to deductions
-    const absentDaysDeductible = Number(payrollData.absentDaysDeductible || 0);
-
-    const netSalary =
-      grossSalary + totalAllowances - totalDeductions - absentDaysDeductible;
+    const netSalary = grossSalary + totalAllowances - totalDeductions;
 
     return Math.round(netSalary * 100) / 100; // Round to 2 decimal places
   }
