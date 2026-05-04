@@ -40,6 +40,18 @@ export interface ImportResult {
   errors: string[];
 }
 
+/** One calendar row for payroll; sourceProjectId applies project-specific rate overrides */
+type PayrollComputationDay = {
+  date: string;
+  day: number;
+  hoursWorked: number;
+  isOffDay: boolean;
+  jobStatus: string | null;
+  notes: string | null;
+  entryId?: number | null;
+  sourceProjectId?: number;
+};
+
 @Injectable()
 export class PayrollService {
   constructor(
@@ -227,16 +239,8 @@ export class PayrollService {
    * Uses the same timesheet data structure that displays correctly in the UI
    */
   async calculatePayrollForMonth(month: string): Promise<Payroll[]> {
-    // Get all approved timesheets for the month
-    const approvedTimesheets = await this.timesheetRepository.find({
-      where: {
-        month,
-        status: TimesheetStatus.APPROVED,
-      },
-      relations: ['project'],
-    });
-
-    if (approvedTimesheets.length === 0) {
+    const projectIds = await this.getApprovedProjectIdsForMonth(month);
+    if (projectIds.length === 0) {
       throw new BadRequestException(
         `No approved timesheets found for month ${month}`,
       );
@@ -245,20 +249,15 @@ export class PayrollService {
     const payrolls: Payroll[] = [];
     const seenPayrollIds = new Set<number>();
 
-    // 1) Process each approved project timesheet
-    for (const timesheet of approvedTimesheets) {
-      if (timesheet.projectId == null) continue;
-      const projectPayrolls = await this.calculatePayrollForProject(
-        timesheet.projectId,
-        month,
-      );
-      for (const p of projectPayrolls) {
-        payrolls.push(p);
-        seenPayrollIds.add(p.id);
-      }
+    const projectPayrolls = await this.savePayrollsFromConsolidatedMap(
+      month,
+      projectIds,
+    );
+    for (const p of projectPayrolls) {
+      payrolls.push(p);
+      seenPayrollIds.add(p.id);
     }
 
-    // 2) Process approved idle timesheet (add idle days to payroll; merge into existing or create)
     const idlePayrolls = await this.calculatePayrollFromIdleTimesheet(month);
     for (const p of idlePayrolls) {
       if (!seenPayrollIds.has(p.id)) {
@@ -384,7 +383,6 @@ export class PayrollService {
     projectId: number,
     month: string,
   ): Promise<Payroll[]> {
-    // Use the existing timesheet service to get the properly formatted data with carry-forward
     const timesheetData =
       await this.timesheetsService.getMonthlyProjectTimesheet(projectId, month);
 
@@ -400,35 +398,183 @@ export class PayrollService {
       );
     }
 
-    const payrolls: Payroll[] = [];
-    const warnings: string[] = [];
+    const projectIds = await this.getApprovedProjectIdsForMonth(month);
+    return this.savePayrollsFromConsolidatedMap(month, projectIds);
+  }
 
-    // Calculate payroll for each employee using the timesheet data
-    for (const employee of timesheetData.employees) {
+  /** Approved non-idle projects for payroll consolidation */
+  private async getApprovedProjectIdsForMonth(month: string): Promise<number[]> {
+    const rows = await this.timesheetRepository.find({
+      where: { month, status: TimesheetStatus.APPROVED },
+    });
+    return [
+      ...new Set(
+        rows
+          .map((r) => r.projectId)
+          .filter((id): id is number => id != null && id > 0),
+      ),
+    ];
+  }
+
+  /**
+   * When the same calendar day appears from multiple sources, keep one coherent row so
+   * payroll is idempotent across re-runs and duplicate project passes do not inflate hours.
+   */
+  private accumulatePayrollDayForDate(
+    byDate: Map<string, PayrollComputationDay>,
+    projectId: number,
+    day: {
+      date: string;
+      day: number;
+      hoursWorked: number;
+      jobStatus: string | null;
+      isOffDay: boolean;
+      notes: string | null;
+      entryId?: number | null;
+    },
+  ): void {
+    const next: PayrollComputationDay = {
+      date: day.date,
+      day: day.day,
+      hoursWorked: Number(day.hoursWorked),
+      jobStatus: day.jobStatus,
+      isOffDay: day.isOffDay,
+      notes: day.notes,
+      entryId: day.entryId ?? null,
+      sourceProjectId: projectId,
+    };
+
+    const prev = byDate.get(day.date);
+    if (!prev) {
+      byDate.set(day.date, next);
+      return;
+    }
+
+    const ph = Number(prev.hoursWorked);
+    const nh = Number(next.hoursWorked);
+    const prevSt = (prev.jobStatus ?? '').toLowerCase();
+    const nextSt = (next.jobStatus ?? '').toLowerCase();
+
+    const sameSnapshot =
+      Math.abs(ph - nh) < 1e-6 &&
+      prevSt === nextSt &&
+      prev.isOffDay === next.isOffDay;
+
+    if (sameSnapshot) {
+      return;
+    }
+
+    const prevHasEntry = prev.entryId != null;
+    const nextHasEntry = next.entryId != null;
+
+    if (nextHasEntry && !prevHasEntry) {
+      byDate.set(day.date, next);
+      return;
+    }
+    if (prevHasEntry && !nextHasEntry) {
+      return;
+    }
+
+    if (nh > ph) {
+      byDate.set(day.date, next);
+    }
+  }
+
+  private async buildConsolidatedEmployeeDailyForMonth(
+    month: string,
+    projectIds: number[],
+  ): Promise<{
+    byEmployee: Map<
+      number,
+      {
+        skillId: number;
+        name: string;
+        projectIds: Set<number>;
+        dailyByDate: Map<string, PayrollComputationDay>;
+      }
+    >;
+    projectNameById: Map<number, string>;
+  }> {
+    const byEmployee = new Map<
+      number,
+      {
+        skillId: number;
+        name: string;
+        projectIds: Set<number>;
+        dailyByDate: Map<string, PayrollComputationDay>;
+      }
+    >();
+    const projectNameById = new Map<number, string>();
+
+    for (const projectId of projectIds) {
+      const data =
+        await this.timesheetsService.getMonthlyProjectTimesheet(projectId, month);
+      if (
+        !data.timesheet ||
+        data.timesheet.status !== TimesheetStatus.APPROVED
+      ) {
+        continue;
+      }
+      projectNameById.set(projectId, data.project.name);
+
+      for (const emp of data.employees) {
+        let row = byEmployee.get(emp.employeeId);
+        if (!row) {
+          row = {
+            skillId: emp.skillId,
+            name: emp.name,
+            projectIds: new Set<number>(),
+            dailyByDate: new Map<string, PayrollComputationDay>(),
+          };
+          byEmployee.set(emp.employeeId, row);
+        }
+        row.projectIds.add(projectId);
+        for (const day of emp.dailyHours) {
+          this.accumulatePayrollDayForDate(row.dailyByDate, projectId, day);
+        }
+      }
+    }
+
+    return { byEmployee, projectNameById };
+  }
+
+  private async savePayrollsFromConsolidatedMap(
+    month: string,
+    projectIds: number[],
+  ): Promise<Payroll[]> {
+    const { byEmployee, projectNameById } =
+      await this.buildConsolidatedEmployeeDailyForMonth(month, projectIds);
+    const payrolls: Payroll[] = [];
+
+    for (const [employeeId, empRow] of byEmployee) {
       try {
+        const dailyHours = [...empRow.dailyByDate.values()].sort((a, b) =>
+          a.date.localeCompare(b.date),
+        );
+        if (dailyHours.length === 0) continue;
+
         const calculations = await this.calculateEmployeePayrollFromTimesheetData(
-          employee.employeeId,
-          employee.skillId,
-          employee.dailyHours,
-          projectId,
+          employeeId,
+          empRow.skillId,
+          dailyHours,
         );
 
-        // Check if payroll already exists to preserve allowances/deductions
         const existingPayroll = await this.payrollRepository.findOne({
-          where: {
-            employeeId: employee.employeeId,
-            month,
-          },
+          where: { employeeId, month },
         });
 
         const missingRate = calculations.baseHourlyRate === 0;
-        const notePrefix = `Calculated from approved timesheet for project ${timesheetData.project.name}`;
+        const projectNamesLabel = [...empRow.projectIds]
+          .map((id) => projectNameById.get(id) || `Project #${id}`)
+          .sort()
+          .join(', ');
+        const notePrefix = `Calculated from approved timesheets (projects: ${projectNamesLabel})`;
         const noteWarning = missingRate
-          ? ` [Warning: No cost_price found for skill ${employee.skillId}, using rate 0]`
+          ? ` [Warning: No cost_price found for skill ${empRow.skillId}, using rate 0]`
           : '';
 
         const payrollData: CreatePayrollDto = {
-          employeeId: employee.employeeId,
+          employeeId,
           month,
           totalHours: calculations.totalHours,
           totalOtHours: calculations.totalOtHours,
@@ -438,18 +584,14 @@ export class PayrollService {
           hoursBreakdown: calculations.hoursBreakdown,
           baseHourlyRate: calculations.baseHourlyRate,
           totalGrossSalary: calculations.totalGrossSalary,
-          // Preserve existing allowances and deductions if they exist
           allowances: existingPayroll?.allowances || undefined,
           otherDeductions: existingPayroll?.otherDeductions || undefined,
           notes: notePrefix + noteWarning,
         };
 
-        const payroll = await this.createOrUpdate(payrollData);
-        payrolls.push(payroll);
-      } catch (error: any) {
-        warnings.push(
-          `Skipped employee ${employee.employeeId} (${employee.name}): ${error.message}`,
-        );
+        payrolls.push(await this.createOrUpdate(payrollData));
+      } catch {
+        continue;
       }
     }
 
@@ -632,14 +774,7 @@ export class PayrollService {
   private async calculateEmployeePayrollFromTimesheetData(
     employeeId: number,
     skillId: number | null | undefined,
-    dailyHours: Array<{
-      date: string;
-      day: number;
-      hoursWorked: number;
-      isOffDay: boolean;
-      jobStatus: string | null;
-      notes: string | null;
-    }>,
+    dailyHours: PayrollComputationDay[],
     projectId?: number,
   ) {
     let totalHours = 0;
@@ -686,6 +821,7 @@ export class PayrollService {
     for (const dayData of dailyHours) {
       const hours = Number(dayData.hoursWorked);
       const jobStatus = dayData.jobStatus?.toLowerCase() || '';
+      const rateProjectId = dayData.sourceProjectId ?? projectId;
 
       // Handle idle days first (before checking demobilization)
       if (jobStatus === 'idle') {
@@ -724,7 +860,7 @@ export class PayrollService {
       // Check if this is a special day (honoring project-level disable flag).
       const specialDay = await this.getSpecialDayForDate(
         dayData.date,
-        projectId,
+        rateProjectId,
       );
 
       // If working on a special day
@@ -764,7 +900,7 @@ export class PayrollService {
         // through to the regular/base rate.
         const hoursSplit = await this.splitHoursAcrossRateVariants(
           hours,
-          projectId,
+          rateProjectId,
         );
 
         for (const { variant, hours: hoursForVariant } of hoursSplit) {

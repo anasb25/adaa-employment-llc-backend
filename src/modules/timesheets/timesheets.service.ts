@@ -296,11 +296,7 @@ export class TimesheetsService {
         const hasSavedEntry = !!existingEntry;
 
         // If the employee is demobilized (carried forward from earlier) and has no saved data, skip
-        if (
-          !isMobilizedToProject &&
-          !hasSavedHours &&
-          !hasSavedEntry
-        ) {
+        if (!isMobilizedToProject && !hasSavedHours && !hasSavedEntry) {
           // Check if the carry-forward status is DEMOBILIZED from THIS project —
           // means they left this specific project before this date.
           // We must check projectId so a demobilization from a DIFFERENT project
@@ -455,7 +451,11 @@ export class TimesheetsService {
       relations: ['entries', 'entries.employee'],
     });
 
-    const dayInfo: Array<{ dateStr: string; dayOfWeekName: string; day: number }> = [];
+    const dayInfo: Array<{
+      dateStr: string;
+      dayOfWeekName: string;
+      day: number;
+    }> = [];
     for (let day = 1; day <= daysInMonth; day++) {
       const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       const currentDate = parseDateOnly(dateStr);
@@ -520,8 +520,7 @@ export class TimesheetsService {
         let hours = existingEntry
           ? Number(existingEntry.hoursWorked)
           : this.getDefaultHoursForStatus(JobStatus.IDLE);
-        let jobStatus: string =
-          existingEntry?.jobStatus ?? JobStatus.IDLE;
+        let jobStatus: string = existingEntry?.jobStatus ?? JobStatus.IDLE;
 
         if (isSunday) {
           hours = 0;
@@ -826,7 +825,9 @@ export class TimesheetsService {
    * Remove the timesheet entry so the cell will show mobilization data (use mobilization as source of truth).
    * Call this when user chooses "Sync timesheet with mobilization".
    */
-  async removeEntryUseMobilization(entryId: number): Promise<{ message: string }> {
+  async removeEntryUseMobilization(
+    entryId: number,
+  ): Promise<{ message: string }> {
     const entry = await this.entryRepository.findOne({
       where: { id: entryId },
       relations: ['timesheet'],
@@ -848,7 +849,10 @@ export class TimesheetsService {
    * falls back to mobilization-derived data. Skips submitted/approved timesheets.
    * Called by MobilizationsService when a mobilization is created or updated.
    */
-  async syncTimesheetFromMobilization(employeeId: number, date: string): Promise<void> {
+  async syncTimesheetFromMobilization(
+    employeeId: number,
+    date: string,
+  ): Promise<void> {
     const entries = await this.entryRepository.find({
       where: { employeeId, date: date as any },
       relations: ['timesheet'],
@@ -856,7 +860,10 @@ export class TimesheetsService {
 
     for (const entry of entries) {
       const status = entry.timesheet?.status;
-      if (status === TimesheetStatus.SUBMITTED || status === TimesheetStatus.APPROVED) {
+      if (
+        status === TimesheetStatus.SUBMITTED ||
+        status === TimesheetStatus.APPROVED
+      ) {
         continue;
       }
       await this.entryRepository.remove(entry);
@@ -926,7 +933,7 @@ export class TimesheetsService {
       ) {
         this.logger.log(
           `Skipping sync for employee ${entry.employeeId} on ${dateStr}: ` +
-          `employee is on project ${currentMob.projectId}, not timesheet project ${projectId}`,
+            `employee is on project ${currentMob.projectId}, not timesheet project ${projectId}`,
         );
         return;
       }

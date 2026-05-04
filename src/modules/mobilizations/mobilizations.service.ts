@@ -7,7 +7,14 @@ import {
   forwardRef,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, ILike, LessThanOrEqual, MoreThanOrEqual, Not, Like } from 'typeorm';
+import {
+  Repository,
+  ILike,
+  LessThanOrEqual,
+  MoreThanOrEqual,
+  Not,
+  Like,
+} from 'typeorm';
 import {
   Mobilization,
   MobStatus,
@@ -118,7 +125,11 @@ export class MobilizationsService {
 
     const saved = await this.mobilizationRepository.save(mobilization);
 
-    await this.cleanupConflictingAutoSyncedMobs(saved.employeeId, saved.projectId, saved.actionDate);
+    await this.cleanupConflictingAutoSyncedMobs(
+      saved.employeeId,
+      saved.projectId,
+      saved.actionDate,
+    );
     await this.autoSyncTimesheet(saved.employeeId, saved.actionDate);
 
     const result = await this.findOne(saved.id);
@@ -180,7 +191,11 @@ export class MobilizationsService {
     const saved = await this.mobilizationRepository.save(entities);
 
     for (const mob of saved) {
-      await this.cleanupConflictingAutoSyncedMobs(mob.employeeId, mob.projectId, mob.actionDate);
+      await this.cleanupConflictingAutoSyncedMobs(
+        mob.employeeId,
+        mob.projectId,
+        mob.actionDate,
+      );
       await this.autoSyncTimesheet(mob.employeeId, mob.actionDate);
     }
 
@@ -456,11 +471,10 @@ export class MobilizationsService {
     // Check for special days first (higher priority than project off days).
     // Pass the carried-forward project so a special day that has been disabled
     // for the project (ProjectSpecialDayRate.isEnabled=false) doesn't force OFF.
-    const specialDayRates =
-      await this.specialDaysService.getSpecialDayRates(
-        targetDate,
-        latestMob.projectId ?? undefined,
-      );
+    const specialDayRates = await this.specialDaysService.getSpecialDayRates(
+      targetDate,
+      latestMob.projectId ?? undefined,
+    );
 
     if (specialDayRates.isSpecialDay) {
       // Handle special day logic based on day type
@@ -643,7 +657,11 @@ export class MobilizationsService {
       throw new NotFoundException('Failed to retrieve updated mobilization');
     }
 
-    await this.cleanupConflictingAutoSyncedMobs(result.employeeId, result.projectId, result.actionDate);
+    await this.cleanupConflictingAutoSyncedMobs(
+      result.employeeId,
+      result.projectId,
+      result.actionDate,
+    );
     await this.autoSyncTimesheet(result.employeeId, result.actionDate);
 
     return result;
@@ -1024,7 +1042,11 @@ export class MobilizationsService {
           }
         }
 
-        await this.cleanupConflictingAutoSyncedMobs(employee.id, mappedData.projectId, mappedData.actionDate);
+        await this.cleanupConflictingAutoSyncedMobs(
+          employee.id,
+          mappedData.projectId,
+          mappedData.actionDate,
+        );
         await this.autoSyncTimesheet(employee.id, mappedData.actionDate);
 
         result.success++;
@@ -1045,9 +1067,15 @@ export class MobilizationsService {
     return result;
   }
 
-  private async autoSyncTimesheet(employeeId: number, actionDate: string): Promise<void> {
+  private async autoSyncTimesheet(
+    employeeId: number,
+    actionDate: string,
+  ): Promise<void> {
     try {
-      await this.timesheetsService.syncTimesheetFromMobilization(employeeId, actionDate);
+      await this.timesheetsService.syncTimesheetFromMobilization(
+        employeeId,
+        actionDate,
+      );
     } catch (error) {
       this.logger.error(
         `Failed to auto-sync timesheet for employee ${employeeId} on ${actionDate}: ${error.message}`,
@@ -1077,13 +1105,15 @@ export class MobilizationsService {
         .where('employeeId = :employeeId', { employeeId })
         .andWhere('projectId != :projectId', { projectId })
         .andWhere('actionDate >= :actionDate', { actionDate })
-        .andWhere('notes LIKE :pattern', { pattern: 'Auto-synced from timesheet%' })
+        .andWhere('notes LIKE :pattern', {
+          pattern: 'Auto-synced from timesheet%',
+        })
         .execute();
 
       if (deleted.affected && deleted.affected > 0) {
         this.logger.log(
           `Cleaned up ${deleted.affected} conflicting auto-synced mobilization(s) ` +
-          `for employee ${employeeId} on/after ${actionDate}`,
+            `for employee ${employeeId} on/after ${actionDate}`,
         );
       }
     } catch (error) {
