@@ -309,8 +309,8 @@ export class SettlementsService {
     // Get hourly rate using payroll logic
     const hourlyRate = await this.getEmployeeHourlyRate(employeeId);
 
-    // UAE Federal Law Gratuity Calculation
-    // Formula: basic salary / 30 * gratuity days per year (21 or 30) * total days from date of joining till last day / 365
+    // UAE-style gratuity: <5 years at 21 days/year; 5+ years entire period at 30 days/year.
+    // Daily wage = basic/30; amount = daily × daysPerYear × (totalDays/365).
     const basicSalary = Number(employee.basic_salary);
     const dailySalary = basicSalary / 30;
 
@@ -331,19 +331,10 @@ export class SettlementsService {
       gratuityAmount = (basicSalary / 30) * 21 * (totalDays / 365);
       eligibleDays = Math.floor(totalYearsOfService * 21);
     }
-    // For 5 years and above: 21 days for first 5 years, 30 days for remaining years
+    // For 5 years and above: 30 days per year for the full length of service (e.g. 6 years → 180 days)
     else {
-      const first5YearsDays = 5 * 21; // 105 days
-      const remainingYears = totalYearsOfService - 5;
-      const remainingYearsDays = Math.floor(remainingYears * 30);
-      eligibleDays = first5YearsDays + remainingYearsDays;
-
-      // Calculate: (21 days for first 5 years) + (30 days for remaining years)
-      const first5YearsDaysCount = 5 * 365;
-      const first5YearsAmount = (basicSalary / 30) * 21 * (first5YearsDaysCount / 365);
-      const remainingDays = totalDays - first5YearsDaysCount;
-      const remainingYearsAmount = remainingDays > 0 ? (basicSalary / 30) * 30 * (remainingDays / 365) : 0;
-      gratuityAmount = first5YearsAmount + remainingYearsAmount;
+      gratuityAmount = basicSalary * (totalDays / 365);
+      eligibleDays = Math.floor(totalYearsOfService * 30);
     }
 
     // Apply maximum cap: 2 years' total salary
