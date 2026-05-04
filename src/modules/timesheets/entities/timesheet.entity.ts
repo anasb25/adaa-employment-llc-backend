@@ -47,6 +47,13 @@ export class Timesheet extends BaseEntity {
   @Column({ type: 'text', nullable: true })
   notes: string | null;
 
+  /**
+   * Days deducted per employee upon last approval ({ "employeeId": days }).
+   * Used to reverse prior deductions before applying the current entry set on re-approve.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  annualLeaveDeductionApplied: Record<string, number> | null;
+
   // Relations (project is null for idle-employees timesheet)
   @ManyToOne(() => Project, { onDelete: 'CASCADE', nullable: true })
   @JoinColumn({ name: 'projectId' })

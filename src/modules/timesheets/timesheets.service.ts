@@ -437,7 +437,8 @@ export class TimesheetsService {
    * Monthly timesheet with projectId = null: idle employees and demobilized annual-leave days.
    * Includes anyone with at least one idle day OR one annual_leave day carried from mobilizations.
    * Needed so approve flow can deduct annual_leave_balance from approved annual_leave entries.
-   * Business rule: Sunday is always off (0 hours, status off); never synced to mobilizations.
+   * Business rule: On this sheet, Sundays are forced off only for idle (non-leave) rows.
+   * Annual leave spans include Sundays; those days remain annual_leave and sync to mobilizations.
    */
   async getMonthlyIdleTimesheetData(
     month: string,
@@ -526,15 +527,28 @@ export class TimesheetsService {
             e.employeeId === employeeId && formatDateOnly(e.date) === dateStr,
         );
 
-        const isSunday = this.isUtcSunday(dateStr);
         let hours = existingEntry
           ? Number(existingEntry.hoursWorked)
           : this.getDefaultHoursForStatus(baselineStatus);
         let jobStatus: string = existingEntry?.jobStatus ?? baselineStatus;
 
-        if (isSunday) {
+        let isOffDay = false;
+        const isSunday = this.isUtcSunday(dateStr);
+
+        // Idle-only Sundays forced off (legacy rule). Sundays during annual_leave stay leave.
+        if (isSunday && baselineStatus !== JobStatus.ANNUAL_LEAVE) {
           hours = 0;
           jobStatus = JobStatus.OFF;
+          isOffDay = true;
+        }
+
+        // Override stale persisted "off" rows when mobilization baseline is AL (e.g. old saves).
+        if (isSunday && baselineStatus === JobStatus.ANNUAL_LEAVE) {
+          jobStatus = JobStatus.ANNUAL_LEAVE;
+          hours = existingEntry
+            ? Number(existingEntry.hoursWorked)
+            : this.getDefaultHoursForStatus(JobStatus.ANNUAL_LEAVE);
+          isOffDay = false;
         }
 
         dailyHours.push({
@@ -542,7 +556,7 @@ export class TimesheetsService {
           day,
           hoursWorked: hours,
           jobStatus,
-          isOffDay: isSunday,
+          isOffDay,
           notes: existingEntry?.notes || null,
           entryId: existingEntry?.id || null,
         });
@@ -745,7 +759,15 @@ export class TimesheetsService {
       const dateString = formatDateOnly(entryDate);
       let hoursWorked = entryDto.hoursWorked;
       let jobStatus = entryDto.jobStatus;
-      if (isIdleTimesheet && this.isUtcSunday(dateString)) {
+      const lowerStatus =
+        typeof entryDto.jobStatus === 'string'
+          ? entryDto.jobStatus.toLowerCase()
+          : '';
+      if (
+        isIdleTimesheet &&
+        this.isUtcSunday(dateString) &&
+        lowerStatus !== 'annual_leave'
+      ) {
         hoursWorked = 0;
         jobStatus = JobStatus.OFF;
       }
@@ -785,9 +807,13 @@ export class TimesheetsService {
       // Sync to mobilization when the entry's status differs from the effective
       // mobilization. The sync function only reacts to status changes (not project),
       // so saving default entries won't break carry-forward logic.
-      // Idle-sheet Sundays stay off visually only — never write them to mobilization
-      // (would flip that day away from IDLE and hide the idle row incorrectly).
-      if (!(isIdleTimesheet && this.isUtcSunday(dateString))) {
+      // Idle-sheet Sundays: skip mobilization sync for forced "off", but sync annual_leave Sundays.
+      const savedLower = String(savedEntry.jobStatus).toLowerCase();
+      const skipIdleSundayMobSync =
+        isIdleTimesheet &&
+        this.isUtcSunday(dateString) &&
+        savedLower !== 'annual_leave';
+      if (!skipIdleSundayMobSync) {
         await this.syncMobilizationFromTimesheetEntry(
           savedEntry,
           timesheet.projectId ?? null,
@@ -893,7 +919,11 @@ export class TimesheetsService {
     try {
       // entry.date is now a string (YYYY-MM-DD) thanks to DateOnlyTransformer
       const dateStr = entry.date;
-      if (projectId === null && this.isUtcSunday(dateStr)) {
+      if (
+        projectId === null &&
+        this.isUtcSunday(dateStr) &&
+        String(entry.jobStatus).toLowerCase() !== 'annual_leave'
+      ) {
         return;
       }
 
@@ -1047,7 +1077,9 @@ export class TimesheetsService {
 
   /**
    * Approve or reject timesheet
-   * When approving, annual leave days are deducted from each employee's annual_leave_balance
+   * When approving, annual leave is reconciled: prior approval deductions for this
+   * sheet (see annualLeaveDeductionApplied) are credited back, then current annual_leave
+   * entry counts are deducted. Safe to approve again after edits without double debit.
    */
   async approveTimesheet(
     id: number,
@@ -1077,48 +1109,92 @@ export class TimesheetsService {
 
     const savedTimesheet = await this.timesheetRepository.save(timesheet);
 
-    // When approving, deduct annual leave days from each employee's balance
     if (approveDto.status === TimesheetStatus.APPROVED) {
-      await this.deductAnnualLeaveFromApprovedTimesheet(id);
+      await this.reconcileAnnualLeaveDeductionOnApprove(savedTimesheet.id);
     }
 
     return savedTimesheet;
   }
 
+  private parseDeductionSnapshot(
+    raw: Record<string, number> | null | undefined,
+  ): Map<number, number> {
+    const m = new Map<number, number>();
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+      return m;
+    }
+    for (const [k, v] of Object.entries(raw)) {
+      const employeeId = Number(k);
+      const days = typeof v === 'number' ? v : Number(v);
+      if (
+        !Number.isFinite(employeeId) ||
+        !Number.isFinite(days) ||
+        days <= 0
+      ) {
+        continue;
+      }
+      m.set(employeeId, days);
+    }
+    return m;
+  }
+
   /**
-   * Deduct annual leave days from employee balances for an approved timesheet
+   * Undo last approval's AL deductions for this timesheet (from snapshot),
+   * then apply deductions from current annual_leave rows; update snapshot.
    */
-  private async deductAnnualLeaveFromApprovedTimesheet(
+  private async reconcileAnnualLeaveDeductionOnApprove(
     timesheetId: number,
   ): Promise<void> {
-    const entries = await this.entryRepository.find({
-      where: {
-        timesheetId,
-        jobStatus: 'annual_leave' as any,
-      },
-    });
+    await this.timesheetRepository.manager.transaction(async (trx) => {
+      const sheetRepo = trx.getRepository(Timesheet);
+      const entryRepoTrx = trx.getRepository(TimesheetEntry);
+      const empRepoTrx = trx.getRepository(Employee);
 
-    // Group by employeeId, count days (each entry = 1 day)
-    const daysByEmployee = new Map<number, number>();
-    for (const e of entries) {
-      const count = daysByEmployee.get(e.employeeId) ?? 0;
-      daysByEmployee.set(e.employeeId, count + 1);
-    }
+      const ts = await sheetRepo.findOne({ where: { id: timesheetId } });
+      if (!ts) return;
 
-    for (const [employeeId, daysToDeduct] of daysByEmployee) {
-      const employee = await this.employeeRepository.findOne({
-        where: { id: employeeId },
+      const prev = this.parseDeductionSnapshot(ts.annualLeaveDeductionApplied);
+
+      const entries = await entryRepoTrx.find({
+        where: {
+          timesheetId,
+          jobStatus: 'annual_leave' as any,
+        },
       });
-      if (!employee) continue;
 
-      const currentBalance = Number(employee.annual_leave_balance ?? 0);
-      const newBalance = Math.max(0, currentBalance - daysToDeduct);
-      employee.annual_leave_balance = newBalance;
-      await this.employeeRepository.save(employee);
-      this.logger.log(
-        `Deducted ${daysToDeduct} annual leave day(s) from employee ${employeeId}: balance ${currentBalance} -> ${newBalance}`,
-      );
-    }
+      const curr = new Map<number, number>();
+      for (const e of entries) {
+        curr.set(e.employeeId, (curr.get(e.employeeId) ?? 0) + 1);
+      }
+
+      const employeeIds = new Set<number>([...prev.keys(), ...curr.keys()]);
+
+      for (const employeeId of employeeIds) {
+        const previousDays = prev.get(employeeId) ?? 0;
+        const newDays = curr.get(employeeId) ?? 0;
+        const delta = previousDays - newDays;
+
+        const employee = await empRepoTrx.findOne({ where: { id: employeeId } });
+        if (!employee) continue;
+
+        if (delta !== 0) {
+          const bal = Number(employee.annual_leave_balance ?? 0);
+          employee.annual_leave_balance =
+            Math.round(Math.max(0, bal + delta) * 100) / 100;
+          await empRepoTrx.save(employee);
+          this.logger.log(
+            `Annual leave reconcile (timesheet ${timesheetId}) employee ${employeeId}: prevSnap ${previousDays} -> newEntries ${newDays}; balance ${bal} → ${employee.annual_leave_balance} (${delta >= 0 ? '+' : ''}${delta})`,
+          );
+        }
+      }
+
+      const snap: Record<string, number> = {};
+      for (const [employeeId, days] of curr) {
+        snap[String(employeeId)] = days;
+      }
+      ts.annualLeaveDeductionApplied = curr.size === 0 ? ({}) : snap;
+      await sheetRepo.save(ts);
+    });
   }
 
   /**
