@@ -11,11 +11,13 @@ import {
   UseInterceptors,
   UploadedFile,
   Res,
+  Header,
   BadRequestException,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
 import type { Response } from 'express';
 import { PayrollService } from './payroll.service';
+import { PayrollPdfService } from './services/payroll-pdf.service';
 import { CreatePayrollDto } from './dto/create-payroll.dto';
 import { UpdatePayrollDto } from './dto/update-payroll.dto';
 import { PayrollFiltersDto } from './dto/payroll-filters.dto';
@@ -23,7 +25,10 @@ import { Permissions } from '../../common/decorators/permissions.decorator';
 
 @Controller('payroll')
 export class PayrollController {
-  constructor(private readonly payrollService: PayrollService) {}
+  constructor(
+    private readonly payrollService: PayrollService,
+    private readonly payrollPdfService: PayrollPdfService,
+  ) {}
 
   /**
    * Get all payrolls with filters and pagination
@@ -57,6 +62,25 @@ export class PayrollController {
       month,
     );
     return { exists: !!payroll, payroll: payroll || null };
+  }
+
+  /**
+   * Download payroll PDF (same pipeline as invoices: HTML + Puppeteer).
+   */
+  @Get(':id/pdf')
+  @Permissions('payroll:read')
+  @Header('Content-Type', 'application/pdf')
+  async downloadPdf(@Param('id', ParseIntPipe) id: number, @Res() res: Response) {
+    const payroll = await this.payrollService.findOne(id);
+    const pdfBuffer = await this.payrollPdfService.generatePdf(payroll);
+
+    const safeCode = (payroll.employee?.adaa_emp_code ?? 'employee').replace(
+      /[^\w\-]+/g,
+      '_',
+    );
+    const filename = `Payroll_${safeCode}_${payroll.month}.pdf`;
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdfBuffer);
   }
 
   /**
