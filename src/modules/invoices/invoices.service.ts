@@ -720,25 +720,25 @@ export class InvoicesService {
 
   /**
    * Convert amount to words (AED)
-   * Example: 45670.80 -> "AED Forty-Five Thousand Six Hundred Seventy and 80 Fils"
+   * Example: 45670.80 -> "AED Forty-Five Thousand Six Hundred Seventy and Eighty Fils"
    */
   private convertAmountToWords(amount: number): string {
     const dirham = Math.floor(amount);
     const fils = Math.round((amount - dirham) * 100);
 
-    // Convert dirham amount to words and capitalize first letter of each word
-    let dirhamWords = numberToWords
-      .toWords(dirham)
-      .split(' ')
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-      .join(' ');
+    const amountToTitleCaseWords = (n: number): string =>
+      numberToWords
+        .toWords(n)
+        .split(' ')
+        .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
 
-    // Format: "AED Forty-Five Thousand Six Hundred Seventy and 80 Fils"
+    const dirhamWords = amountToTitleCaseWords(dirham);
+
     if (fils > 0) {
-      return `AED ${dirhamWords} and ${fils} Fils`;
-    } else {
-      return `AED ${dirhamWords} Only`;
+      return `AED ${dirhamWords} and ${amountToTitleCaseWords(fils)} Fils`;
     }
+    return `AED ${dirhamWords} Only`;
   }
 
   /**

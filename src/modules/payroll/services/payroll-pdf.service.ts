@@ -1,36 +1,15 @@
 import { Injectable } from '@nestjs/common';
-import * as puppeteer from 'puppeteer';
-import * as path from 'path';
-import * as fs from 'fs';
 import { Payroll } from '../entities/payroll.entity';
+import {
+  PDF_LETTERHEAD,
+  printHtmlToPdfWithLetterhead,
+  getPdfMainDocumentBaseCss,
+} from '../../../common/utils/pdf-letterhead.util';
 
 @Injectable()
 export class PayrollPdfService {
   async generatePdf(payroll: Payroll): Promise<Buffer> {
-    const html = this.generatePayrollHtml(payroll);
-
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
-
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-
-    const pdfBuffer = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: {
-        top: '0mm',
-        right: '0mm',
-        bottom: '0mm',
-        left: '0mm',
-      },
-    });
-
-    await browser.close();
-
-    return Buffer.from(pdfBuffer);
+    return printHtmlToPdfWithLetterhead(this.generatePayrollHtml(payroll));
   }
 
   private escapeHtml(s: string | null | undefined): string {
@@ -72,27 +51,6 @@ export class PayrollPdfService {
       'Dec',
     ];
     return `${dt.getDate()} ${months[dt.getMonth()]} ${dt.getFullYear()}`;
-  }
-
-  private loadHeaderImageBase64(): string {
-    const possiblePaths = [
-      path.join(__dirname, '../../../assets/logo-icon.png'),
-      path.join(__dirname, '../../../../src/assets/logo-icon.png'),
-      path.join(process.cwd(), 'src/assets/logo-icon.png'),
-      path.join(process.cwd(), 'dist/assets/logo-icon.png'),
-    ];
-
-    for (const imagePath of possiblePaths) {
-      try {
-        if (fs.existsSync(imagePath)) {
-          const imageBuffer = fs.readFileSync(imagePath);
-          return `data:image/png;base64,${imageBuffer.toString('base64')}`;
-        }
-      } catch {
-        // continue
-      }
-    }
-    return '';
   }
 
   private descBlock(
@@ -336,7 +294,6 @@ export class PayrollPdfService {
   }
 
   private generatePayrollHtml(payroll: Payroll): string {
-    const headerImageBase64 = this.loadHeaderImageBase64();
     const emp = payroll.employee;
     const monthLabel = this.escapeHtml(payroll.month);
     const genDate = new Date().toLocaleString('en-GB');
@@ -356,26 +313,14 @@ export class PayrollPdfService {
   <meta charset="UTF-8">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    ${getPdfMainDocumentBaseCss()}
     body {
       font-family: Arial, sans-serif;
       font-size: 10px;
       line-height: 1.4;
       color: #000;
-      padding: 10mm 15mm;
     }
-    @page { margin: 0; }
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 12px;
-      border-bottom: 1px solid #000;
-      padding-bottom: 6px;
-    }
-    .header-left { width: 36px; }
-    .header-image { width: 36px; height: 36px; }
-    .header-right { font-size: 10px; color: #555; }
-    .company-name { font-size: 14px; font-weight: bold; margin-bottom: 3px; }
+    .company-name { font-size: 14px; font-weight: bold; margin-bottom: 3px; color: ${PDF_LETTERHEAD.navy}; }
     .company-info { font-size: 8.5px; line-height: 1.4; margin-bottom: 10px; }
     .invoice-title-section {
       border: 1px solid #000;
@@ -442,23 +387,9 @@ export class PayrollPdfService {
       line-height: 1.5;
     }
     .notes-title { font-weight: bold; margin-bottom: 4px; }
-    .footer {
-      text-align: center;
-      font-size: 7.5px;
-      border-top: 1px solid #000;
-      padding-top: 8px;
-      margin-top: 16px;
-    }
   </style>
 </head>
 <body>
-  <div class="header">
-    <div class="header-left">
-      ${headerImageBase64 ? `<img src="${headerImageBase64}" class="header-image" alt=""/>` : ''}
-    </div>
-    <div class="header-right">Engage. Produce. Grow</div>
-  </div>
-
   <div class="company-name">ADAA EMPLOYMENT L.L.C</div>
   <div class="company-info">Dubai, U.A.E</div>
 
@@ -502,10 +433,6 @@ export class PayrollPdfService {
 
   ${notesBlock}
 
-  <div class="footer">
-    Payroll is calculated from approved timesheets and configured rates.<br/>
-    ADAA Employment LLC
-  </div>
 </body>
 </html>`;
   }

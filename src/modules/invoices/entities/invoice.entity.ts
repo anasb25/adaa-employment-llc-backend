@@ -72,7 +72,7 @@ export class Invoice extends BaseEntity {
   totalAmount: number; // Grand total including tax
 
   @Column({ type: 'text', nullable: true })
-  totalInWords: string; // e.g., "AED Forty-Five Thousand Six Hundred Seventy and 80 Fils"
+  totalInWords: string; // e.g., "AED Forty-Five Thousand Six Hundred Seventy and Eighty Fils"
 
   @Column({ type: 'date', nullable: true })
   paidDate: Date;

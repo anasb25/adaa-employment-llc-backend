@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import * as puppeteer from 'puppeteer';
 import { Invoice } from '../entities/invoice.entity';
-import * as path from 'path';
-import * as fs from 'fs';
+import {
+  PDF_LETTERHEAD,
+  printHtmlToPdfWithLetterhead,
+  getPdfMainDocumentBaseCss,
+} from '../../../common/utils/pdf-letterhead.util';
 
 @Injectable()
 export class InvoicePdfService {
@@ -10,71 +12,13 @@ export class InvoicePdfService {
    * Generate PDF buffer from invoice data
    */
   async generatePdf(invoice: Invoice): Promise<Buffer> {
-    const html = this.generateInvoiceHtml(invoice);
-
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
-
-    const page = await browser.newPage();
-    await page.setContent(html, { waitUntil: 'networkidle0' });
-
-    const pdfBuffer = await page.pdf({
-      format: 'A4',
-      printBackground: true,
-      margin: {
-        top: '0mm',
-        right: '0mm',
-        bottom: '0mm',
-        left: '0mm',
-      },
-    });
-
-    await browser.close();
-
-    return Buffer.from(pdfBuffer);
+    return printHtmlToPdfWithLetterhead(this.generateInvoiceHtml(invoice));
   }
 
   /**
    * Generate HTML template matching the exact layout from screenshot
    */
   private generateInvoiceHtml(invoice: Invoice): string {
-    // Debug: Log invoice data to see what we're working with
-    console.log('Invoice data for PDF:', {
-      invoiceNumber: invoice.invoiceNumber,
-      projectName: invoice.project?.name,
-      clientName: invoice.project?.client?.name,
-      clientAddress: invoice.project?.client?.address,
-      clientTrn: invoice.project?.client?.trn,
-    });
-    // Read header image and convert to base64
-    // Try multiple paths to support both dev and production
-    const possiblePaths = [
-      path.join(__dirname, '../../../assets/logo-icon.png'), // compiled (dist)
-      path.join(__dirname, '../../../../src/assets/logo-icon.png'), // compiled -> src
-      path.join(process.cwd(), 'src/assets/logo-icon.png'), // from project root
-      path.join(process.cwd(), 'dist/assets/logo-icon.png'), // from project root (dist)
-    ];
-
-    let headerImageBase64 = '';
-
-    for (const imagePath of possiblePaths) {
-      try {
-        if (fs.existsSync(imagePath)) {
-          const imageBuffer = fs.readFileSync(imagePath);
-          headerImageBase64 = `data:image/png;base64,${imageBuffer.toString('base64')}`;
-          break;
-        }
-      } catch (error) {
-        // Try next path
-      }
-    }
-
-    if (!headerImageBase64) {
-      console.warn('Header image not found in any expected location');
-    }
-
     const totalTaxableAmount = Number(invoice.totalTaxableAmount);
     const totalTax = Number(invoice.totalTax);
     const totalAmount = Number(invoice.totalAmount);
@@ -91,40 +35,13 @@ export class InvoicePdfService {
       box-sizing: border-box;
     }
     
+    ${getPdfMainDocumentBaseCss()}
+    
     body {
       font-family: Arial, sans-serif;
       font-size: 10px;
       line-height: 1.4;
       color: #000;
-      padding: 10mm 15mm;
-    }
-    
-    @page {
-      margin: 0;
-    }
-    
-    .header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 15px;
-      border-bottom: 1px solid #000;
-      padding-bottom: 8px;
-    }
-    
-    .header-left {
-      width: 36px;
-    }
-    
-    .header-image {
-      width: 36px;
-      height: 36px;
-    }
-    
-    .header-right {
-      font-size: 10px;
-      font-weight: normal;
-      color: #555;
     }
     
     .company-details {
@@ -136,6 +53,7 @@ export class InvoicePdfService {
       font-weight: bold;
       margin-bottom: 3px;
       letter-spacing: 0.5px;
+      color: ${PDF_LETTERHEAD.navy};
     }
     
     .company-info {
@@ -209,25 +127,30 @@ export class InvoicePdfService {
     
     .bill-to-section {
       border: 1px solid #000;
-      padding: 10px;
+      padding: 6px 8px;
       margin-bottom: 10px;
+      font-size: 8.5px;
+      line-height: 1.35;
     }
-    
-    .section-title {
+
+    .bill-to-section.bill-to-compact {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      column-gap: 6px;
+      row-gap: 2px;
+    }
+
+    .bill-to-section .bill-to-label {
       font-weight: bold;
       font-size: 9px;
-      margin-bottom: 8px;
+      flex-shrink: 0;
     }
-    
-    .client-name {
-      font-size: 10px;
-      font-weight: bold;
-      margin-bottom: 3px;
-    }
-    
-    .client-info {
-      font-size: 8.5px;
-      line-height: 1.5;
+
+    .bill-to-section .bill-to-body {
+      flex: 1;
+      min-width: 0;
+      word-break: break-word;
     }
     
     .subject-section {
@@ -324,33 +247,9 @@ export class InvoicePdfService {
       font-weight: bold;
       margin-bottom: 4px;
     }
-    
-    .footer {
-      text-align: center;
-      font-size: 7.5px;
-      line-height: 1.5;
-      border-top: 1px solid #000;
-      padding-top: 8px;
-      margin-top: 15px;
-    }
-    
-    .footer-company {
-      font-weight: bold;
-      margin-bottom: 2px;
-    }
   </style>
 </head>
 <body>
-  <!-- Header -->
-  <div class="header">
-    <div class="header-left">
-      ${headerImageBase64 ? `<img src="${headerImageBase64}" class="header-image" alt="Company Logo" />` : ''}
-    </div>
-    <div class="header-right">
-      Engage. Produce. Grow
-    </div>
-  </div>
-  
   <!-- Company Details -->
   <div class="company-details">
     <div class="company-name">ADAA EMPLOYMENT L.L.C</div>
@@ -393,21 +292,7 @@ export class InvoicePdfService {
   </div>
   
   <!-- Bill To -->
-  <div class="bill-to-section">
-    <div class="section-title">Bill To</div>
-    ${
-      invoice.project?.client
-        ? `
-    <div class="client-name">${invoice.project.client.name}</div>
-    <div class="client-info">
-      ${invoice.project.client.address ? invoice.project.client.address.split('\n').join('<br/>') + '<br/>' : ''}Dubai<br/>
-      U.A.E<br/>
-      ${invoice.project.client.trn ? 'TRN ' + invoice.project.client.trn : ''}
-    </div>
-    `
-        : '<div class="client-info">No client information available</div>'
-    }
-  </div>
+  ${this.buildBillToHtml(invoice)}
   
   <!-- Subject -->
   ${
@@ -495,15 +380,33 @@ export class InvoicePdfService {
     FROM THE DATE OF INVOICE.
   </div>
   
-  <!-- Footer -->
-  <div class="footer">
-    <div class="footer-company">505 Lake Central Tower - Business Bay - Dubai, UAE</div>
-    <div>info@adaaemployment.com - www.employment.com</div>
-    <div>+971 4 574 1141 - P. O. Box : 393539</div>
-  </div>
 </body>
 </html>
     `;
+  }
+
+  private buildBillToHtml(invoice: Invoice): string {
+    const client = invoice.project?.client;
+    if (!client) {
+      return `
+  <div class="bill-to-section bill-to-compact">
+    <span class="bill-to-label">Bill To:</span>
+    <span class="bill-to-body">No client information available</span>
+  </div>`;
+    }
+    const addrOneLine = (client.address || '')
+      .split(/\n/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .join(', ');
+    const addrPart = addrOneLine ? ` · ${addrOneLine}` : '';
+    const trnSuffix = client.trn ? ` · TRN ${client.trn}` : '';
+    const body = `<strong>${client.name}</strong>${addrPart} · Dubai, U.A.E${trnSuffix}`;
+    return `
+  <div class="bill-to-section bill-to-compact">
+    <span class="bill-to-label">Bill To:</span>
+    <span class="bill-to-body">${body}</span>
+  </div>`;
   }
 
   /**
