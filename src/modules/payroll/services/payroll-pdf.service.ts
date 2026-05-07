@@ -125,15 +125,13 @@ export class PayrollPdfService {
         }
         const firstAdd = Number(idleEntries[0]?.additionalAmount) || 0;
         const uniformAdd = idleEntries.every(
-          (r) =>
-            Math.abs((Number(r.additionalAmount) || 0) - firstAdd) < 1e-6,
+          (r) => Math.abs((Number(r.additionalAmount) || 0) - firstAdd) < 1e-6,
         );
         const addSub =
           uniformAdd && firstAdd !== 0
             ? this.addonSubline(firstAdd)
             : undefined;
-        const effIdleRate =
-          sumIdleHours > 0 ? sumIdleAmount / sumIdleHours : 0;
+        const effIdleRate = sumIdleHours > 0 ? sumIdleAmount / sumIdleHours : 0;
         let idleDesc = '<strong>Idle</strong>';
         if (addSub) {
           idleDesc += `<br/><span class="muted">${this.escapeHtml(addSub)}</span>`;
@@ -393,7 +391,7 @@ export class PayrollPdfService {
   <div class="company-name">ADAA EMPLOYMENT L.L.C</div>
   <div class="company-info">Dubai, U.A.E</div>
 
-  <div class="title-center">PAYROLL STATEMENT</div>
+  <div class="title-center">PAYSLIP</div>
 
   <div class="invoice-title-section">
     <div class="invoice-details-row">

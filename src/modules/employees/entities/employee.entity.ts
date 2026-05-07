@@ -2,6 +2,7 @@ import { Entity, Column, OneToMany } from 'typeorm';
 import { BaseEntity } from '../../../common/entities';
 import { EmployeeSkill } from '../../employee-skills/entities/employee-skill.entity';
 import { DateOnlyTransformer } from '../../../common/transformers/date.transformer';
+import type { AirTicketHistoryEntry } from '../utils/air-ticket-history.util';
 
 @Entity('employees')
 export class Employee extends BaseEntity {
@@ -84,6 +85,14 @@ export class Employee extends BaseEntity {
       'Air tickets count - auto-increments every year from date of joining',
   })
   air_tickets: number;
+
+  @Column({
+    type: 'jsonb',
+    default: [],
+    comment:
+      'Audit log of air ticket balance changes (add / subtract) with timestamps.',
+  })
+  air_tickets_history: AirTicketHistoryEntry[];
 
   @Column({
     type: 'decimal',

@@ -16,7 +16,12 @@ import { ImportResult } from './dto/import-employee.dto';
 import {
   calculateAccruedAnnualLeave,
   completedMonthsBetween,
+  areDatesEqual,
 } from '../../common/utils/date.util';
+import {
+  appendAirTicketsHistory,
+  parseAirTicketsHistory,
+} from './utils/air-ticket-history.util';
 import { validate } from 'class-validator';
 import { plainToClass } from 'class-transformer';
 
@@ -234,6 +239,13 @@ export class EmployeesService {
             this.calculateAccruedMonths(employeeData.date_of_joining);
         }
       }
+
+      const tickets = Math.max(0, Math.floor(Number(employeeData.air_tickets ?? 0)));
+      const initialReason =
+        employeeData.date_of_joining != null ? 'service_accrual' : 'manual_adjust';
+      const initialHistory = appendAirTicketsHistory([], 0, tickets, initialReason);
+      employeeData.air_tickets_history = initialHistory.history;
+
       const employee = this.employeeRepository.create(employeeData);
       return await this.employeeRepository.save(employee);
     } catch (error) {
@@ -244,33 +256,73 @@ export class EmployeesService {
 
   async update(id: number, employeeData: Partial<Employee>): Promise<Employee> {
     try {
+      const before = await this.employeeRepository.findOne({ where: { id } });
+      if (!before) {
+        throw new BadRequestException(`Employee with ID ${id} not found`);
+      }
+
+      let airTicketChangeReason: string | null = null;
+
       if (employeeData.date_of_joining) {
         const cancellationDate = await this.getCancellationDate(id);
-        if (employeeData.air_tickets === undefined) {
+        const explicitAir = employeeData.air_tickets !== undefined;
+        const dojChanged =
+          before.date_of_joining == null ||
+          !areDatesEqual(
+            employeeData.date_of_joining,
+            before.date_of_joining,
+          );
+
+        if (!explicitAir && dojChanged) {
           employeeData.air_tickets = this.calculateAirTickets(
             employeeData.date_of_joining,
             cancellationDate,
           );
+          airTicketChangeReason = 'service_accrual';
+        } else if (explicitAir) {
+          airTicketChangeReason = 'manual_adjust';
         }
-        if (employeeData.annual_leave_balance === undefined) {
+        if (employeeData.annual_leave_balance === undefined && dojChanged) {
           employeeData.annual_leave_balance = this.calculateAnnualLeaveBalance(
             employeeData.date_of_joining,
             cancellationDate,
           );
         }
-        // Re-sync the accrual counter to match the (possibly changed) joining
-        // date, so the cron doesn't retroactively double-credit leave.
-        if (employeeData.annual_leave_accrued_months === undefined) {
+        // Re-sync the accrual counter when joining date changes so the cron
+        // doesn't double-credit leave.
+        if (employeeData.annual_leave_accrued_months === undefined && dojChanged) {
           employeeData.annual_leave_accrued_months =
             this.calculateAccruedMonths(
               employeeData.date_of_joining,
               cancellationDate,
             );
         }
+      } else if (employeeData.air_tickets !== undefined) {
+        airTicketChangeReason = 'manual_adjust';
       }
+
+      const prevTickets = Math.max(0, Math.floor(Number(before.air_tickets ?? 0)));
+      const nextAirTickets =
+        employeeData.air_tickets !== undefined
+          ? Math.max(0, Math.floor(Number(employeeData.air_tickets)))
+          : prevTickets;
+
+      if (airTicketChangeReason && prevTickets !== nextAirTickets) {
+        const appended = appendAirTicketsHistory(
+          parseAirTicketsHistory(before.air_tickets_history),
+          prevTickets,
+          nextAirTickets,
+          airTicketChangeReason,
+        );
+        if (appended.changed) {
+          employeeData.air_tickets_history = appended.history;
+        }
+      }
+
       await this.employeeRepository.update(id, employeeData);
       return (await this.findOne(id)) as Employee;
     } catch (error) {
+      if (error instanceof BadRequestException) throw error;
       const userFriendlyError = this.translateDatabaseError(error);
       throw new BadRequestException(userFriendlyError);
     }
@@ -286,12 +338,25 @@ export class EmployeesService {
   }
 
   async decrementAirTicket(id: number): Promise<Employee> {
-    const employee = await this.findOne(id);
-    if (!employee) {
+    const before = await this.employeeRepository.findOne({ where: { id } });
+    if (!before) {
       throw new BadRequestException(`Employee with ID ${id} not found`);
     }
-    const newCount = Math.max(0, (employee.air_tickets || 0) - 1);
-    await this.employeeRepository.update(id, { air_tickets: newCount });
+    const prev = Math.max(0, Math.floor(Number(before.air_tickets ?? 0)));
+    const newCount = Math.max(0, prev - 1);
+    const appended = appendAirTicketsHistory(
+      parseAirTicketsHistory(before.air_tickets_history),
+      prev,
+      newCount,
+      'ticket_used',
+    );
+    if (!appended.changed) {
+      return (await this.findOne(id)) as Employee;
+    }
+    await this.employeeRepository.update(id, {
+      air_tickets: newCount,
+      air_tickets_history: appended.history,
+    });
     return (await this.findOne(id)) as Employee;
   }
 
@@ -594,18 +659,10 @@ export class EmployeesService {
         let employee: Employee;
 
         if (existingEmployee) {
-          // Update existing employee
-          await this.employeeRepository.update(
+          employee = await this.update(
             existingEmployee.id,
-            employeeData,
+            employeeData as Partial<Employee>,
           );
-          const updatedEmployee = await this.employeeRepository.findOne({
-            where: { id: existingEmployee.id },
-          });
-          if (!updatedEmployee) {
-            throw new Error('Failed to retrieve updated employee');
-          }
-          employee = updatedEmployee;
         } else {
           // Create new employee
           employee = await this.create(employeeData);

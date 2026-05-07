@@ -8,6 +8,10 @@ import {
   completedMonthsBetween,
   MONTHLY_LEAVE_ACCRUAL,
 } from '../common/utils/date.util';
+import {
+  appendAirTicketsHistory,
+  parseAirTicketsHistory,
+} from '../modules/employees/utils/air-ticket-history.util';
 
 @Injectable()
 export class CronjobsService {
@@ -80,7 +84,16 @@ export class CronjobsService {
         const updates: Partial<Employee> = {};
 
         if (employee.air_tickets !== expectedAirTickets) {
+          const appended = appendAirTicketsHistory(
+            parseAirTicketsHistory(employee.air_tickets_history),
+            Number(employee.air_tickets ?? 0),
+            expectedAirTickets,
+            'service_accrual',
+          );
           updates.air_tickets = expectedAirTickets;
+          if (appended.changed) {
+            updates.air_tickets_history = appended.history;
+          }
         }
 
         if (newMonths > 0) {
