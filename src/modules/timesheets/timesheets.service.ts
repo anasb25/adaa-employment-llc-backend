@@ -160,7 +160,6 @@ export class TimesheetsService {
             .leftJoinAndSelect('mob.project', 'project')
             .where('mob.employeeId IN (:...employeeIds)', { employeeIds })
             .andWhere('mob.actionDate <= :endDate', { endDate: endDateStr })
-            .andWhere('mob.deletedAt IS NULL')
             .orderBy('mob.actionDate', 'DESC')
             .addOrderBy('mob.createdAt', 'DESC')
             .getMany()
@@ -470,7 +469,6 @@ export class TimesheetsService {
     const allMobilizations = await this.mobilizationRepository
       .createQueryBuilder('mob')
       .where('mob.actionDate <= :endDate', { endDate: endDateStr })
-      .andWhere('mob.deletedAt IS NULL')
       .leftJoinAndSelect('mob.employee', 'employee')
       .leftJoinAndSelect('mob.mobilizedTrade', 'mobilizedTrade')
       .leftJoinAndSelect('mob.project', 'project')
@@ -1285,7 +1283,6 @@ export class TimesheetsService {
       .leftJoinAndSelect('project.client', 'client')
       .leftJoinAndSelect('m.mobilizedTrade', 'trade')
       .where('m.actionDate <= :targetDate', { targetDate: date })
-      .andWhere('m.deletedAt IS NULL')
       .orderBy('m.employeeId', 'ASC')
       .addOrderBy('m.actionDate', 'DESC')
       .addOrderBy('m.createdAt', 'DESC')

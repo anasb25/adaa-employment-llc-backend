@@ -64,7 +64,6 @@ export class EmployeesService {
           .select('m2.id')
           .from(Mobilization, 'm2')
           .where('m2.employeeId = mob.employeeId')
-          .andWhere('m2.deletedAt IS NULL')
           .orderBy('m2.actionDate', 'DESC')
           .addOrderBy('m2.id', 'DESC')
           .limit(1)
@@ -72,7 +71,6 @@ export class EmployeesService {
         return `mob.id = ${subQuery}`;
       })
       .andWhere('mob.employeeId IN (:...employeeIds)', { employeeIds })
-      .andWhere('mob.deletedAt IS NULL')
       .getMany();
 
     for (const mob of latestMobilizations) {

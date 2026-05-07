@@ -173,7 +173,7 @@ export class SettlementsService {
     return await this.findOne(id);
   }
 
-  async remove(id: number, userId: number): Promise<void> {
+  async remove(id: number, _userId: number): Promise<void> {
     const settlement = await this.findOne(id);
 
     // Prevent deleting if already paid
@@ -183,13 +183,12 @@ export class SettlementsService {
       );
     }
 
-    await this.settlementRepository.softDelete(id);
-    await this.settlementRepository.update(id, { deletedBy: userId });
+    await this.settlementRepository.delete(id);
   }
 
   async removeMany(
     ids: number[],
-    userId: number,
+    _userId: number,
   ): Promise<{ deleted: number; skipped: number }> {
     const settlements = await this.settlementRepository.find({
       where: ids.map((id) => ({ id })),
@@ -200,11 +199,8 @@ export class SettlementsService {
     );
     const skipped = settlements.length - deletable.length;
 
-    for (const settlement of deletable) {
-      await this.settlementRepository.softDelete(settlement.id);
-      await this.settlementRepository.update(settlement.id, {
-        deletedBy: userId,
-      });
+    if (deletable.length > 0) {
+      await this.settlementRepository.delete(deletable.map((s) => s.id));
     }
 
     return { deleted: deletable.length, skipped };

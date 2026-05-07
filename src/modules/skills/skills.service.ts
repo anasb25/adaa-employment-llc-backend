@@ -78,7 +78,7 @@ export class SkillsService {
   }
 
   async remove(id: number): Promise<void> {
-    await this.skillRepository.softDelete(id);
+    await this.skillRepository.delete(id);
   }
 
   // Skill Types
@@ -104,6 +104,6 @@ export class SkillsService {
   }
 
   async removeSkillType(id: number): Promise<void> {
-    await this.skillTypeRepository.softDelete(id);
+    await this.skillTypeRepository.delete(id);
   }
 }

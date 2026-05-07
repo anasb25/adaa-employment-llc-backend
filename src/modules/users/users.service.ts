@@ -106,7 +106,7 @@ export class UsersService {
   }
 
   async remove(id: number): Promise<void> {
-    await this.userRepository.softDelete(id);
+    await this.userRepository.delete(id);
   }
 
   async assignRole(userId: number, roleId: number): Promise<User> {

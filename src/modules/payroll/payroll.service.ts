@@ -212,11 +212,11 @@ export class PayrollService {
    */
   async remove(id: number): Promise<void> {
     const payroll = await this.findOne(id);
-    await this.payrollRepository.softDelete(payroll.id);
+    await this.payrollRepository.delete(payroll.id);
   }
 
   async removeMany(ids: number[]): Promise<{ deleted: number }> {
-    const result = await this.payrollRepository.softDelete(ids);
+    const result = await this.payrollRepository.delete(ids);
     return { deleted: result.affected || 0 };
   }
 

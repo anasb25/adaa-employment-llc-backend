@@ -134,7 +134,6 @@ export class CronjobsService {
       .select(['mob.employeeId', 'MAX(mob.actionDate) as "cancellationDate"'])
       .where('mob.employeeId IN (:...employeeIds)', { employeeIds })
       .andWhere('mob.jobStatus = :status', { status: JobStatus.CANCELLED })
-      .andWhere('mob.deletedAt IS NULL')
       .groupBy('mob.employeeId')
       .getRawMany();
 

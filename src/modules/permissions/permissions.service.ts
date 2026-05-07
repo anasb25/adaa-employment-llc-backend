@@ -36,7 +36,7 @@ export class PermissionsService {
   }
 
   async remove(id: number): Promise<void> {
-    await this.permissionRepository.softDelete(id);
+    await this.permissionRepository.delete(id);
   }
 
   async createMultiple(

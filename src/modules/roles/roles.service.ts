@@ -44,7 +44,7 @@ export class RolesService {
   }
 
   async remove(id: number): Promise<void> {
-    await this.roleRepository.softDelete(id);
+    await this.roleRepository.delete(id);
   }
 
   async assignPermissions(
