@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { Payroll } from '../entities/payroll.entity';
+import { parseAirTicketsHistory } from '../../employees/utils/air-ticket-history.util';
 import {
   PDF_LETTERHEAD,
   printHtmlToPdfWithLetterhead,
@@ -32,6 +33,34 @@ export class PayrollPdfService {
       minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     });
+  }
+
+  /**
+   * Total air tickets recorded as subtracted during the payroll calendar month (UTC),
+   * using `employee.air_tickets_history`.
+   */
+  private airTicketsUsedInPayrollMonth(payroll: Payroll): number {
+    const emp = payroll.employee;
+    const history = parseAirTicketsHistory(emp?.air_tickets_history);
+    const month = payroll.month?.trim();
+    if (!month || !/^\d{4}-\d{2}$/.test(month)) return 0;
+
+    const [yStr, mStr] = month.split('-');
+    const y = parseInt(yStr, 10);
+    const mo = parseInt(mStr, 10);
+    const start = Date.UTC(y, mo - 1, 1, 0, 0, 0, 0);
+    const end = Date.UTC(y, mo, 1, 0, 0, 0, 0);
+
+    let total = 0;
+    for (const entry of history) {
+      if (entry?.type !== 'subtract') continue;
+      const t = new Date(entry.at).getTime();
+      if (Number.isNaN(t)) continue;
+      if (t >= start && t < end) {
+        total += Math.max(0, Math.floor(Number(entry.amount) || 0));
+      }
+    }
+    return total;
   }
 
   private formatDate(d: string): string {
@@ -258,7 +287,7 @@ export class PayrollPdfService {
 
     html += `
         <div class="totals-row">
-          <span>Absent days deduction</span>
+          <span>Absent Days</span>
           <span></span>
           <span>${this.formatNumber(Number(payroll.absentDaysDeductible) || 0)}</span>
         </div>`;
@@ -272,6 +301,13 @@ export class PayrollPdfService {
           <span>${this.formatNumber(Number(v) || 0)}</span>
         </div>`;
       }
+    } else {
+      html += `
+        <div class="totals-row">
+          <span>Deductions</span>
+          <span></span>
+          <span>${this.formatNumber(0)}</span>
+        </div>`;
     }
 
     html += `
@@ -295,6 +331,15 @@ export class PayrollPdfService {
     const emp = payroll.employee;
     const monthLabel = this.escapeHtml(payroll.month);
     const genDate = new Date().toLocaleString('en-GB');
+    const ticketsUsed = this.airTicketsUsedInPayrollMonth(payroll);
+    const airTicketTakenRow =
+      ticketsUsed > 0
+        ? `
+    <div class="invoice-details-row">
+      <div class="invoice-details-label">Air Ticket Used</div>
+      <div class="invoice-details-value">: ${ticketsUsed}</div>
+    </div>`
+        : '';
     const notesBlock =
       payroll.notes && payroll.notes.trim()
         ? `
@@ -317,6 +362,14 @@ export class PayrollPdfService {
       font-size: 10px;
       line-height: 1.4;
       color: #000;
+    }
+    .payslip-page-wrap {
+      display: flex;
+      flex-direction: column;
+      min-height: 200mm;
+    }
+    .payslip-body-content {
+      flex: 1 1 auto;
     }
     .company-name { font-size: 14px; font-weight: bold; margin-bottom: 3px; color: ${PDF_LETTERHEAD.navy}; }
     .company-info { font-size: 8.5px; line-height: 1.4; margin-bottom: 10px; }
@@ -385,9 +438,41 @@ export class PayrollPdfService {
       line-height: 1.5;
     }
     .notes-title { font-weight: bold; margin-bottom: 4px; }
+    .payslip-signature-footer {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-end;
+      flex-shrink: 0;
+      margin-top: auto;
+      padding-top: 20px;
+      font-size: 8.5px;
+      gap: 24px;
+    }
+    .payslip-signature-footer .sig-col-left {
+      width: 45%;
+      max-width: 240px;
+      flex-shrink: 0;
+    }
+    .payslip-signature-footer .sig-col-right {
+      width: 45%;
+      max-width: 240px;
+      flex-shrink: 0;
+      text-align: right;
+    }
+    .payslip-signature-footer .sig-line {
+      border-bottom: 1px solid #000;
+      min-height: 32px;
+      margin-bottom: 4px;
+      width: 100%;
+    }
+    .payslip-signature-footer .sig-caption {
+      color: #000;
+    }
   </style>
 </head>
 <body>
+  <div class="payslip-page-wrap">
+  <div class="payslip-body-content">
   <div class="company-name">ADAA EMPLOYMENT L.L.C</div>
   <div class="company-info">Dubai, U.A.E</div>
 
@@ -405,7 +490,7 @@ export class PayrollPdfService {
     <div class="invoice-details-row">
       <div class="invoice-details-label">Payroll month</div>
       <div class="invoice-details-value">: ${monthLabel}</div>
-    </div>
+    </div>${airTicketTakenRow}
     <div class="invoice-details-row">
       <div class="invoice-details-label">Generated</div>
       <div class="invoice-details-value">: ${this.escapeHtml(genDate)}</div>
@@ -430,6 +515,20 @@ export class PayrollPdfService {
   ${this.generateTotalsSection(payroll)}
 
   ${notesBlock}
+
+  </div>
+  <div class="payslip-signature-footer">
+    <div class="sig-col-left">
+      <div class="sig-line"></div>
+      <div class="sig-caption">Signature</div>
+    </div>
+    <div class="sig-col-right">
+      <div class="sig-line"></div>
+      <div class="sig-caption">Date</div>
+    </div>
+  </div>
+
+  </div>
 
 </body>
 </html>`;
