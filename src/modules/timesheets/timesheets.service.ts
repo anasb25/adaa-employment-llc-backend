@@ -94,6 +94,141 @@ export class TimesheetsService {
     return parseDateOnly(dateStr).getUTCDay() === 0;
   }
 
+  private readonly demobilizingJobStatuses = new Set([
+    JobStatus.CANCELLED,
+    JobStatus.ABSCONDED,
+    JobStatus.ANNUAL_LEAVE,
+    JobStatus.RESIGNED,
+    JobStatus.IDLE,
+    JobStatus.URGENT_LEAVE,
+    'cancelled',
+    'absconded',
+    'annual_leave',
+    'resigned',
+    'idle',
+    'urgent_leave',
+  ]);
+
+  private isDemobilizingJobStatus(jobStatus: string | null | undefined): boolean {
+    if (!jobStatus) return false;
+    return this.demobilizingJobStatuses.has(String(jobStatus).toLowerCase());
+  }
+
+  /** Only idle + annual leave leave the project grid (shown on idle sheet). */
+  private readonly hiddenFromProjectStatuses = new Set([
+    JobStatus.ANNUAL_LEAVE,
+    JobStatus.IDLE,
+    'annual_leave',
+    'idle',
+  ]);
+
+  /** Shown on the project grid (0 hours) — not on the idle sheet. */
+  private readonly displayedTerminalStatuses = new Set([
+    JobStatus.ABSCONDED,
+    JobStatus.CANCELLED,
+    JobStatus.RESIGNED,
+    JobStatus.URGENT_LEAVE,
+    'absconded',
+    'cancelled',
+    'resigned',
+    'urgent_leave',
+  ]);
+
+  /** Persists until an explicit active remobilization to a project. */
+  private readonly terminalPermanentStatuses = new Set([
+    JobStatus.ABSCONDED,
+    JobStatus.CANCELLED,
+    JobStatus.RESIGNED,
+    'absconded',
+    'cancelled',
+    'resigned',
+  ]);
+
+  private normalizeJobStatus(
+    jobStatus: string | null | undefined,
+  ): string | null {
+    if (!jobStatus) return null;
+    return String(jobStatus).toLowerCase();
+  }
+
+  private shouldHideFromProjectSheet(jobStatus: string | null): boolean {
+    return jobStatus !== null && this.hiddenFromProjectStatuses.has(jobStatus);
+  }
+
+  private shouldShowTerminalStatus(jobStatus: string | null): boolean {
+    return (
+      jobStatus !== null && this.displayedTerminalStatuses.has(jobStatus)
+    );
+  }
+
+  private isTerminalPermanentStatus(jobStatus: string | null | undefined): boolean {
+    const normalized = this.normalizeJobStatus(jobStatus);
+    return normalized !== null && this.terminalPermanentStatuses.has(normalized);
+  }
+
+  /**
+   * Statuses that carry forward until an explicit active remobilization to a project.
+   * Prevents later auto-sync / off-day rows from restoring hours after leave starts.
+   */
+  private isPersistentUntilRemobStatus(
+    jobStatus: string | null | undefined,
+  ): boolean {
+    const normalized = this.normalizeJobStatus(jobStatus);
+    if (!normalized) return false;
+    return (
+      this.isTerminalPermanentStatus(normalized) ||
+      normalized === JobStatus.ANNUAL_LEAVE ||
+      normalized === JobStatus.IDLE
+    );
+  }
+
+  /** Timesheet saves create mobilization rows that must not override leave / terminal status. */
+  private isAutoSyncedFromTimesheet(mob: Mobilization): boolean {
+    return !!mob.notes?.startsWith('Auto-synced from timesheet');
+  }
+
+  /** Only a real active mobilization to a project ends absconded / cancelled / resigned / leave. */
+  private isExplicitRemobilization(mob: Mobilization): boolean {
+    if (this.isAutoSyncedFromTimesheet(mob)) {
+      return false;
+    }
+    const jobStatus = this.normalizeJobStatus(mob.jobStatus);
+    return (
+      mob.mobStatus === MobStatus.MOBILIZED &&
+      jobStatus === JobStatus.ACTIVE &&
+      mob.projectId !== null
+    );
+  }
+
+  private isActivelyWorkingOnProject(
+    effectiveMob: Mobilization | undefined,
+    projectId: number,
+  ): boolean {
+    if (!effectiveMob || effectiveMob.projectId !== projectId) {
+      return false;
+    }
+    const jobStatus = this.normalizeJobStatus(effectiveMob.jobStatus);
+    if (!jobStatus) return false;
+    if (
+      this.shouldHideFromProjectSheet(jobStatus) ||
+      this.shouldShowTerminalStatus(jobStatus)
+    ) {
+      return false;
+    }
+    if (effectiveMob.mobStatus === MobStatus.DEMOBILIZED) {
+      return false;
+    }
+    return effectiveMob.mobStatus === MobStatus.MOBILIZED;
+  }
+
+  private shouldAppearOnIdleSheet(
+    effectiveMob: Mobilization | undefined,
+  ): boolean {
+    if (!effectiveMob) return false;
+    const jobStatus = this.normalizeJobStatus(effectiveMob.jobStatus);
+    return jobStatus === JobStatus.IDLE || jobStatus === JobStatus.ANNUAL_LEAVE;
+  }
+
   /**
    * Get monthly project timesheet with carry-forward logic
    */
@@ -124,11 +259,11 @@ export class TimesheetsService {
       relations: ['entries', 'entries.employee'],
     });
 
-    // Get all mobilizations for this project (to find which employees belong here)
+    // Employees who were ever assigned to this project on/before month-end
+    // (mobilized or demobilized rows with projectId — includes mid-month leave).
     const mobilizations = await this.mobilizationRepository.find({
       where: {
         projectId: project.id,
-        mobStatus: MobStatus.MOBILIZED,
         actionDate: LessThanOrEqual(endDateStr) as any,
       },
       relations: ['employee', 'mobilizedTrade'],
@@ -213,13 +348,11 @@ export class TimesheetsService {
       // Build daily hours
       const dailyHours: any[] = [];
 
-      // Track whether this employee has been demobilized from this project.
-      // Once demobilized, all subsequent days in the month show as "-" (no entry).
-      let demobilizedFromProject = false;
+      // Annual leave / idle: blank on project sheet. Terminal statuses stay on project.
+      let hiddenFromProject = false;
 
       for (const { dateStr, dayOfWeekName, day } of dayInfo) {
-        // If already demobilized in a previous day this month, skip remaining days
-        if (demobilizedFromProject) {
+        if (hiddenFromProject) {
           continue;
         }
 
@@ -228,6 +361,8 @@ export class TimesheetsService {
           employeeMobilizations,
           dateStr,
         );
+
+        const carriedStatus = this.normalizeJobStatus(effectiveMob?.jobStatus);
 
         // Check if there's an existing entry (using timezone-neutral comparison)
         const existingEntry = timesheet?.entries?.find(
@@ -241,29 +376,22 @@ export class TimesheetsService {
           : null;
         const isActualMobilizationForThisDate = effectiveMobDateStr === dateStr;
 
-        // Check if this is the day the employee was demobilized from THIS project.
-        // mobStatus === DEMOBILIZED is the authoritative signal — the jobStatus (idle,
-        // cancelled, absconded, etc.) only tells us WHY, it doesn't override the demob.
-        // We must also verify projectId matches so a demobilization from a DIFFERENT
-        // project doesn't incorrectly mark this project as demobilized.
-        const isDemobilizationDay =
-          effectiveMob &&
-          effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
-          effectiveMob.projectId === project.id &&
-          isActualMobilizationForThisDate;
-
-        // If demobilized today, mark the flag so all subsequent days are skipped
-        if (isDemobilizationDay) {
-          demobilizedFromProject = true;
+        // Absconded / cancelled / resigned — remain on project timesheet only.
+        if (carriedStatus && this.shouldShowTerminalStatus(carriedStatus)) {
           dailyHours.push({
             date: dateStr,
             day,
-            hoursWorked: 0,
-            jobStatus: 'demobilized',
+            hoursWorked: this.getDefaultHoursForStatus(carriedStatus),
+            jobStatus: carriedStatus,
             isOffDay: false,
             notes: existingEntry?.notes || null,
             entryId: existingEntry?.id || null,
           });
+          continue;
+        }
+
+        if (carriedStatus && this.shouldHideFromProjectSheet(carriedStatus)) {
+          hiddenFromProject = true;
           continue;
         }
 
@@ -279,16 +407,10 @@ export class TimesheetsService {
         }
 
         // Determine if employee should appear in timesheet for this date.
-        // Business rule: idle = demobilized + no project. Idle employees must NEVER
-        // appear on any project's monthly timesheet; they only show up in the
-        // virtual idle + annual-leave timesheet (see getMonthlyIdleTimesheetData).
-        // If a legacy record has mobStatus=MOBILIZED with jobStatus=IDLE, treat it
-        // as not-on-this-project for rendering purposes.
-        const isMobilizedToProject =
-          effectiveMob &&
-          effectiveMob.mobStatus === MobStatus.MOBILIZED &&
-          effectiveMob.jobStatus !== JobStatus.IDLE &&
-          effectiveMob.projectId === project.id;
+        const isMobilizedToProject = this.isActivelyWorkingOnProject(
+          effectiveMob,
+          project.id,
+        );
 
         const hasSavedHours =
           existingEntry && Number(existingEntry.hoursWorked) > 0;
@@ -296,17 +418,6 @@ export class TimesheetsService {
 
         // If the employee is demobilized (carried forward from earlier) and has no saved data, skip
         if (!isMobilizedToProject && !hasSavedHours && !hasSavedEntry) {
-          // Check if the carry-forward status is DEMOBILIZED from THIS project —
-          // means they left this specific project before this date.
-          // We must check projectId so a demobilization from a DIFFERENT project
-          // (e.g. A102) doesn't incorrectly mark this project (e.g. DIBBA) as demobilized.
-          if (
-            effectiveMob &&
-            effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
-            effectiveMob.projectId === project.id
-          ) {
-            demobilizedFromProject = true;
-          }
           continue;
         }
 
@@ -331,9 +442,15 @@ export class TimesheetsService {
         let jobStatus: string;
 
         if (existingEntry) {
-          // If user has saved a timesheet entry for this day, respect their data
-          hours = Number(existingEntry.hoursWorked);
-          jobStatus = existingEntry.jobStatus;
+          if (carriedStatus && this.shouldShowTerminalStatus(carriedStatus)) {
+            hours = this.getDefaultHoursForStatus(carriedStatus);
+            jobStatus = carriedStatus;
+          } else if (carriedStatus && this.shouldHideFromProjectSheet(carriedStatus)) {
+            continue;
+          } else {
+            hours = Number(existingEntry.hoursWorked);
+            jobStatus = existingEntry.jobStatus;
+          }
         } else if (isActualMobilizationForThisDate) {
           // There's an actual mobilization record for this specific date
           hours = this.getDefaultHoursForStatus(effectiveMob!.jobStatus);
@@ -504,17 +621,11 @@ export class TimesheetsService {
           dateStr,
         );
 
-        const isIdleDay =
-          effectiveMob &&
-          effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
-          effectiveMob.jobStatus === JobStatus.IDLE;
+        if (!this.shouldAppearOnIdleSheet(effectiveMob)) continue;
 
-        const isAnnualLeaveDay =
-          effectiveMob &&
-          effectiveMob.mobStatus === MobStatus.DEMOBILIZED &&
-          effectiveMob.jobStatus === JobStatus.ANNUAL_LEAVE;
-
-        if (!isIdleDay && !isAnnualLeaveDay) continue;
+        const carriedStatus = this.normalizeJobStatus(effectiveMob!.jobStatus)!;
+        const isIdleDay = carriedStatus === JobStatus.IDLE;
+        const isAnnualLeaveDay = carriedStatus === JobStatus.ANNUAL_LEAVE;
 
         const baselineStatus = isAnnualLeaveDay
           ? JobStatus.ANNUAL_LEAVE
@@ -530,22 +641,30 @@ export class TimesheetsService {
           : this.getDefaultHoursForStatus(baselineStatus);
         let jobStatus: string = existingEntry?.jobStatus ?? baselineStatus;
 
+        if (isAnnualLeaveDay) {
+          jobStatus = JobStatus.ANNUAL_LEAVE;
+          hours = this.getDefaultHoursForStatus(JobStatus.ANNUAL_LEAVE);
+        } else if (isIdleDay) {
+          jobStatus = JobStatus.IDLE;
+          hours = existingEntry
+            ? Number(existingEntry.hoursWorked)
+            : this.getDefaultHoursForStatus(JobStatus.IDLE);
+        }
+
         let isOffDay = false;
         const isSunday = this.isUtcSunday(dateStr);
 
         // Idle-only Sundays forced off (legacy rule). Sundays during annual_leave stay leave.
-        if (isSunday && baselineStatus !== JobStatus.ANNUAL_LEAVE) {
+        if (isSunday && isIdleDay) {
           hours = 0;
           jobStatus = JobStatus.OFF;
           isOffDay = true;
         }
 
         // Override stale persisted "off" rows when mobilization baseline is AL (e.g. old saves).
-        if (isSunday && baselineStatus === JobStatus.ANNUAL_LEAVE) {
+        if (isSunday && isAnnualLeaveDay) {
           jobStatus = JobStatus.ANNUAL_LEAVE;
-          hours = existingEntry
-            ? Number(existingEntry.hoursWorked)
-            : this.getDefaultHoursForStatus(JobStatus.ANNUAL_LEAVE);
+          hours = this.getDefaultHoursForStatus(JobStatus.ANNUAL_LEAVE);
           isOffDay = false;
         }
 
@@ -586,14 +705,14 @@ export class TimesheetsService {
   }
 
   /**
-   * Get effective mobilization for a specific date with smart carry-forward logic
-   * Temporary statuses (absent, sick_leave, casual_leave) don't carry forward
+   * Get effective mobilization for a specific date with smart carry-forward logic.
+   * Absconded / cancelled / resigned stay locked until an explicit active
+   * remobilization to a project (later auto-sync or off-day rows do not clear them).
    */
   private getEffectiveMobilizationForDate(
     employeeMobilizations: Mobilization[],
     dateStr: string,
   ): Mobilization | undefined {
-    // Find all mobilizations up to and including this date (using timezone-neutral comparison)
     const mobilizationsUpToDate = employeeMobilizations.filter((m) => {
       const mobDateStr = formatDateOnly(m.actionDate);
       return mobDateStr <= dateStr;
@@ -603,11 +722,57 @@ export class TimesheetsService {
       return undefined;
     }
 
-    // Get the most recent mobilization
-    const latestMob = mobilizationsUpToDate[0]; // Already sorted by actionDate DESC
+    const mostRecentRemob = mobilizationsUpToDate.find((m) =>
+      this.isExplicitRemobilization(m),
+    );
+    const mostRecentPersistent = mobilizationsUpToDate.find((m) =>
+      this.isPersistentUntilRemobStatus(m.jobStatus),
+    );
+
+    if (mostRecentPersistent) {
+      const persistentDate = formatDateOnly(mostRecentPersistent.actionDate);
+      const remobAfterPersistent =
+        mostRecentRemob &&
+        compareDateOnly(
+          formatDateOnly(mostRecentRemob.actionDate),
+          persistentDate,
+        ) > 0;
+
+      if (!remobAfterPersistent) {
+        if (compareDateOnly(dateStr, persistentDate) >= 0) {
+          return mostRecentPersistent;
+        }
+      } else {
+        const remobDate = formatDateOnly(mostRecentRemob!.actionDate);
+        if (compareDateOnly(dateStr, remobDate) >= 0) {
+          const sinceRemob = mobilizationsUpToDate.filter(
+            (m) => compareDateOnly(formatDateOnly(m.actionDate), remobDate) >= 0,
+          );
+          return this.resolveCarriedMobilization(sinceRemob, dateStr);
+        }
+        if (compareDateOnly(dateStr, persistentDate) >= 0) {
+          return mostRecentPersistent;
+        }
+      }
+    }
+
+    return this.resolveCarriedMobilization(mobilizationsUpToDate, dateStr);
+  }
+
+  /**
+   * Carry-forward for non-terminal timelines (temporary one-day statuses, etc.).
+   */
+  private resolveCarriedMobilization(
+    mobilizationsUpToDate: Mobilization[],
+    dateStr: string,
+  ): Mobilization | undefined {
+    if (mobilizationsUpToDate.length === 0) {
+      return undefined;
+    }
+
+    const latestMob = mobilizationsUpToDate[0];
     const latestMobDateStr = formatDateOnly(latestMob.actionDate);
 
-    // List of temporary one-day statuses that should not carry forward
     const temporaryStatuses = [
       'absent',
       'sick_leave',
@@ -615,39 +780,28 @@ export class TimesheetsService {
       'urgent_leave',
     ];
 
-    // If the latest mobilization is:
-    // 1. On the exact date we're looking at -> use it
-    // 2. Before the date AND is a temporary status -> look for the status before it
-    // 3. Before the date AND is NOT a temporary status -> carry it forward
-
     if (latestMobDateStr === dateStr) {
-      // Exact match - use this status
       return latestMob;
     }
 
-    // Latest mobilization is before the date we're checking
     if (temporaryStatuses.includes(latestMob.jobStatus)) {
-      // It's a temporary status - find the non-temporary status before it
       const nonTemporaryMob = mobilizationsUpToDate.find(
-        (m, index) => index > 0 && !temporaryStatuses.includes(m.jobStatus), // Skip first (latest) as it's temporary
+        (m, index) => index > 0 && !temporaryStatuses.includes(m.jobStatus),
       );
 
       if (nonTemporaryMob) {
-        // Return the non-temporary status but keep the project/trade from latest
         return {
           ...latestMob,
           jobStatus: nonTemporaryMob.jobStatus,
         };
       }
 
-      // If no non-temporary status found before, default to 'active'
       return {
         ...latestMob,
         jobStatus: JobStatus.ACTIVE,
       };
     }
 
-    // Latest mobilization is a permanent status - carry it forward
     return latestMob;
   }
 
@@ -887,10 +1041,12 @@ export class TimesheetsService {
     employeeId: number,
     date: string,
   ): Promise<void> {
-    const entries = await this.entryRepository.find({
-      where: { employeeId, date: date as any },
-      relations: ['timesheet'],
-    });
+    const entries = await this.entryRepository
+      .createQueryBuilder('entry')
+      .innerJoinAndSelect('entry.timesheet', 'timesheet')
+      .where('entry.employeeId = :employeeId', { employeeId })
+      .andWhere('entry.date >= :date', { date })
+      .getMany();
 
     for (const entry of entries) {
       const status = entry.timesheet?.status;

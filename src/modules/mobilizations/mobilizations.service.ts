@@ -38,27 +38,43 @@ import {
 import { MobilizationExcelUtil } from './utils/mobilization-excel.util';
 import { SpecialDaysService } from '../special-days/special-days.service';
 import { SpecialDayType } from '../special-days/entities/special-day.entity';
-import { parseDateOnly, formatDateOnly } from '../../common/utils/date.util';
+import { parseDateOnly, formatDateOnly, compareDateOnly } from '../../common/utils/date.util';
 import { TimesheetsService } from '../timesheets/timesheets.service';
 
 @Injectable()
 export class MobilizationsService {
   private readonly logger = new Logger(MobilizationsService.name);
 
+  /** Statuses that demobilize the employee and clear project assignment. */
+  private static readonly NO_PROJECT_JOB_STATUSES = new Set<string>([
+    JobStatus.IDLE,
+    JobStatus.ANNUAL_LEAVE,
+    JobStatus.CANCELLED,
+    JobStatus.ABSCONDED,
+    JobStatus.RESIGNED,
+    JobStatus.URGENT_LEAVE,
+    'idle',
+    'annual_leave',
+    'cancelled',
+    'absconded',
+    'resigned',
+    'urgent_leave',
+  ]);
+
   /**
-   * Business rule: an idle employee is, by definition, demobilized and not
-   * assigned to any project. Any write path (create / bulk / update / import)
-   * must normalize `{ jobStatus: IDLE }` to `{ mobStatus: DEMOBILIZED, projectId: null }`
-   * so idle hours never leak into a project timesheet, invoice, or report.
+   * Business rule: idle / annual leave / terminal leave statuses are demobilized
+   * with no project so they appear only on the idle + annual-leave timesheet, not
+   * on any project grid from the leave start date onward.
    */
-  private normalizeIdleMobilization<
+  private normalizeMobilizationWrite<
     T extends {
       jobStatus?: JobStatus | string | null;
       mobStatus?: MobStatus | string | null;
       projectId?: number | null;
     },
   >(data: T): T {
-    if (data.jobStatus === JobStatus.IDLE || data.jobStatus === 'idle') {
+    const jobStatus = String(data.jobStatus ?? '').toLowerCase();
+    if (MobilizationsService.NO_PROJECT_JOB_STATUSES.has(jobStatus)) {
       data.mobStatus = MobStatus.DEMOBILIZED;
       data.projectId = null;
     }
@@ -117,7 +133,7 @@ export class MobilizationsService {
     // Note: Multiple mobilization records can exist for the same employee
     // This allows tracking mobilization history over time
 
-    const normalizedDto = this.normalizeIdleMobilization({ ...createDto });
+    const normalizedDto = this.normalizeMobilizationWrite({ ...createDto });
     const mobilization = this.mobilizationRepository.create({
       ...normalizedDto,
       createdBy,
@@ -130,6 +146,12 @@ export class MobilizationsService {
       saved.projectId,
       saved.actionDate,
     );
+    if (saved.jobStatus === JobStatus.ANNUAL_LEAVE) {
+      await this.cleanupFutureAutoSyncedMobsAfterLeave(
+        saved.employeeId,
+        saved.actionDate,
+      );
+    }
     await this.autoSyncTimesheet(saved.employeeId, saved.actionDate);
 
     const result = await this.findOne(saved.id);
@@ -174,7 +196,7 @@ export class MobilizationsService {
 
     // Create mobilizations for all employees
     const mobilizations = createDto.employeeIds.map((employeeId) =>
-      this.normalizeIdleMobilization({
+      this.normalizeMobilizationWrite({
         employeeId,
         mobilizedTradeId: createDto.mobilizedTradeId,
         projectId: createDto.projectId,
@@ -196,6 +218,12 @@ export class MobilizationsService {
         mob.projectId,
         mob.actionDate,
       );
+      if (mob.jobStatus === JobStatus.ANNUAL_LEAVE) {
+        await this.cleanupFutureAutoSyncedMobsAfterLeave(
+          mob.employeeId,
+          mob.actionDate,
+        );
+      }
       await this.autoSyncTimesheet(mob.employeeId, mob.actionDate);
     }
 
@@ -231,6 +259,31 @@ export class MobilizationsService {
       .skip((options.page - 1) * options.limit)
       .take(options.limit)
       .getManyAndCount();
+
+    // When viewing a specific date, show each employee's effective status (not stale
+    // auto-synced rows that would mask annual leave / terminal statuses).
+    if (filters?.actionDate) {
+      const targetDate = parseDateOnly(filters.actionDate);
+      const seen = new Set<number>();
+      const effectiveData: Mobilization[] = [];
+      for (const mob of data) {
+        if (seen.has(mob.employeeId)) continue;
+        seen.add(mob.employeeId);
+        const effective = await this.getEffectiveStatusOnDate(
+          mob.employeeId,
+          targetDate,
+        );
+        if (effective) {
+          effectiveData.push(effective);
+        }
+      }
+      return PaginationUtil.createPaginatedResponse(
+        effectiveData,
+        effectiveData.length,
+        options.page,
+        options.limit,
+      );
+    }
 
     return PaginationUtil.createPaginatedResponse(
       data,
@@ -318,16 +371,10 @@ export class MobilizationsService {
   }
 
   /**
-   * Get latest active mobilization for an employee
+   * Get latest effective mobilization for an employee (carry-forward aware).
    */
   async getLatestForEmployee(employeeId: number): Promise<Mobilization | null> {
-    return await this.mobilizationRepository.findOne({
-      where: {
-        employeeId,
-      },
-      relations: ['employee', 'project', 'project.client', 'mobilizedTrade'],
-      order: { actionDate: 'DESC', createdAt: 'DESC' },
-    });
+    return this.getEffectiveStatusOnDate(employeeId, new Date());
   }
 
   /**
@@ -436,9 +483,10 @@ export class MobilizationsService {
   }
 
   /**
-   * Apply smart carry-forward logic to mobilization records
-   * Temporary statuses (absent, sick_leave, casual_leave) don't carry forward
-   * Respects project off days and special days for carried-forward statuses
+   * Apply smart carry-forward logic to mobilization records.
+   * Annual leave / idle / terminal statuses persist until a real remobilization.
+   * Temporary statuses (absent, sick_leave, casual_leave) don't carry forward.
+   * Respects project off days and special days for active project workers.
    */
   private async applySmartCarryForward(
     mobilizations: Mobilization[],
@@ -448,10 +496,21 @@ export class MobilizationsService {
       return null;
     }
 
-    const latestMob = mobilizations[0]; // Already sorted by date DESC
-    const latestMobDate = new Date(latestMob.actionDate);
-    const targetDateStr = targetDate.toISOString().split('T')[0];
-    const latestMobDateStr = latestMobDate.toISOString().split('T')[0];
+    const targetDateStr = formatDateOnly(targetDate);
+    const baseEffective = this.getEffectiveMobilizationForDate(
+      mobilizations,
+      targetDateStr,
+    );
+    if (!baseEffective) {
+      return null;
+    }
+
+    if (this.isPersistentUntilRemobStatus(baseEffective.jobStatus)) {
+      return baseEffective;
+    }
+
+    const latestMob = baseEffective;
+    const latestMobDateStr = formatDateOnly(latestMob.actionDate);
 
     // List of temporary one-day statuses that should not carry forward
     const temporaryStatuses: string[] = [
@@ -461,25 +520,20 @@ export class MobilizationsService {
       'urgent_leave',
     ];
 
-    // If the latest mobilization is on the exact date we're looking at -> use it as-is
-    // User explicitly entered this record, so we respect their choice even if it's an off day or special day
+    // If the effective mobilization is on the exact date we're looking at -> use it as-is
     if (latestMobDateStr === targetDateStr) {
       return latestMob;
     }
 
     // We're carrying forward a status from a previous date
     // Check for special days first (higher priority than project off days).
-    // Pass the carried-forward project so a special day that has been disabled
-    // for the project (ProjectSpecialDayRate.isEnabled=false) doesn't force OFF.
     const specialDayRates = await this.specialDaysService.getSpecialDayRates(
       targetDate,
       latestMob.projectId ?? undefined,
     );
 
     if (specialDayRates.isSpecialDay) {
-      // Handle special day logic based on day type
       if (specialDayRates.isMandatoryOff) {
-        // Mandatory off day - must be off, cannot override (for carry-forward)
         return {
           ...latestMob,
           jobStatus: JobStatus.OFF,
@@ -490,14 +544,11 @@ export class MobilizationsService {
         specialDayRates.dayType === SpecialDayType.OPTIONAL_OFF ||
         specialDayRates.isDefaultOff
       ) {
-        // Optional off or default to off (for carry-forward)
         return {
           ...latestMob,
           jobStatus: JobStatus.OFF,
         };
       }
-
-      // For PREMIUM_RATE or REGULAR special days, continue with normal logic
     }
 
     // Check if target date is a project off day
@@ -507,7 +558,6 @@ export class MobilizationsService {
     ) {
       const dayOfWeek = this.getDayOfWeek(targetDate);
       if (latestMob.project.offDays.includes(dayOfWeek)) {
-        // Target date is a project off day - return OFF status
         return {
           ...latestMob,
           jobStatus: JobStatus.OFF,
@@ -515,29 +565,160 @@ export class MobilizationsService {
       }
     }
 
-    // Latest mobilization is before the target date
     if (temporaryStatuses.includes(latestMob.jobStatus)) {
-      // It's a temporary status - find the non-temporary status before it
       const nonTemporaryMob = mobilizations.find(
         (m, index) => index > 0 && !temporaryStatuses.includes(m.jobStatus),
       );
 
       if (nonTemporaryMob) {
-        // Return a copy with the non-temporary job status but keep other fields from latest
         return {
           ...latestMob,
           jobStatus: nonTemporaryMob.jobStatus as JobStatus,
         };
       }
 
-      // If no non-temporary status found before, default to 'idle'
       return {
         ...latestMob,
         jobStatus: JobStatus.IDLE,
       };
     }
 
-    // Latest mobilization is a permanent status - carry it forward
+    return latestMob;
+  }
+
+  private isTerminalPermanentStatus(
+    jobStatus: string | null | undefined,
+  ): boolean {
+    const normalized = jobStatus ? String(jobStatus).toLowerCase() : null;
+    return (
+      normalized === JobStatus.ABSCONDED ||
+      normalized === JobStatus.CANCELLED ||
+      normalized === JobStatus.RESIGNED ||
+      normalized === 'absconded' ||
+      normalized === 'cancelled' ||
+      normalized === 'resigned'
+    );
+  }
+
+  private isPersistentUntilRemobStatus(
+    jobStatus: string | null | undefined,
+  ): boolean {
+    const normalized = jobStatus ? String(jobStatus).toLowerCase() : null;
+    if (!normalized) return false;
+    return (
+      this.isTerminalPermanentStatus(normalized) ||
+      normalized === JobStatus.ANNUAL_LEAVE ||
+      normalized === JobStatus.IDLE
+    );
+  }
+
+  private isAutoSyncedFromTimesheet(mob: Mobilization): boolean {
+    return !!mob.notes?.startsWith('Auto-synced from timesheet');
+  }
+
+  private isExplicitRemobilization(mob: Mobilization): boolean {
+    if (this.isAutoSyncedFromTimesheet(mob)) {
+      return false;
+    }
+    const jobStatus = String(mob.jobStatus).toLowerCase();
+    return (
+      mob.mobStatus === MobStatus.MOBILIZED &&
+      jobStatus === JobStatus.ACTIVE &&
+      mob.projectId !== null
+    );
+  }
+
+  private getEffectiveMobilizationForDate(
+    employeeMobilizations: Mobilization[],
+    dateStr: string,
+  ): Mobilization | undefined {
+    const mobilizationsUpToDate = employeeMobilizations.filter((m) => {
+      const mobDateStr = formatDateOnly(m.actionDate);
+      return mobDateStr <= dateStr;
+    });
+
+    if (mobilizationsUpToDate.length === 0) {
+      return undefined;
+    }
+
+    const mostRecentRemob = mobilizationsUpToDate.find((m) =>
+      this.isExplicitRemobilization(m),
+    );
+    const mostRecentPersistent = mobilizationsUpToDate.find((m) =>
+      this.isPersistentUntilRemobStatus(m.jobStatus),
+    );
+
+    if (mostRecentPersistent) {
+      const persistentDate = formatDateOnly(mostRecentPersistent.actionDate);
+      const remobAfterPersistent =
+        mostRecentRemob &&
+        compareDateOnly(
+          formatDateOnly(mostRecentRemob.actionDate),
+          persistentDate,
+        ) > 0;
+
+      if (!remobAfterPersistent) {
+        if (compareDateOnly(dateStr, persistentDate) >= 0) {
+          return mostRecentPersistent;
+        }
+      } else {
+        const remobDate = formatDateOnly(mostRecentRemob!.actionDate);
+        if (compareDateOnly(dateStr, remobDate) >= 0) {
+          const sinceRemob = mobilizationsUpToDate.filter(
+            (m) =>
+              compareDateOnly(formatDateOnly(m.actionDate), remobDate) >= 0,
+          );
+          return this.resolveCarriedMobilization(sinceRemob, dateStr);
+        }
+        if (compareDateOnly(dateStr, persistentDate) >= 0) {
+          return mostRecentPersistent;
+        }
+      }
+    }
+
+    return this.resolveCarriedMobilization(mobilizationsUpToDate, dateStr);
+  }
+
+  private resolveCarriedMobilization(
+    mobilizationsUpToDate: Mobilization[],
+    dateStr: string,
+  ): Mobilization | undefined {
+    if (mobilizationsUpToDate.length === 0) {
+      return undefined;
+    }
+
+    const latestMob = mobilizationsUpToDate[0];
+    const latestMobDateStr = formatDateOnly(latestMob.actionDate);
+
+    const temporaryStatuses = [
+      'absent',
+      'sick_leave',
+      'casual_leave',
+      'urgent_leave',
+    ];
+
+    if (latestMobDateStr === dateStr) {
+      return latestMob;
+    }
+
+    if (temporaryStatuses.includes(latestMob.jobStatus)) {
+      const nonTemporaryMob = mobilizationsUpToDate.find(
+        (m, index) => index > 0 && !temporaryStatuses.includes(m.jobStatus),
+      );
+
+      if (nonTemporaryMob) {
+        return {
+          ...latestMob,
+          jobStatus: nonTemporaryMob.jobStatus as JobStatus,
+        };
+      }
+
+      return {
+        ...latestMob,
+        jobStatus: JobStatus.ACTIVE,
+      };
+    }
+
     return latestMob;
   }
 
@@ -642,7 +823,7 @@ export class MobilizationsService {
     // Normalize: if the effective jobStatus after this update is IDLE, force
     // mobStatus=DEMOBILIZED and projectId=null regardless of what the caller sent.
     const effectiveJobStatus = updateDto.jobStatus ?? existing.jobStatus;
-    const normalizedUpdate = this.normalizeIdleMobilization({
+    const normalizedUpdate = this.normalizeMobilizationWrite({
       ...updateDto,
       jobStatus: effectiveJobStatus,
     });
@@ -662,6 +843,12 @@ export class MobilizationsService {
       result.projectId,
       result.actionDate,
     );
+    if (result.jobStatus === JobStatus.ANNUAL_LEAVE) {
+      await this.cleanupFutureAutoSyncedMobsAfterLeave(
+        result.employeeId,
+        result.actionDate,
+      );
+    }
     await this.autoSyncTimesheet(result.employeeId, result.actionDate);
 
     return result;
@@ -944,7 +1131,7 @@ export class MobilizationsService {
 
           if (hasChanged) {
             // Update existing mobilization (normalized: idle => demobilized + null project)
-            const updatePayload = this.normalizeIdleMobilization({
+            const updatePayload = this.normalizeMobilizationWrite({
               mobilizedTradeId: mobilizedTrade.id,
               projectId: project?.id || null,
               mobStatus: mappedData.mobStatus as MobStatus,
@@ -1009,7 +1196,7 @@ export class MobilizationsService {
           if (isDifferentFromPrevious) {
             // Create new mobilization (actual change occurred)
             // actionDate is already a YYYY-MM-DD string from Excel import
-            const createPayload = this.normalizeIdleMobilization({
+            const createPayload = this.normalizeMobilizationWrite({
               employeeId: employee.id,
               mobilizedTradeId: mobilizedTrade.id,
               projectId: project?.id || null,
@@ -1047,6 +1234,12 @@ export class MobilizationsService {
           mappedData.projectId,
           mappedData.actionDate,
         );
+        if (mobilization.jobStatus === JobStatus.ANNUAL_LEAVE) {
+          await this.cleanupFutureAutoSyncedMobsAfterLeave(
+            employee.id,
+            mobilization.actionDate,
+          );
+        }
         await this.autoSyncTimesheet(employee.id, mappedData.actionDate);
 
         result.success++;
@@ -1090,6 +1283,39 @@ export class MobilizationsService {
    * for April 12, 15, 20 — then user creates a mobilization to project B on April 10 —
    * those stale auto-synced mobs on project A must be removed.
    */
+  /**
+   * When annual leave starts, remove stale timesheet-sync rows on later dates
+   * (e.g. saved "active" days that would otherwise end the leave from day 2 onward).
+   */
+  private async cleanupFutureAutoSyncedMobsAfterLeave(
+    employeeId: number,
+    leaveStartDate: string,
+  ): Promise<void> {
+    try {
+      const deleted = await this.mobilizationRepository
+        .createQueryBuilder()
+        .delete()
+        .from(Mobilization)
+        .where('employeeId = :employeeId', { employeeId })
+        .andWhere('actionDate > :leaveStartDate', { leaveStartDate })
+        .andWhere('notes LIKE :pattern', {
+          pattern: 'Auto-synced from timesheet%',
+        })
+        .execute();
+
+      if (deleted.affected && deleted.affected > 0) {
+        this.logger.log(
+          `Removed ${deleted.affected} future auto-synced mobilization(s) after annual leave ` +
+            `for employee ${employeeId} from ${leaveStartDate}`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to cleanup future auto-synced mobs after leave for employee ${employeeId}: ${error.message}`,
+      );
+    }
+  }
+
   private async cleanupConflictingAutoSyncedMobs(
     employeeId: number,
     projectId: number | null,
