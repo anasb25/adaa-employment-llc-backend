@@ -245,13 +245,8 @@ export class TimesheetsService {
       relations: ['entries', 'entries.employee'],
     });
 
-    // Candidates: ever on this project + saved timesheet rows (not all 1000+ employees).
+    // Roster from mobilization only (saved June rows must not add wrong employees).
     const employeeIdsForProject = new Set<number>();
-    if (timesheet?.entries) {
-      for (const entry of timesheet.entries) {
-        employeeIdsForProject.add(entry.employeeId);
-      }
-    }
     const historicalOnProject =
       employeesEverOnProject.get(project.id) ?? new Set<number>();
     for (const employeeId of historicalOnProject) {
@@ -348,12 +343,8 @@ export class TimesheetsService {
           project.id,
         );
 
-        const hasSavedHours =
-          existingEntry && Number(existingEntry.hoursWorked) > 0;
-        const hasSavedEntry = !!existingEntry;
-
-        // If the employee is demobilized (carried forward from earlier) and has no saved data, skip
-        if (!isMobilizedToProject && !hasSavedHours && !hasSavedEntry) {
+        // Mobilization is source of truth — stale saved rows cannot keep ex-employees on sheet.
+        if (!isMobilizedToProject) {
           continue;
         }
 
@@ -378,12 +369,8 @@ export class TimesheetsService {
         let jobStatus: string;
 
         if (existingEntry) {
-          if (carriedStatus && this.shouldHideFromProjectSheet(carriedStatus)) {
-            continue;
-          } else {
-            hours = Number(existingEntry.hoursWorked);
-            jobStatus = existingEntry.jobStatus;
-          }
+          hours = Number(existingEntry.hoursWorked);
+          jobStatus = carriedStatus ?? existingEntry.jobStatus;
         } else if (isActualMobilizationForThisDate) {
           // There's an actual mobilization record for this specific date
           hours = this.getDefaultHoursForStatus(effectiveMob!.jobStatus);
