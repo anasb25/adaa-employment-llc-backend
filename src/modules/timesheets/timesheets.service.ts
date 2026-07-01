@@ -340,7 +340,11 @@ export class TimesheetsService {
 
         if (existingEntry) {
           hours = Number(existingEntry.hoursWorked);
-          jobStatus = carriedStatus ?? existingEntry.jobStatus;
+          // Saved timesheet status wins (e.g. absent must show "A", not carried active).
+          jobStatus =
+            this.normalizeJobStatus(existingEntry.jobStatus) ??
+            carriedStatus ??
+            JobStatus.ACTIVE;
         } else if (isActualMobilizationForThisDate) {
           // There's an actual mobilization record for this specific date
           hours = this.getDefaultHoursForStatus(effectiveMob!.jobStatus);

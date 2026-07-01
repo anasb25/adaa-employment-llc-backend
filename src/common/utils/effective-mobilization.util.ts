@@ -113,6 +113,47 @@ export function normalizeMobilizationForProjectRoster(
   return mob;
 }
 
+/** Day-specific statuses (absent, sick leave, etc.) apply only on their action date. */
+export function isDaySpecificJobStatus(
+  jobStatus: string | null | undefined,
+): boolean {
+  const normalized = normalizeJobStatus(jobStatus);
+  return normalized !== null && TEMPORARY_STATUSES.includes(normalized);
+}
+
+/**
+ * When multiple mobilizations share the same action date, prefer manual records
+ * and day-specific statuses (e.g. absent) over auto-synced active rows.
+ */
+export function pickBestSameDayMobilization(
+  sameDayMobs: Mobilization[],
+): Mobilization | undefined {
+  if (sameDayMobs.length === 0) {
+    return undefined;
+  }
+  if (sameDayMobs.length === 1) {
+    return sameDayMobs[0];
+  }
+
+  const manualMobs = sameDayMobs.filter((m) => !isAutoSyncedFromTimesheet(m));
+  const pool = manualMobs.length > 0 ? manualMobs : sameDayMobs;
+
+  const daySpecific = pool.find((m) => isDaySpecificJobStatus(m.jobStatus));
+  if (daySpecific) {
+    return daySpecific;
+  }
+
+  const nonActive = pool.find((m) => {
+    const status = normalizeJobStatus(m.jobStatus);
+    return status !== null && status !== JobStatus.ACTIVE;
+  });
+  if (nonActive) {
+    return nonActive;
+  }
+
+  return pool[0];
+}
+
 export function resolveCarriedMobilization(
   mobilizationsUpToDate: Mobilization[],
   dateStr: string,
@@ -125,12 +166,16 @@ export function resolveCarriedMobilization(
   const latestMobDateStr = formatDateOnly(latestMob.actionDate);
 
   if (latestMobDateStr === dateStr) {
-    return latestMob;
+    const sameDayMobs = mobilizationsUpToDate.filter(
+      (m) => formatDateOnly(m.actionDate) === dateStr,
+    );
+    return pickBestSameDayMobilization(sameDayMobs) ?? latestMob;
   }
 
-  if (TEMPORARY_STATUSES.includes(latestMob.jobStatus)) {
+  if (isDaySpecificJobStatus(latestMob.jobStatus)) {
     const nonTemporaryMob = mobilizationsUpToDate.find(
-      (m, index) => index > 0 && !TEMPORARY_STATUSES.includes(m.jobStatus),
+      (m, index) =>
+        index > 0 && !isDaySpecificJobStatus(m.jobStatus),
     );
 
     if (nonTemporaryMob) {
