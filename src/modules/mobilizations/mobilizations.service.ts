@@ -39,6 +39,11 @@ import { MobilizationExcelUtil } from './utils/mobilization-excel.util';
 import { SpecialDaysService } from '../special-days/special-days.service';
 import { SpecialDayType } from '../special-days/entities/special-day.entity';
 import { parseDateOnly, formatDateOnly, compareDateOnly } from '../../common/utils/date.util';
+import {
+  getEffectiveMobilizationForDate,
+  isPersistentUntilRemobStatus,
+  normalizeMobilizationForProjectRoster,
+} from '../../common/utils/effective-mobilization.util';
 import { TimesheetsService } from '../timesheets/timesheets.service';
 
 @Injectable()
@@ -274,7 +279,7 @@ export class MobilizationsService {
           targetDate,
         );
         if (effective) {
-          effectiveData.push(effective);
+          effectiveData.push(normalizeMobilizationForProjectRoster(effective));
         }
       }
       return PaginationUtil.createPaginatedResponse(
@@ -458,7 +463,9 @@ export class MobilizationsService {
     ] of employeeMobilizationsMap.entries()) {
       const effective = await this.applySmartCarryForward(mobilizations, date);
       if (effective) {
-        effectiveMobilizations.push(effective);
+        effectiveMobilizations.push(
+          normalizeMobilizationForProjectRoster(effective),
+        );
       }
     }
 
@@ -497,7 +504,7 @@ export class MobilizationsService {
     }
 
     const targetDateStr = formatDateOnly(targetDate);
-    const baseEffective = this.getEffectiveMobilizationForDate(
+    const baseEffective = getEffectiveMobilizationForDate(
       mobilizations,
       targetDateStr,
     );
@@ -505,8 +512,8 @@ export class MobilizationsService {
       return null;
     }
 
-    if (this.isPersistentUntilRemobStatus(baseEffective.jobStatus)) {
-      return baseEffective;
+    if (isPersistentUntilRemobStatus(baseEffective.jobStatus)) {
+      return normalizeMobilizationForProjectRoster(baseEffective);
     }
 
     const latestMob = baseEffective;
@@ -522,7 +529,7 @@ export class MobilizationsService {
 
     // If the effective mobilization is on the exact date we're looking at -> use it as-is
     if (latestMobDateStr === targetDateStr) {
-      return latestMob;
+      return normalizeMobilizationForProjectRoster(latestMob);
     }
 
     // We're carrying forward a status from a previous date
@@ -534,20 +541,20 @@ export class MobilizationsService {
 
     if (specialDayRates.isSpecialDay) {
       if (specialDayRates.isMandatoryOff) {
-        return {
+        return normalizeMobilizationForProjectRoster({
           ...latestMob,
           jobStatus: JobStatus.OFF,
-        };
+        });
       }
 
       if (
         specialDayRates.dayType === SpecialDayType.OPTIONAL_OFF ||
         specialDayRates.isDefaultOff
       ) {
-        return {
+        return normalizeMobilizationForProjectRoster({
           ...latestMob,
           jobStatus: JobStatus.OFF,
-        };
+        });
       }
     }
 
@@ -558,10 +565,10 @@ export class MobilizationsService {
     ) {
       const dayOfWeek = this.getDayOfWeek(targetDate);
       if (latestMob.project.offDays.includes(dayOfWeek)) {
-        return {
+        return normalizeMobilizationForProjectRoster({
           ...latestMob,
           jobStatus: JobStatus.OFF,
-        };
+        });
       }
     }
 
@@ -571,155 +578,19 @@ export class MobilizationsService {
       );
 
       if (nonTemporaryMob) {
-        return {
+        return normalizeMobilizationForProjectRoster({
           ...latestMob,
           jobStatus: nonTemporaryMob.jobStatus as JobStatus,
-        };
+        });
       }
 
-      return {
+      return normalizeMobilizationForProjectRoster({
         ...latestMob,
         jobStatus: JobStatus.IDLE,
-      };
+      });
     }
 
-    return latestMob;
-  }
-
-  private isTerminalPermanentStatus(
-    jobStatus: string | null | undefined,
-  ): boolean {
-    const normalized = jobStatus ? String(jobStatus).toLowerCase() : null;
-    return (
-      normalized === JobStatus.ABSCONDED ||
-      normalized === JobStatus.CANCELLED ||
-      normalized === JobStatus.RESIGNED ||
-      normalized === 'absconded' ||
-      normalized === 'cancelled' ||
-      normalized === 'resigned'
-    );
-  }
-
-  private isPersistentUntilRemobStatus(
-    jobStatus: string | null | undefined,
-  ): boolean {
-    const normalized = jobStatus ? String(jobStatus).toLowerCase() : null;
-    if (!normalized) return false;
-    return (
-      this.isTerminalPermanentStatus(normalized) ||
-      normalized === JobStatus.ANNUAL_LEAVE ||
-      normalized === JobStatus.IDLE
-    );
-  }
-
-  private isAutoSyncedFromTimesheet(mob: Mobilization): boolean {
-    return !!mob.notes?.startsWith('Auto-synced from timesheet');
-  }
-
-  private isExplicitRemobilization(mob: Mobilization): boolean {
-    if (this.isAutoSyncedFromTimesheet(mob)) {
-      return false;
-    }
-    const jobStatus = String(mob.jobStatus).toLowerCase();
-    return (
-      mob.mobStatus === MobStatus.MOBILIZED &&
-      jobStatus === JobStatus.ACTIVE &&
-      mob.projectId !== null
-    );
-  }
-
-  private getEffectiveMobilizationForDate(
-    employeeMobilizations: Mobilization[],
-    dateStr: string,
-  ): Mobilization | undefined {
-    const mobilizationsUpToDate = employeeMobilizations.filter((m) => {
-      const mobDateStr = formatDateOnly(m.actionDate);
-      return mobDateStr <= dateStr;
-    });
-
-    if (mobilizationsUpToDate.length === 0) {
-      return undefined;
-    }
-
-    const mostRecentRemob = mobilizationsUpToDate.find((m) =>
-      this.isExplicitRemobilization(m),
-    );
-    const mostRecentPersistent = mobilizationsUpToDate.find((m) =>
-      this.isPersistentUntilRemobStatus(m.jobStatus),
-    );
-
-    if (mostRecentPersistent) {
-      const persistentDate = formatDateOnly(mostRecentPersistent.actionDate);
-      const remobAfterPersistent =
-        mostRecentRemob &&
-        compareDateOnly(
-          formatDateOnly(mostRecentRemob.actionDate),
-          persistentDate,
-        ) > 0;
-
-      if (!remobAfterPersistent) {
-        if (compareDateOnly(dateStr, persistentDate) >= 0) {
-          return mostRecentPersistent;
-        }
-      } else {
-        const remobDate = formatDateOnly(mostRecentRemob!.actionDate);
-        if (compareDateOnly(dateStr, remobDate) >= 0) {
-          const sinceRemob = mobilizationsUpToDate.filter(
-            (m) =>
-              compareDateOnly(formatDateOnly(m.actionDate), remobDate) >= 0,
-          );
-          return this.resolveCarriedMobilization(sinceRemob, dateStr);
-        }
-        if (compareDateOnly(dateStr, persistentDate) >= 0) {
-          return mostRecentPersistent;
-        }
-      }
-    }
-
-    return this.resolveCarriedMobilization(mobilizationsUpToDate, dateStr);
-  }
-
-  private resolveCarriedMobilization(
-    mobilizationsUpToDate: Mobilization[],
-    dateStr: string,
-  ): Mobilization | undefined {
-    if (mobilizationsUpToDate.length === 0) {
-      return undefined;
-    }
-
-    const latestMob = mobilizationsUpToDate[0];
-    const latestMobDateStr = formatDateOnly(latestMob.actionDate);
-
-    const temporaryStatuses = [
-      'absent',
-      'sick_leave',
-      'casual_leave',
-      'urgent_leave',
-    ];
-
-    if (latestMobDateStr === dateStr) {
-      return latestMob;
-    }
-
-    if (temporaryStatuses.includes(latestMob.jobStatus)) {
-      const nonTemporaryMob = mobilizationsUpToDate.find(
-        (m, index) => index > 0 && !temporaryStatuses.includes(m.jobStatus),
-      );
-
-      if (nonTemporaryMob) {
-        return {
-          ...latestMob,
-          jobStatus: nonTemporaryMob.jobStatus as JobStatus,
-        };
-      }
-
-      return {
-        ...latestMob,
-        jobStatus: JobStatus.ACTIVE,
-      };
-    }
-
-    return latestMob;
+    return normalizeMobilizationForProjectRoster(latestMob);
   }
 
   /**
@@ -774,17 +645,14 @@ export class MobilizationsService {
   }
 
   /**
-   * Get all employees currently mobilized to a project
+   * Get all employees currently assigned to a project (effective status today).
    */
   async getEmployeesOnProject(projectId: number): Promise<Mobilization[]> {
-    return await this.mobilizationRepository.find({
-      where: {
-        projectId,
-        mobStatus: MobStatus.MOBILIZED,
-      },
-      relations: ['employee', 'mobilizedTrade'],
-      order: { actionDate: 'DESC' },
-    });
+    const effectiveToday = await this.getEffectiveStatusForAllEmployeesOnDate(
+      new Date(),
+      true,
+    );
+    return effectiveToday.filter((m) => m.projectId === projectId);
   }
 
   /**

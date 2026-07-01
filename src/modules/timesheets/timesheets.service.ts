@@ -13,6 +13,11 @@ import {
   MobStatus,
   JobStatus,
 } from '../mobilizations/entities/mobilization.entity';
+import {
+  getEffectiveMobilizationForDate,
+  isAssignedToProject,
+  shouldHideFromProjectRoster,
+} from '../../common/utils/effective-mobilization.util';
 import { Employee } from '../employees/entities/employee.entity';
 import { Project } from '../projects/entities/project.entity';
 import { Skill } from '../skills/entities/skill.entity';
@@ -31,7 +36,6 @@ import { SpecialDayType } from '../special-days/entities/special-day.entity';
 import {
   formatDateOnly,
   parseDateOnly,
-  compareDateOnly,
 } from '../../common/utils/date.util';
 import {
   DailyUtilizationReport,
@@ -114,36 +118,6 @@ export class TimesheetsService {
     return this.demobilizingJobStatuses.has(String(jobStatus).toLowerCase());
   }
 
-  /** Only idle + annual leave leave the project grid (shown on idle sheet). */
-  private readonly hiddenFromProjectStatuses = new Set([
-    JobStatus.ANNUAL_LEAVE,
-    JobStatus.IDLE,
-    'annual_leave',
-    'idle',
-  ]);
-
-  /** Shown on the project grid (0 hours) — not on the idle sheet. */
-  private readonly displayedTerminalStatuses = new Set([
-    JobStatus.ABSCONDED,
-    JobStatus.CANCELLED,
-    JobStatus.RESIGNED,
-    JobStatus.URGENT_LEAVE,
-    'absconded',
-    'cancelled',
-    'resigned',
-    'urgent_leave',
-  ]);
-
-  /** Persists until an explicit active remobilization to a project. */
-  private readonly terminalPermanentStatuses = new Set([
-    JobStatus.ABSCONDED,
-    JobStatus.CANCELLED,
-    JobStatus.RESIGNED,
-    'absconded',
-    'cancelled',
-    'resigned',
-  ]);
-
   private normalizeJobStatus(
     jobStatus: string | null | undefined,
   ): string | null {
@@ -151,74 +125,9 @@ export class TimesheetsService {
     return String(jobStatus).toLowerCase();
   }
 
+  /** Leave + terminal statuses: hidden from project roster (idle sheet or nowhere). */
   private shouldHideFromProjectSheet(jobStatus: string | null): boolean {
-    return jobStatus !== null && this.hiddenFromProjectStatuses.has(jobStatus);
-  }
-
-  private shouldShowTerminalStatus(jobStatus: string | null): boolean {
-    return (
-      jobStatus !== null && this.displayedTerminalStatuses.has(jobStatus)
-    );
-  }
-
-  private isTerminalPermanentStatus(jobStatus: string | null | undefined): boolean {
-    const normalized = this.normalizeJobStatus(jobStatus);
-    return normalized !== null && this.terminalPermanentStatuses.has(normalized);
-  }
-
-  /**
-   * Statuses that carry forward until an explicit active remobilization to a project.
-   * Prevents later auto-sync / off-day rows from restoring hours after leave starts.
-   */
-  private isPersistentUntilRemobStatus(
-    jobStatus: string | null | undefined,
-  ): boolean {
-    const normalized = this.normalizeJobStatus(jobStatus);
-    if (!normalized) return false;
-    return (
-      this.isTerminalPermanentStatus(normalized) ||
-      normalized === JobStatus.ANNUAL_LEAVE ||
-      normalized === JobStatus.IDLE
-    );
-  }
-
-  /** Timesheet saves create mobilization rows that must not override leave / terminal status. */
-  private isAutoSyncedFromTimesheet(mob: Mobilization): boolean {
-    return !!mob.notes?.startsWith('Auto-synced from timesheet');
-  }
-
-  /** Only a real active mobilization to a project ends absconded / cancelled / resigned / leave. */
-  private isExplicitRemobilization(mob: Mobilization): boolean {
-    if (this.isAutoSyncedFromTimesheet(mob)) {
-      return false;
-    }
-    const jobStatus = this.normalizeJobStatus(mob.jobStatus);
-    return (
-      mob.mobStatus === MobStatus.MOBILIZED &&
-      jobStatus === JobStatus.ACTIVE &&
-      mob.projectId !== null
-    );
-  }
-
-  private isActivelyWorkingOnProject(
-    effectiveMob: Mobilization | undefined,
-    projectId: number,
-  ): boolean {
-    if (!effectiveMob || effectiveMob.projectId !== projectId) {
-      return false;
-    }
-    const jobStatus = this.normalizeJobStatus(effectiveMob.jobStatus);
-    if (!jobStatus) return false;
-    if (
-      this.shouldHideFromProjectSheet(jobStatus) ||
-      this.shouldShowTerminalStatus(jobStatus)
-    ) {
-      return false;
-    }
-    if (effectiveMob.mobStatus === MobStatus.DEMOBILIZED) {
-      return false;
-    }
-    return effectiveMob.mobStatus === MobStatus.MOBILIZED;
+    return shouldHideFromProjectRoster(jobStatus);
   }
 
   private shouldAppearOnIdleSheet(
@@ -259,70 +168,7 @@ export class TimesheetsService {
       relations: ['entries', 'entries.employee'],
     });
 
-    // Employees who were ever assigned to this project on/before month-end
-    // (mobilized or demobilized rows with projectId — includes mid-month leave).
-    const mobilizations = await this.mobilizationRepository.find({
-      where: {
-        projectId: project.id,
-        actionDate: LessThanOrEqual(endDateStr) as any,
-      },
-      relations: ['employee', 'mobilizedTrade'],
-      order: {
-        employee: { name: 'ASC' },
-      },
-    });
-
-    // Group by employee and get latest mobilization for each
-    const employeeMap = new Map<number, any>();
-    for (const mob of mobilizations) {
-      const existing = employeeMap.get(mob.employeeId);
-      if (
-        !existing ||
-        new Date(mob.actionDate) > new Date(existing.actionDate)
-      ) {
-        employeeMap.set(mob.employeeId, mob);
-      }
-    }
-
-    const employeeIds = Array.from(employeeMap.keys());
-
-    // ---- BATCH: Fetch ALL mobilizations for all employees at once ----
-    const allEmployeeMobilizations =
-      employeeIds.length > 0
-        ? await this.mobilizationRepository
-            .createQueryBuilder('mob')
-            .leftJoinAndSelect('mob.mobilizedTrade', 'mobilizedTrade')
-            .leftJoinAndSelect('mob.project', 'project')
-            .where('mob.employeeId IN (:...employeeIds)', { employeeIds })
-            .andWhere('mob.actionDate <= :endDate', { endDate: endDateStr })
-            .orderBy('mob.actionDate', 'DESC')
-            .addOrderBy('mob.createdAt', 'DESC')
-            .getMany()
-        : [];
-
-    // Group mobilizations by employeeId for fast lookup
-    const mobilizationsByEmployee = new Map<number, Mobilization[]>();
-    for (const mob of allEmployeeMobilizations) {
-      let list = mobilizationsByEmployee.get(mob.employeeId);
-      if (!list) {
-        list = [];
-        mobilizationsByEmployee.set(mob.employeeId, list);
-      }
-      list.push(mob);
-    }
-
-    // ---- BATCH: Pre-fetch special day rates for the entire month ----
-    // Pass projectId so any special day disabled for this project (via
-    // ProjectSpecialDayRate.isEnabled=false) is excluded from the map and
-    // does not force job-status / billing rules on this project.
-    const specialDayRatesMap =
-      await this.specialDaysService.getSpecialDayRatesForRange(
-        startDate,
-        endDate,
-        project.id,
-      );
-
-    // Pre-compute day-of-week names for each day in the month (avoids repeated Date operations)
+    // Pre-compute day-of-week names for each day in the month
     const dayInfo: Array<{
       dateStr: string;
       dayOfWeekName: string;
@@ -337,18 +183,85 @@ export class TimesheetsService {
       dayInfo.push({ dateStr, dayOfWeekName, day });
     }
 
+    // All mobilizations up to month-end — used for carry-forward and roster discovery
+    const allMobilizationsUpToMonth = await this.mobilizationRepository
+      .createQueryBuilder('mob')
+      .leftJoinAndSelect('mob.employee', 'employee')
+      .leftJoinAndSelect('mob.mobilizedTrade', 'mobilizedTrade')
+      .leftJoinAndSelect('mob.project', 'project')
+      .where('mob.actionDate <= :endDate', { endDate: endDateStr })
+      .orderBy('mob.actionDate', 'DESC')
+      .addOrderBy('mob.createdAt', 'DESC')
+      .getMany();
+
+    const mobilizationsByEmployee = new Map<number, Mobilization[]>();
+    for (const mob of allMobilizationsUpToMonth) {
+      let list = mobilizationsByEmployee.get(mob.employeeId);
+      if (!list) {
+        list = [];
+        mobilizationsByEmployee.set(mob.employeeId, list);
+      }
+      list.push(mob);
+    }
+
+    // Employees on this project: any day in the month with effective mobilized assignment,
+    // plus anyone with saved timesheet rows for this project/month.
+    const employeeIdsForProject = new Set<number>();
+    if (timesheet?.entries) {
+      for (const entry of timesheet.entries) {
+        employeeIdsForProject.add(entry.employeeId);
+      }
+    }
+    for (const [employeeId, employeeMobs] of mobilizationsByEmployee) {
+      for (const { dateStr } of dayInfo) {
+        const effectiveMob = getEffectiveMobilizationForDate(
+          employeeMobs,
+          dateStr,
+        );
+        if (isAssignedToProject(effectiveMob, project.id)) {
+          employeeIdsForProject.add(employeeId);
+          break;
+        }
+      }
+    }
+
+    const pickRepresentativeMob = (
+      mobs: Mobilization[],
+      projectId: number,
+    ): Mobilization | undefined => {
+      if (mobs.length === 0) return undefined;
+      return mobs.find((m) => m.projectId === projectId) ?? mobs[0];
+    };
+
+    // ---- BATCH: Pre-fetch special day rates for the entire month ----
+    // Pass projectId so any special day disabled for this project (via
+    // ProjectSpecialDayRate.isEnabled=false) is excluded from the map and
+    // does not force job-status / billing rules on this project.
+    const specialDayRatesMap =
+      await this.specialDaysService.getSpecialDayRatesForRange(
+        startDate,
+        endDate,
+        project.id,
+      );
+
     const employees: any[] = [];
     let srNo = 1;
 
-    for (const [employeeId, latestMob] of employeeMap.entries()) {
-      // Use pre-fetched mobilizations for this employee
+    for (const employeeId of employeeIdsForProject) {
       const employeeMobilizations =
         mobilizationsByEmployee.get(employeeId) || [];
+      const latestMob = pickRepresentativeMob(
+        employeeMobilizations,
+        project.id,
+      );
+      if (!latestMob?.employee) {
+        continue;
+      }
 
       // Build daily hours
       const dailyHours: any[] = [];
 
-      // Annual leave / idle: blank on project sheet. Terminal statuses stay on project.
+      // Leave / terminal: blank on project sheet from first applicable day onward.
       let hiddenFromProject = false;
 
       for (const { dateStr, dayOfWeekName, day } of dayInfo) {
@@ -356,47 +269,28 @@ export class TimesheetsService {
           continue;
         }
 
-        // Find effective mobilization for this date with smart carry-forward logic
-        const effectiveMob = this.getEffectiveMobilizationForDate(
+        const effectiveMob = getEffectiveMobilizationForDate(
           employeeMobilizations,
           dateStr,
         );
 
         const carriedStatus = this.normalizeJobStatus(effectiveMob?.jobStatus);
 
-        // Check if there's an existing entry (using timezone-neutral comparison)
         const existingEntry = timesheet?.entries?.find(
           (e) =>
             e.employeeId === employeeId && formatDateOnly(e.date) === dateStr,
         );
 
-        // Pre-compute: is this the exact date of a mobilization/demobilization record?
         const effectiveMobDateStr = effectiveMob
           ? formatDateOnly(effectiveMob.actionDate)
           : null;
         const isActualMobilizationForThisDate = effectiveMobDateStr === dateStr;
-
-        // Absconded / cancelled / resigned — remain on project timesheet only.
-        if (carriedStatus && this.shouldShowTerminalStatus(carriedStatus)) {
-          dailyHours.push({
-            date: dateStr,
-            day,
-            hoursWorked: this.getDefaultHoursForStatus(carriedStatus),
-            jobStatus: carriedStatus,
-            isOffDay: false,
-            notes: existingEntry?.notes || null,
-            entryId: existingEntry?.id || null,
-          });
-          continue;
-        }
 
         if (carriedStatus && this.shouldHideFromProjectSheet(carriedStatus)) {
           hiddenFromProject = true;
           continue;
         }
 
-        // Employee was re-mobilized to a DIFFERENT project — they've left this one.
-        // Skip this day regardless of whether old saved entries exist.
         if (
           effectiveMob &&
           effectiveMob.mobStatus === MobStatus.MOBILIZED &&
@@ -406,8 +300,7 @@ export class TimesheetsService {
           continue;
         }
 
-        // Determine if employee should appear in timesheet for this date.
-        const isMobilizedToProject = this.isActivelyWorkingOnProject(
+        const isMobilizedToProject = isAssignedToProject(
           effectiveMob,
           project.id,
         );
@@ -442,10 +335,7 @@ export class TimesheetsService {
         let jobStatus: string;
 
         if (existingEntry) {
-          if (carriedStatus && this.shouldShowTerminalStatus(carriedStatus)) {
-            hours = this.getDefaultHoursForStatus(carriedStatus);
-            jobStatus = carriedStatus;
-          } else if (carriedStatus && this.shouldHideFromProjectSheet(carriedStatus)) {
+          if (carriedStatus && this.shouldHideFromProjectSheet(carriedStatus)) {
             continue;
           } else {
             hours = Number(existingEntry.hoursWorked);
@@ -616,7 +506,7 @@ export class TimesheetsService {
       const skillId = latestMob.mobilizedTradeId;
 
       for (const { dateStr, day } of dayInfo) {
-        const effectiveMob = this.getEffectiveMobilizationForDate(
+        const effectiveMob = getEffectiveMobilizationForDate(
           employeeMobilizations,
           dateStr,
         );
@@ -702,107 +592,6 @@ export class TimesheetsService {
       project: IDLE_PROJECT_VIRTUAL,
       employees,
     };
-  }
-
-  /**
-   * Get effective mobilization for a specific date with smart carry-forward logic.
-   * Absconded / cancelled / resigned stay locked until an explicit active
-   * remobilization to a project (later auto-sync or off-day rows do not clear them).
-   */
-  private getEffectiveMobilizationForDate(
-    employeeMobilizations: Mobilization[],
-    dateStr: string,
-  ): Mobilization | undefined {
-    const mobilizationsUpToDate = employeeMobilizations.filter((m) => {
-      const mobDateStr = formatDateOnly(m.actionDate);
-      return mobDateStr <= dateStr;
-    });
-
-    if (mobilizationsUpToDate.length === 0) {
-      return undefined;
-    }
-
-    const mostRecentRemob = mobilizationsUpToDate.find((m) =>
-      this.isExplicitRemobilization(m),
-    );
-    const mostRecentPersistent = mobilizationsUpToDate.find((m) =>
-      this.isPersistentUntilRemobStatus(m.jobStatus),
-    );
-
-    if (mostRecentPersistent) {
-      const persistentDate = formatDateOnly(mostRecentPersistent.actionDate);
-      const remobAfterPersistent =
-        mostRecentRemob &&
-        compareDateOnly(
-          formatDateOnly(mostRecentRemob.actionDate),
-          persistentDate,
-        ) > 0;
-
-      if (!remobAfterPersistent) {
-        if (compareDateOnly(dateStr, persistentDate) >= 0) {
-          return mostRecentPersistent;
-        }
-      } else {
-        const remobDate = formatDateOnly(mostRecentRemob!.actionDate);
-        if (compareDateOnly(dateStr, remobDate) >= 0) {
-          const sinceRemob = mobilizationsUpToDate.filter(
-            (m) => compareDateOnly(formatDateOnly(m.actionDate), remobDate) >= 0,
-          );
-          return this.resolveCarriedMobilization(sinceRemob, dateStr);
-        }
-        if (compareDateOnly(dateStr, persistentDate) >= 0) {
-          return mostRecentPersistent;
-        }
-      }
-    }
-
-    return this.resolveCarriedMobilization(mobilizationsUpToDate, dateStr);
-  }
-
-  /**
-   * Carry-forward for non-terminal timelines (temporary one-day statuses, etc.).
-   */
-  private resolveCarriedMobilization(
-    mobilizationsUpToDate: Mobilization[],
-    dateStr: string,
-  ): Mobilization | undefined {
-    if (mobilizationsUpToDate.length === 0) {
-      return undefined;
-    }
-
-    const latestMob = mobilizationsUpToDate[0];
-    const latestMobDateStr = formatDateOnly(latestMob.actionDate);
-
-    const temporaryStatuses = [
-      'absent',
-      'sick_leave',
-      'casual_leave',
-      'urgent_leave',
-    ];
-
-    if (latestMobDateStr === dateStr) {
-      return latestMob;
-    }
-
-    if (temporaryStatuses.includes(latestMob.jobStatus)) {
-      const nonTemporaryMob = mobilizationsUpToDate.find(
-        (m, index) => index > 0 && !temporaryStatuses.includes(m.jobStatus),
-      );
-
-      if (nonTemporaryMob) {
-        return {
-          ...latestMob,
-          jobStatus: nonTemporaryMob.jobStatus,
-        };
-      }
-
-      return {
-        ...latestMob,
-        jobStatus: JobStatus.ACTIVE,
-      };
-    }
-
-    return latestMob;
   }
 
   /**
@@ -1461,14 +1250,14 @@ export class TimesheetsService {
     // matching the same logic used by the Daily Mobilization Management page.
     const activeMobilizations: Mobilization[] = [];
     for (const [, employeeMobilizations] of mobilizationsByEmployee) {
-      const effectiveMob = this.getEffectiveMobilizationForDate(
+      const effectiveMob = getEffectiveMobilizationForDate(
         employeeMobilizations,
         date,
       );
       if (
-        effectiveMob &&
-        effectiveMob.mobStatus === MobStatus.MOBILIZED &&
-        effectiveMob.project !== null
+        effectiveMob?.projectId !== null &&
+        effectiveMob?.projectId !== undefined &&
+        isAssignedToProject(effectiveMob, effectiveMob.projectId)
       ) {
         activeMobilizations.push(effectiveMob);
       }
