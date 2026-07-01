@@ -454,14 +454,19 @@ export class MobilizationsService {
       employeeMobilizationsMap.get(mobilization.employeeId)!.push(mobilization);
     }
 
+    // Pre-fetch special day rates once per project (not once per employee).
+    const specialDayRatesCache =
+      await this.buildSpecialDayRatesCache(date, allMobilizations);
+
     // Apply smart carry-forward logic for each employee
     const effectiveMobilizations: Mobilization[] = [];
 
-    for (const [
-      employeeId,
-      mobilizations,
-    ] of employeeMobilizationsMap.entries()) {
-      const effective = await this.applySmartCarryForward(mobilizations, date);
+    for (const [, mobilizations] of employeeMobilizationsMap.entries()) {
+      const effective = await this.applySmartCarryForward(
+        mobilizations,
+        date,
+        specialDayRatesCache,
+      );
       if (effective) {
         effectiveMobilizations.push(
           normalizeMobilizationForProjectRoster(effective),
@@ -495,9 +500,45 @@ export class MobilizationsService {
    * Temporary statuses (absent, sick_leave, casual_leave) don't carry forward.
    * Respects project off days and special days for active project workers.
    */
+  private async buildSpecialDayRatesCache(
+    targetDate: Date,
+    allMobilizations: Mobilization[],
+  ): Promise<Map<number | null, Awaited<ReturnType<SpecialDaysService['getSpecialDayRates']>>>> {
+    const cache = new Map<
+      number | null,
+      Awaited<ReturnType<SpecialDaysService['getSpecialDayRates']>>
+    >();
+    const projectIds = new Set<number>();
+    for (const mob of allMobilizations) {
+      if (mob.projectId != null) {
+        projectIds.add(mob.projectId);
+      }
+    }
+    cache.set(
+      null,
+      await this.specialDaysService.getSpecialDayRates(targetDate),
+    );
+    await Promise.all(
+      [...projectIds].map(async (projectId) => {
+        cache.set(
+          projectId,
+          await this.specialDaysService.getSpecialDayRates(
+            targetDate,
+            projectId,
+          ),
+        );
+      }),
+    );
+    return cache;
+  }
+
   private async applySmartCarryForward(
     mobilizations: Mobilization[],
     targetDate: Date,
+    specialDayRatesCache?: Map<
+      number | null,
+      Awaited<ReturnType<SpecialDaysService['getSpecialDayRates']>>
+    >,
   ): Promise<Mobilization | null> {
     if (mobilizations.length === 0) {
       return null;
@@ -534,10 +575,15 @@ export class MobilizationsService {
 
     // We're carrying forward a status from a previous date
     // Check for special days first (higher priority than project off days).
-    const specialDayRates = await this.specialDaysService.getSpecialDayRates(
-      targetDate,
-      latestMob.projectId ?? undefined,
-    );
+    const projectKey = latestMob.projectId ?? null;
+    let specialDayRates = specialDayRatesCache?.get(projectKey);
+    if (!specialDayRates) {
+      specialDayRates = await this.specialDaysService.getSpecialDayRates(
+        targetDate,
+        latestMob.projectId ?? undefined,
+      );
+      specialDayRatesCache?.set(projectKey, specialDayRates);
+    }
 
     if (specialDayRates.isSpecialDay) {
       if (specialDayRates.isMandatoryOff) {

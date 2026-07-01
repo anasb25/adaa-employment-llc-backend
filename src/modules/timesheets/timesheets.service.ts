@@ -73,6 +73,23 @@ export interface MonthlyProjectTimesheetData {
   }>;
 }
 
+type MonthlyDayInfo = {
+  dateStr: string;
+  dayOfWeekName: string;
+  day: number;
+};
+
+/** Shared mobilization data for one month — loaded once per bulk timesheet request. */
+interface MonthlyMobilizationContext {
+  endDateStr: string;
+  startDate: Date;
+  endDate: Date;
+  dayInfo: MonthlyDayInfo[];
+  mobilizationsByEmployee: Map<number, Mobilization[]>;
+  /** Employees who ever had a mobilization row on each project (up to month-end). */
+  employeesEverOnProject: Map<number, Set<number>>;
+}
+
 @Injectable()
 export class TimesheetsService {
   private readonly logger = new Logger(TimesheetsService.name);
@@ -138,19 +155,79 @@ export class TimesheetsService {
     return jobStatus === JobStatus.IDLE || jobStatus === JobStatus.ANNUAL_LEAVE;
   }
 
+  /** Load all mobilizations for a month once (avoids N×repeat per project). */
+  private async buildMonthlyMobilizationContext(
+    month: string,
+  ): Promise<MonthlyMobilizationContext> {
+    const [year, monthNum] = month.split('-').map(Number);
+    const startDate = new Date(year, monthNum - 1, 1);
+    const endDate = new Date(year, monthNum, 0);
+    const daysInMonth = endDate.getDate();
+    const endDateStr = formatDateOnly(endDate);
+
+    const dayInfo: MonthlyDayInfo[] = [];
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      const currentDate = parseDateOnly(dateStr);
+      const dayOfWeekName = currentDate.toLocaleDateString('en-US', {
+        weekday: 'long',
+      });
+      dayInfo.push({ dateStr, dayOfWeekName, day });
+    }
+
+    const allMobilizations = await this.mobilizationRepository
+      .createQueryBuilder('mob')
+      .leftJoinAndSelect('mob.employee', 'employee')
+      .leftJoinAndSelect('mob.mobilizedTrade', 'mobilizedTrade')
+      .leftJoinAndSelect('mob.project', 'project')
+      .where('mob.actionDate <= :endDate', { endDate: endDateStr })
+      .orderBy('mob.actionDate', 'DESC')
+      .addOrderBy('mob.createdAt', 'DESC')
+      .getMany();
+
+    const mobilizationsByEmployee = new Map<number, Mobilization[]>();
+    const employeesEverOnProject = new Map<number, Set<number>>();
+
+    for (const mob of allMobilizations) {
+      let list = mobilizationsByEmployee.get(mob.employeeId);
+      if (!list) {
+        list = [];
+        mobilizationsByEmployee.set(mob.employeeId, list);
+      }
+      list.push(mob);
+
+      if (mob.projectId != null) {
+        let onProject = employeesEverOnProject.get(mob.projectId);
+        if (!onProject) {
+          onProject = new Set();
+          employeesEverOnProject.set(mob.projectId, onProject);
+        }
+        onProject.add(mob.employeeId);
+      }
+    }
+
+    return {
+      endDateStr,
+      startDate,
+      endDate,
+      dayInfo,
+      mobilizationsByEmployee,
+      employeesEverOnProject,
+    };
+  }
+
   /**
    * Get monthly project timesheet with carry-forward logic
    */
   async getMonthlyProjectTimesheet(
     projectId: number,
     month: string, // Format: YYYY-MM
+    sharedContext?: MonthlyMobilizationContext,
   ): Promise<MonthlyProjectTimesheetData> {
-    // Parse month
-    const [year, monthNum] = month.split('-').map(Number);
-    const startDate = new Date(year, monthNum - 1, 1);
-    const endDate = new Date(year, monthNum, 0); // Last day of month
-    const daysInMonth = endDate.getDate();
-    const endDateStr = formatDateOnly(endDate);
+    const ctx =
+      sharedContext ?? (await this.buildMonthlyMobilizationContext(month));
+    const { endDateStr, startDate, endDate, dayInfo, mobilizationsByEmployee, employeesEverOnProject } =
+      ctx;
 
     // Get project
     const project = await this.projectRepository.findOne({
@@ -168,51 +245,17 @@ export class TimesheetsService {
       relations: ['entries', 'entries.employee'],
     });
 
-    // Pre-compute day-of-week names for each day in the month
-    const dayInfo: Array<{
-      dateStr: string;
-      dayOfWeekName: string;
-      day: number;
-    }> = [];
-    for (let day = 1; day <= daysInMonth; day++) {
-      const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      const currentDate = parseDateOnly(dateStr);
-      const dayOfWeekName = currentDate.toLocaleDateString('en-US', {
-        weekday: 'long',
-      });
-      dayInfo.push({ dateStr, dayOfWeekName, day });
-    }
-
-    // All mobilizations up to month-end — used for carry-forward and roster discovery
-    const allMobilizationsUpToMonth = await this.mobilizationRepository
-      .createQueryBuilder('mob')
-      .leftJoinAndSelect('mob.employee', 'employee')
-      .leftJoinAndSelect('mob.mobilizedTrade', 'mobilizedTrade')
-      .leftJoinAndSelect('mob.project', 'project')
-      .where('mob.actionDate <= :endDate', { endDate: endDateStr })
-      .orderBy('mob.actionDate', 'DESC')
-      .addOrderBy('mob.createdAt', 'DESC')
-      .getMany();
-
-    const mobilizationsByEmployee = new Map<number, Mobilization[]>();
-    for (const mob of allMobilizationsUpToMonth) {
-      let list = mobilizationsByEmployee.get(mob.employeeId);
-      if (!list) {
-        list = [];
-        mobilizationsByEmployee.set(mob.employeeId, list);
-      }
-      list.push(mob);
-    }
-
-    // Employees on this project: any day in the month with effective mobilized assignment,
-    // plus anyone with saved timesheet rows for this project/month.
+    // Candidates: ever on this project + saved timesheet rows (not all 1000+ employees).
     const employeeIdsForProject = new Set<number>();
     if (timesheet?.entries) {
       for (const entry of timesheet.entries) {
         employeeIdsForProject.add(entry.employeeId);
       }
     }
-    for (const [employeeId, employeeMobs] of mobilizationsByEmployee) {
+    const historicalOnProject =
+      employeesEverOnProject.get(project.id) ?? new Set<number>();
+    for (const employeeId of historicalOnProject) {
+      const employeeMobs = mobilizationsByEmployee.get(employeeId) || [];
       for (const { dateStr } of dayInfo) {
         const effectiveMob = getEffectiveMobilizationForDate(
           employeeMobs,
@@ -227,10 +270,10 @@ export class TimesheetsService {
 
     const pickRepresentativeMob = (
       mobs: Mobilization[],
-      projectId: number,
+      pid: number,
     ): Mobilization | undefined => {
       if (mobs.length === 0) return undefined;
-      return mobs.find((m) => m.projectId === projectId) ?? mobs[0];
+      return mobs.find((m) => m.projectId === pid) ?? mobs[0];
     };
 
     // ---- BATCH: Pre-fetch special day rates for the entire month ----
@@ -408,19 +451,22 @@ export class TimesheetsService {
   async getAllProjectTimesheets(
     month: string,
   ): Promise<MonthlyProjectTimesheetData[]> {
-    // Fetch all active (non-deleted) projects
     const projects = await this.projectRepository.find({
       relations: ['client'],
       order: { name: 'ASC' },
     });
 
-    // Process all projects concurrently
+    const sharedContext = await this.buildMonthlyMobilizationContext(month);
+
     const results = await Promise.all(
       projects.map(async (project) => {
         try {
-          return await this.getMonthlyProjectTimesheet(project.id, month);
+          return await this.getMonthlyProjectTimesheet(
+            project.id,
+            month,
+            sharedContext,
+          );
         } catch (error) {
-          // If a project fails (e.g. not found), skip it
           this.logger.warn(
             `Failed to get timesheet for project ${project.id}: ${error.message}`,
           );
@@ -429,13 +475,11 @@ export class TimesheetsService {
       }),
     );
 
-    // Filter out any null results from failed projects
     const projectResults = results.filter(
       (r): r is MonthlyProjectTimesheetData => r !== null,
     );
 
-    // Append idle + annual-leave timesheet at the end (projectId=null; one accordion)
-    const idleData = await this.getMonthlyIdleTimesheetData(month);
+    const idleData = await this.getMonthlyIdleTimesheetData(month, sharedContext);
     return [...projectResults, idleData];
   }
 
@@ -448,52 +492,16 @@ export class TimesheetsService {
    */
   async getMonthlyIdleTimesheetData(
     month: string,
+    sharedContext?: MonthlyMobilizationContext,
   ): Promise<MonthlyProjectTimesheetData> {
-    const [year, monthNum] = month.split('-').map(Number);
-    const endDate = new Date(year, monthNum, 0);
-    const daysInMonth = endDate.getDate();
-    const endDateStr = formatDateOnly(endDate);
+    const ctx =
+      sharedContext ?? (await this.buildMonthlyMobilizationContext(month));
+    const { dayInfo, mobilizationsByEmployee } = ctx;
 
     const timesheet = await this.timesheetRepository.findOne({
       where: { projectId: null as any, month },
       relations: ['entries', 'entries.employee'],
     });
-
-    const dayInfo: Array<{
-      dateStr: string;
-      dayOfWeekName: string;
-      day: number;
-    }> = [];
-    for (let day = 1; day <= daysInMonth; day++) {
-      const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      const currentDate = parseDateOnly(dateStr);
-      const dayOfWeekName = currentDate.toLocaleDateString('en-US', {
-        weekday: 'long',
-      });
-      dayInfo.push({ dateStr, dayOfWeekName, day });
-    }
-
-    const allMobilizations = await this.mobilizationRepository
-      .createQueryBuilder('mob')
-      .where('mob.actionDate <= :endDate', { endDate: endDateStr })
-      .leftJoinAndSelect('mob.employee', 'employee')
-      .leftJoinAndSelect('mob.mobilizedTrade', 'mobilizedTrade')
-      .leftJoinAndSelect('mob.project', 'project')
-      .orderBy('mob.employeeId')
-      .addOrderBy('mob.actionDate', 'DESC')
-      .addOrderBy('mob.createdAt', 'DESC')
-      .getMany();
-
-    const mobilizationsByEmployee = new Map<number, Mobilization[]>();
-    for (const mob of allMobilizations) {
-      if (!mob.employee) continue;
-      let list = mobilizationsByEmployee.get(mob.employeeId);
-      if (!list) {
-        list = [];
-        mobilizationsByEmployee.set(mob.employeeId, list);
-      }
-      list.push(mob);
-    }
 
     const employees: any[] = [];
     let srNo = 1;
