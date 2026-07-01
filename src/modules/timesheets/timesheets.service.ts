@@ -86,8 +86,11 @@ interface MonthlyMobilizationContext {
   endDate: Date;
   dayInfo: MonthlyDayInfo[];
   mobilizationsByEmployee: Map<number, Mobilization[]>;
-  /** Employees who ever had a mobilization row on each project (up to month-end). */
-  employeesEverOnProject: Map<number, Set<number>>;
+  /**
+   * Per project: employees who were mobilized on at least one day in this month.
+   * Supports mid-month transfers (same employee on multiple project sheets).
+   */
+  employeeIdsByProjectForMonth: Map<number, Set<number>>;
 }
 
 @Injectable()
@@ -186,7 +189,7 @@ export class TimesheetsService {
       .getMany();
 
     const mobilizationsByEmployee = new Map<number, Mobilization[]>();
-    const employeesEverOnProject = new Map<number, Set<number>>();
+    const employeeIdsByProjectForMonth = new Map<number, Set<number>>();
 
     for (const mob of allMobilizations) {
       let list = mobilizationsByEmployee.get(mob.employeeId);
@@ -195,14 +198,20 @@ export class TimesheetsService {
         mobilizationsByEmployee.set(mob.employeeId, list);
       }
       list.push(mob);
+    }
 
-      if (mob.projectId != null) {
-        let onProject = employeesEverOnProject.get(mob.projectId);
+    // One pass: for each employee × each day, record which project they were on.
+    for (const [employeeId, mobs] of mobilizationsByEmployee) {
+      for (const { dateStr } of dayInfo) {
+        const effective = getEffectiveMobilizationForDate(mobs, dateStr);
+        if (!effective?.projectId) continue;
+        if (!isAssignedToProject(effective, effective.projectId)) continue;
+        let onProject = employeeIdsByProjectForMonth.get(effective.projectId);
         if (!onProject) {
           onProject = new Set();
-          employeesEverOnProject.set(mob.projectId, onProject);
+          employeeIdsByProjectForMonth.set(effective.projectId, onProject);
         }
-        onProject.add(mob.employeeId);
+        onProject.add(employeeId);
       }
     }
 
@@ -212,7 +221,7 @@ export class TimesheetsService {
       endDate,
       dayInfo,
       mobilizationsByEmployee,
-      employeesEverOnProject,
+      employeeIdsByProjectForMonth,
     };
   }
 
@@ -226,7 +235,7 @@ export class TimesheetsService {
   ): Promise<MonthlyProjectTimesheetData> {
     const ctx =
       sharedContext ?? (await this.buildMonthlyMobilizationContext(month));
-    const { endDateStr, startDate, endDate, dayInfo, mobilizationsByEmployee, employeesEverOnProject } =
+    const { endDateStr, startDate, endDate, dayInfo, mobilizationsByEmployee, employeeIdsByProjectForMonth } =
       ctx;
 
     // Get project
@@ -245,23 +254,10 @@ export class TimesheetsService {
       relations: ['entries', 'entries.employee'],
     });
 
-    // Roster from mobilization only (saved June rows must not add wrong employees).
-    const employeeIdsForProject = new Set<number>();
-    const historicalOnProject =
-      employeesEverOnProject.get(project.id) ?? new Set<number>();
-    for (const employeeId of historicalOnProject) {
-      const employeeMobs = mobilizationsByEmployee.get(employeeId) || [];
-      for (const { dateStr } of dayInfo) {
-        const effectiveMob = getEffectiveMobilizationForDate(
-          employeeMobs,
-          dateStr,
-        );
-        if (isAssignedToProject(effectiveMob, project.id)) {
-          employeeIdsForProject.add(employeeId);
-          break;
-        }
-      }
-    }
+    // Employees who worked on this project on at least one day this month
+    // (includes mid-month transfers to/from other projects).
+    const employeeIdsForProject =
+      employeeIdsByProjectForMonth.get(project.id) ?? new Set<number>();
 
     const pickRepresentativeMob = (
       mobs: Mobilization[],
@@ -296,23 +292,21 @@ export class TimesheetsService {
         continue;
       }
 
-      // Build daily hours
+      // Build daily hours — one cell per day this employee was mobilized on this project.
       const dailyHours: any[] = [];
 
-      // Leave / terminal: blank on project sheet from first applicable day onward.
-      let hiddenFromProject = false;
-
       for (const { dateStr, dayOfWeekName, day } of dayInfo) {
-        if (hiddenFromProject) {
-          continue;
-        }
-
         const effectiveMob = getEffectiveMobilizationForDate(
           employeeMobilizations,
           dateStr,
         );
 
         const carriedStatus = this.normalizeJobStatus(effectiveMob?.jobStatus);
+
+        // Only show days mobilized to THIS project (mid-month transfers handled per day).
+        if (!isAssignedToProject(effectiveMob, project.id)) {
+          continue;
+        }
 
         const existingEntry = timesheet?.entries?.find(
           (e) =>
@@ -323,30 +317,6 @@ export class TimesheetsService {
           ? formatDateOnly(effectiveMob.actionDate)
           : null;
         const isActualMobilizationForThisDate = effectiveMobDateStr === dateStr;
-
-        if (carriedStatus && this.shouldHideFromProjectSheet(carriedStatus)) {
-          hiddenFromProject = true;
-          continue;
-        }
-
-        if (
-          effectiveMob &&
-          effectiveMob.mobStatus === MobStatus.MOBILIZED &&
-          effectiveMob.projectId !== null &&
-          effectiveMob.projectId !== project.id
-        ) {
-          continue;
-        }
-
-        const isMobilizedToProject = isAssignedToProject(
-          effectiveMob,
-          project.id,
-        );
-
-        // Mobilization is source of truth — stale saved rows cannot keep ex-employees on sheet.
-        if (!isMobilizedToProject) {
-          continue;
-        }
 
         // Use pre-fetched special day rates (no DB query per day)
         const specialDayRates = specialDayRatesMap.get(dateStr) || {
