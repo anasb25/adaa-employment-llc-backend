@@ -79,8 +79,8 @@ type MonthlyDayInfo = {
   day: number;
 };
 
-/** Shared mobilization data for one month — loaded once per bulk timesheet request. */
-interface MonthlyMobilizationContext {
+/** Shared mobilization data for one month — loaded once per bulk timesheet/payroll request. */
+export interface MonthlyMobilizationContext {
   endDateStr: string;
   startDate: Date;
   endDate: Date;
@@ -159,7 +159,7 @@ export class TimesheetsService {
   }
 
   /** Load all mobilizations for a month once (avoids N×repeat per project). */
-  private async buildMonthlyMobilizationContext(
+  async buildMonthlyMobilizationContext(
     month: string,
   ): Promise<MonthlyMobilizationContext> {
     const [year, monthNum] = month.split('-').map(Number);

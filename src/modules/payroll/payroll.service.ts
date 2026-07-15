@@ -23,7 +23,7 @@ import {
   Timesheet,
   TimesheetStatus,
 } from '../timesheets/entities/timesheet.entity';
-import { TimesheetsService } from '../timesheets/timesheets.service';
+import { TimesheetsService, MonthlyMobilizationContext } from '../timesheets/timesheets.service';
 import { Project } from '../projects/entities/project.entity';
 import { RateVariant } from '../rate-variants/entities/rate-variant.entity';
 import { SpecialDay } from '../special-days/entities/special-day.entity';
@@ -54,6 +54,14 @@ type PayrollComputationDay = {
 
 @Injectable()
 export class PayrollService {
+  /** Request-local caches for month calculate (avoid N× DB hits). Cleared after each run. */
+  private activeSpecialDaysCache: SpecialDay[] | null = null;
+  private disabledSpecialDaysByProject = new Map<number, Set<number>>();
+  private disabledRateVariantsByProject = new Map<number, Set<number>>();
+  private activeRateVariantsCache: RateVariant[] | null = null;
+  private projectOffDayVariantCache: RateVariant | null | undefined = undefined;
+  private idleVariantCache: RateVariant | null | undefined = undefined;
+
   constructor(
     @InjectRepository(Payroll)
     private readonly payrollRepository: Repository<Payroll>,
@@ -73,6 +81,15 @@ export class PayrollService {
     private readonly projectRateVariantRateRepository: Repository<ProjectRateVariantRate>,
     private readonly timesheetsService: TimesheetsService,
   ) {}
+
+  private clearPayrollCalcCaches(): void {
+    this.activeSpecialDaysCache = null;
+    this.disabledSpecialDaysByProject.clear();
+    this.disabledRateVariantsByProject.clear();
+    this.activeRateVariantsCache = null;
+    this.projectOffDayVariantCache = undefined;
+    this.idleVariantCache = undefined;
+  }
 
   /**
    * Get all payrolls with optional filters and pagination
@@ -239,43 +256,62 @@ export class PayrollService {
    * Uses the same timesheet data structure that displays correctly in the UI
    */
   async calculatePayrollForMonth(month: string): Promise<Payroll[]> {
-    const projectIds = await this.getApprovedProjectIdsForMonth(month);
-    if (projectIds.length === 0) {
-      throw new BadRequestException(
-        `No approved timesheets found for month ${month}`,
+    this.clearPayrollCalcCaches();
+    try {
+      const projectIds = await this.getApprovedProjectIdsForMonth(month);
+      if (projectIds.length === 0) {
+        throw new BadRequestException(
+          `No approved timesheets found for month ${month}`,
+        );
+      }
+
+      // One mobilization load for all projects + idle sheet (avoids timeout).
+      const sharedContext =
+        await this.timesheetsService.buildMonthlyMobilizationContext(month);
+
+      const payrolls: Payroll[] = [];
+      const seenPayrollIds = new Set<number>();
+
+      const projectPayrolls = await this.savePayrollsFromConsolidatedMap(
+        month,
+        projectIds,
+        sharedContext,
       );
-    }
-
-    const payrolls: Payroll[] = [];
-    const seenPayrollIds = new Set<number>();
-
-    const projectPayrolls = await this.savePayrollsFromConsolidatedMap(
-      month,
-      projectIds,
-    );
-    for (const p of projectPayrolls) {
-      payrolls.push(p);
-      seenPayrollIds.add(p.id);
-    }
-
-    const idlePayrolls = await this.calculatePayrollFromIdleTimesheet(month);
-    for (const p of idlePayrolls) {
-      if (!seenPayrollIds.has(p.id)) {
+      for (const p of projectPayrolls) {
         payrolls.push(p);
         seenPayrollIds.add(p.id);
       }
-    }
 
-    return payrolls;
+      const idlePayrolls = await this.calculatePayrollFromIdleTimesheet(
+        month,
+        sharedContext,
+      );
+      for (const p of idlePayrolls) {
+        if (!seenPayrollIds.has(p.id)) {
+          payrolls.push(p);
+          seenPayrollIds.add(p.id);
+        }
+      }
+
+      return payrolls;
+    } finally {
+      this.clearPayrollCalcCaches();
+    }
   }
 
   /**
    * Calculate payroll from the approved idle-employees timesheet.
    * For each employee with idle days: merge idle hours into existing payroll for the month, or create one if none exists.
    */
-  async calculatePayrollFromIdleTimesheet(month: string): Promise<Payroll[]> {
+  async calculatePayrollFromIdleTimesheet(
+    month: string,
+    sharedContext?: MonthlyMobilizationContext,
+  ): Promise<Payroll[]> {
     const timesheetData =
-      await this.timesheetsService.getMonthlyIdleTimesheetData(month);
+      await this.timesheetsService.getMonthlyIdleTimesheetData(
+        month,
+        sharedContext,
+      );
 
     if (!timesheetData.timesheet) {
       return [];
@@ -383,23 +419,34 @@ export class PayrollService {
     projectId: number,
     month: string,
   ): Promise<Payroll[]> {
-    const timesheetData =
-      await this.timesheetsService.getMonthlyProjectTimesheet(projectId, month);
+    this.clearPayrollCalcCaches();
+    try {
+      const timesheetData =
+        await this.timesheetsService.getMonthlyProjectTimesheet(projectId, month);
 
-    if (!timesheetData.timesheet) {
-      throw new NotFoundException(
-        `No timesheet found for project ${projectId} in month ${month}`,
+      if (!timesheetData.timesheet) {
+        throw new NotFoundException(
+          `No timesheet found for project ${projectId} in month ${month}`,
+        );
+      }
+
+      if (timesheetData.timesheet.status !== TimesheetStatus.APPROVED) {
+        throw new BadRequestException(
+          `Timesheet for project ${projectId} in month ${month} is not approved`,
+        );
+      }
+
+      const projectIds = await this.getApprovedProjectIdsForMonth(month);
+      const sharedContext =
+        await this.timesheetsService.buildMonthlyMobilizationContext(month);
+      return this.savePayrollsFromConsolidatedMap(
+        month,
+        projectIds,
+        sharedContext,
       );
+    } finally {
+      this.clearPayrollCalcCaches();
     }
-
-    if (timesheetData.timesheet.status !== TimesheetStatus.APPROVED) {
-      throw new BadRequestException(
-        `Timesheet for project ${projectId} in month ${month} is not approved`,
-      );
-    }
-
-    const projectIds = await this.getApprovedProjectIdsForMonth(month);
-    return this.savePayrollsFromConsolidatedMap(month, projectIds);
   }
 
   /** Approved non-idle projects for payroll consolidation */
@@ -483,6 +530,7 @@ export class PayrollService {
   private async buildConsolidatedEmployeeDailyForMonth(
     month: string,
     projectIds: number[],
+    sharedContext?: MonthlyMobilizationContext,
   ): Promise<{
     byEmployee: Map<
       number,
@@ -506,9 +554,16 @@ export class PayrollService {
     >();
     const projectNameById = new Map<number, string>();
 
+    const ctx =
+      sharedContext ??
+      (await this.timesheetsService.buildMonthlyMobilizationContext(month));
+
     for (const projectId of projectIds) {
-      const data =
-        await this.timesheetsService.getMonthlyProjectTimesheet(projectId, month);
+      const data = await this.timesheetsService.getMonthlyProjectTimesheet(
+        projectId,
+        month,
+        ctx,
+      );
       if (
         !data.timesheet ||
         data.timesheet.status !== TimesheetStatus.APPROVED
@@ -541,9 +596,14 @@ export class PayrollService {
   private async savePayrollsFromConsolidatedMap(
     month: string,
     projectIds: number[],
+    sharedContext?: MonthlyMobilizationContext,
   ): Promise<Payroll[]> {
     const { byEmployee, projectNameById } =
-      await this.buildConsolidatedEmployeeDailyForMonth(month, projectIds);
+      await this.buildConsolidatedEmployeeDailyForMonth(
+        month,
+        projectIds,
+        sharedContext,
+      );
     const payrolls: Payroll[] = [];
 
     for (const [employeeId, empRow] of byEmployee) {
@@ -638,10 +698,13 @@ export class PayrollService {
   ): Promise<
     Array<{ variant: RateVariant | null; hours: number; variantName: string }>
   > {
-    const allVariants = await this.rateVariantRepository.find({
-      where: { isActive: true },
-      order: { displayOrder: 'ASC' },
-    });
+    if (!this.activeRateVariantsCache) {
+      this.activeRateVariantsCache = await this.rateVariantRepository.find({
+        where: { isActive: true },
+        order: { displayOrder: 'ASC' },
+      });
+    }
+    const allVariants = this.activeRateVariantsCache;
 
     // Exclude variants explicitly disabled for this project — their hours
     // fall through to the regular/base rate (same policy as invoicing).
@@ -994,9 +1057,12 @@ export class PayrollService {
     date: string,
     projectId?: number,
   ): Promise<SpecialDay | null> {
-    const specialDays = await this.specialDayRepository.find({
-      where: { isActive: true },
-    });
+    if (!this.activeSpecialDaysCache) {
+      this.activeSpecialDaysCache = await this.specialDayRepository.find({
+        where: { isActive: true },
+      });
+    }
+    const specialDays = this.activeSpecialDaysCache;
 
     const disabledIds = projectId
       ? await this.getDisabledSpecialDayIdsForProject(projectId)
@@ -1020,37 +1086,55 @@ export class PayrollService {
   private async getDisabledSpecialDayIdsForProject(
     projectId: number,
   ): Promise<Set<number>> {
+    const cached = this.disabledSpecialDaysByProject.get(projectId);
+    if (cached) return cached;
+
     const rows = await this.projectSpecialDayRateRepository.find({
       where: { projectId, isEnabled: false },
     });
-    return new Set(rows.map((r) => r.specialDayId));
+    const set = new Set(rows.map((r) => r.specialDayId));
+    this.disabledSpecialDaysByProject.set(projectId, set);
+    return set;
   }
 
   private async getDisabledRateVariantIdsForProject(
     projectId: number,
   ): Promise<Set<number>> {
+    const cached = this.disabledRateVariantsByProject.get(projectId);
+    if (cached) return cached;
+
     const rows = await this.projectRateVariantRateRepository.find({
       where: { projectId, isEnabled: false },
     });
-    return new Set(rows.map((r) => r.rateVariantId));
+    const set = new Set(rows.map((r) => r.rateVariantId));
+    this.disabledRateVariantsByProject.set(projectId, set);
+    return set;
   }
 
   /**
    * Get the "Project Off Day" variant
    */
   private async getProjectOffDayVariant(): Promise<RateVariant | null> {
-    return await this.rateVariantRepository.findOne({
+    if (this.projectOffDayVariantCache !== undefined) {
+      return this.projectOffDayVariantCache;
+    }
+    this.projectOffDayVariantCache = await this.rateVariantRepository.findOne({
       where: { name: 'Project Off Day', isSystem: true },
     });
+    return this.projectOffDayVariantCache;
   }
 
   /**
    * Get the "Idle" variant
    */
   private async getIdleVariant(): Promise<RateVariant | null> {
-    return await this.rateVariantRepository.findOne({
+    if (this.idleVariantCache !== undefined) {
+      return this.idleVariantCache;
+    }
+    this.idleVariantCache = await this.rateVariantRepository.findOne({
       where: { name: 'Idle', isSystem: true },
     });
+    return this.idleVariantCache;
   }
 
   /**
