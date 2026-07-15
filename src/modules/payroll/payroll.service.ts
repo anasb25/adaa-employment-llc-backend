@@ -10,6 +10,7 @@ import {
   IsNull,
   LessThanOrEqual,
   MoreThanOrEqual,
+  In,
 } from 'typeorm';
 import { Payroll } from './entities/payroll.entity';
 import { CreatePayrollDto } from './dto/create-payroll.dto';
@@ -558,12 +559,19 @@ export class PayrollService {
       sharedContext ??
       (await this.timesheetsService.buildMonthlyMobilizationContext(month));
 
-    for (const projectId of projectIds) {
-      const data = await this.timesheetsService.getMonthlyProjectTimesheet(
-        projectId,
-        month,
-        ctx,
-      );
+    const projectSheets = await Promise.all(
+      projectIds.map((projectId) =>
+        this.timesheetsService.getMonthlyProjectTimesheet(
+          projectId,
+          month,
+          ctx,
+        ),
+      ),
+    );
+
+    for (let i = 0; i < projectIds.length; i++) {
+      const projectId = projectIds[i];
+      const data = projectSheets[i];
       if (
         !data.timesheet ||
         data.timesheet.status !== TimesheetStatus.APPROVED
@@ -604,54 +612,92 @@ export class PayrollService {
         projectIds,
         sharedContext,
       );
+
+    // Prefetch base rates in one query instead of per employee.
+    const employeeIds = [...byEmployee.keys()];
+    const rateByEmployee = new Map<number, number>();
+    if (employeeIds.length > 0) {
+      const skills = await this.employeeSkillRepository
+        .createQueryBuilder('es')
+        .where('es.employeeId IN (:...ids)', { ids: employeeIds })
+        .orderBy('es.id', 'ASC')
+        .getMany();
+      for (const es of skills) {
+        if (!rateByEmployee.has(es.employeeId) && es.cost_price != null) {
+          rateByEmployee.set(es.employeeId, Number(es.cost_price));
+        }
+      }
+    }
+
+    const existingPayrolls =
+      employeeIds.length > 0
+        ? await this.payrollRepository.find({
+            where: { employeeId: In(employeeIds), month },
+          })
+        : [];
+    const existingByEmployee = new Map(
+      existingPayrolls.map((p) => [p.employeeId, p]),
+    );
+
+    const entries = [...byEmployee.entries()];
     const payrolls: Payroll[] = [];
+    const chunkSize = 20;
 
-    for (const [employeeId, empRow] of byEmployee) {
-      try {
-        const dailyHours = [...empRow.dailyByDate.values()].sort((a, b) =>
-          a.date.localeCompare(b.date),
-        );
-        if (dailyHours.length === 0) continue;
+    for (let i = 0; i < entries.length; i += chunkSize) {
+      const chunk = entries.slice(i, i + chunkSize);
+      const chunkResults = await Promise.all(
+        chunk.map(async ([employeeId, empRow]) => {
+          try {
+            const dailyHours = [...empRow.dailyByDate.values()].sort((a, b) =>
+              a.date.localeCompare(b.date),
+            );
+            if (dailyHours.length === 0) return null;
 
-        const calculations = await this.calculateEmployeePayrollFromTimesheetData(
-          employeeId,
-          empRow.skillId,
-          dailyHours,
-        );
+            const calculations =
+              await this.calculateEmployeePayrollFromTimesheetData(
+                employeeId,
+                empRow.skillId,
+                dailyHours,
+                undefined,
+                rateByEmployee.get(employeeId) ?? 0,
+              );
 
-        const existingPayroll = await this.payrollRepository.findOne({
-          where: { employeeId, month },
-        });
+            const existingPayroll = existingByEmployee.get(employeeId);
+            const missingRate = calculations.baseHourlyRate === 0;
+            const projectNamesLabel = [...empRow.projectIds]
+              .map((id) => projectNameById.get(id) || `Project #${id}`)
+              .sort()
+              .join(', ');
+            const notePrefix = `Calculated from approved timesheets (projects: ${projectNamesLabel})`;
+            const noteWarning = missingRate
+              ? ` [Warning: No cost_price found for skill ${empRow.skillId}, using rate 0]`
+              : '';
 
-        const missingRate = calculations.baseHourlyRate === 0;
-        const projectNamesLabel = [...empRow.projectIds]
-          .map((id) => projectNameById.get(id) || `Project #${id}`)
-          .sort()
-          .join(', ');
-        const notePrefix = `Calculated from approved timesheets (projects: ${projectNamesLabel})`;
-        const noteWarning = missingRate
-          ? ` [Warning: No cost_price found for skill ${empRow.skillId}, using rate 0]`
-          : '';
+            const payrollData: CreatePayrollDto = {
+              employeeId,
+              month,
+              totalHours: calculations.totalHours,
+              totalOtHours: calculations.totalOtHours,
+              totalOffdaysWorkedHours: calculations.totalOffdaysWorkedHours,
+              totalIdleDayHours: calculations.totalIdleDayHours,
+              absentDaysDeductible: calculations.absentDays,
+              hoursBreakdown: calculations.hoursBreakdown,
+              baseHourlyRate: calculations.baseHourlyRate,
+              totalGrossSalary: calculations.totalGrossSalary,
+              allowances: existingPayroll?.allowances || undefined,
+              otherDeductions: existingPayroll?.otherDeductions || undefined,
+              notes: notePrefix + noteWarning,
+            };
 
-        const payrollData: CreatePayrollDto = {
-          employeeId,
-          month,
-          totalHours: calculations.totalHours,
-          totalOtHours: calculations.totalOtHours,
-          totalOffdaysWorkedHours: calculations.totalOffdaysWorkedHours,
-          totalIdleDayHours: calculations.totalIdleDayHours,
-          absentDaysDeductible: calculations.absentDays,
-          hoursBreakdown: calculations.hoursBreakdown,
-          baseHourlyRate: calculations.baseHourlyRate,
-          totalGrossSalary: calculations.totalGrossSalary,
-          allowances: existingPayroll?.allowances || undefined,
-          otherDeductions: existingPayroll?.otherDeductions || undefined,
-          notes: notePrefix + noteWarning,
-        };
+            return await this.createOrUpdate(payrollData);
+          } catch {
+            return null;
+          }
+        }),
+      );
 
-        payrolls.push(await this.createOrUpdate(payrollData));
-      } catch {
-        continue;
+      for (const p of chunkResults) {
+        if (p) payrolls.push(p);
       }
     }
 
@@ -839,6 +885,7 @@ export class PayrollService {
     skillId: number | null | undefined,
     dailyHours: PayrollComputationDay[],
     projectId?: number,
+    prefetchedBaseRate?: number,
   ) {
     let totalHours = 0;
     let totalOtHours = 0;
@@ -847,7 +894,10 @@ export class PayrollService {
     let absentDays = 0;
 
     // Get base hourly rate for this employee
-    const baseRate = await this.getEmployeeBaseRate(employeeId, skillId);
+    const baseRate =
+      prefetchedBaseRate !== undefined
+        ? prefetchedBaseRate
+        : await this.getEmployeeBaseRate(employeeId, skillId);
 
     // Detailed breakdown tracking (additionalAmount = flat AED/hr on top of baseRate)
     const regularHoursMap = new Map<
