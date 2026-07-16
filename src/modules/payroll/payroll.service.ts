@@ -32,6 +32,7 @@ import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity
 import { ProjectSpecialDayRate } from '../projects/entities/project-special-day-rate.entity';
 import { ProjectRateVariantRate } from '../projects/entities/project-rate-variant-rate.entity';
 import { AllowanceDeductionExcelValidator } from './utils/allowance-deduction-excel-validator.util';
+import { compareDateOnly, formatDateOnly } from '../../common/utils/date.util';
 
 export interface ImportResult {
   success: boolean;
@@ -364,9 +365,7 @@ export class PayrollService {
           existingPayroll.totalIdleDayHours =
             Number(existingPayroll.totalIdleDayHours) +
             Number(calculations.totalIdleDayHours);
-          existingPayroll.totalHours =
-            Number(existingPayroll.totalHours) +
-            Number(calculations.totalIdleDayHours);
+          // Idle must NOT be added to totalHours (regular hours only).
           existingPayroll.totalGrossSalary =
             Number(existingPayroll.totalGrossSalary) + idleAmount;
           existingPayroll.hoursBreakdown = {
@@ -390,7 +389,7 @@ export class PayrollService {
           const payrollData: CreatePayrollDto = {
             employeeId: employee.employeeId,
             month,
-            totalHours: calculations.totalIdleDayHours,
+            totalHours: 0,
             totalOtHours: 0,
             totalOffdaysWorkedHours: 0,
             totalIdleDayHours: calculations.totalIdleDayHours,
@@ -1118,14 +1117,21 @@ export class PayrollService {
       ? await this.getDisabledSpecialDayIdsForProject(projectId)
       : new Set<number>();
 
+    const dateStr = formatDateOnly(date);
+
     for (const specialDay of specialDays) {
       if (disabledIds.has(specialDay.id)) continue;
 
-      const targetDate = new Date(date);
-      const start = new Date(specialDay.startDate);
-      const end = specialDay.endDate ? new Date(specialDay.endDate) : start;
+      const startStr = formatDateOnly(specialDay.startDate);
+      const endStr = specialDay.endDate
+        ? formatDateOnly(specialDay.endDate)
+        : startStr;
 
-      if (targetDate >= start && targetDate <= end) {
+      // Timezone-safe YYYY-MM-DD range check
+      if (
+        compareDateOnly(dateStr, startStr) >= 0 &&
+        compareDateOnly(dateStr, endStr) <= 0
+      ) {
         return specialDay;
       }
     }
@@ -1162,16 +1168,69 @@ export class PayrollService {
   }
 
   /**
+   * Ensure system rate variants exist. Off-day worked hours use "Project Off Day"
+   * employeeAdditionalAmount (e.g. 0.25 → rate 5.20 + 0.25 = 5.45).
+   */
+  private async ensureSystemRateVariants(): Promise<void> {
+    let offDay = await this.rateVariantRepository.findOne({
+      where: { name: 'Project Off Day' },
+    });
+    if (!offDay) {
+      offDay = this.rateVariantRepository.create({
+        name: 'Project Off Day',
+        description: 'Rate applied for hours worked on project off days',
+        displayOrder: 999,
+        isActive: true,
+        color: '#FF6B6B',
+        employeeAdditionalAmount: 0.25,
+        clientRateMultiplier: 1.0,
+        employeeRateMultiplier: 1.0,
+        minHours: null,
+        maxHours: null,
+        isSystem: true,
+      });
+      offDay = await this.rateVariantRepository.save(offDay);
+    } else if (Number(offDay.employeeAdditionalAmount || 0) === 0) {
+      // Was seeded without the premium; off-day worked hours were paid at regular rate.
+      offDay.employeeAdditionalAmount = 0.25;
+      offDay.isSystem = true;
+      offDay.isActive = true;
+      offDay = await this.rateVariantRepository.save(offDay);
+    }
+
+    let idle = await this.rateVariantRepository.findOne({
+      where: { name: 'Idle' },
+    });
+    if (!idle) {
+      idle = this.rateVariantRepository.create({
+        name: 'Idle',
+        description: 'Rate applied for idle day hours',
+        displayOrder: 998,
+        isActive: true,
+        color: '#F59E0B',
+        employeeAdditionalAmount: 0,
+        clientRateMultiplier: 1.0,
+        employeeRateMultiplier: 1.0,
+        minHours: null,
+        maxHours: null,
+        isSystem: true,
+      });
+      idle = await this.rateVariantRepository.save(idle);
+    }
+
+    this.projectOffDayVariantCache = offDay;
+    this.idleVariantCache = idle;
+  }
+
+  /**
    * Get the "Project Off Day" variant
    */
   private async getProjectOffDayVariant(): Promise<RateVariant | null> {
     if (this.projectOffDayVariantCache !== undefined) {
       return this.projectOffDayVariantCache;
     }
-    this.projectOffDayVariantCache = await this.rateVariantRepository.findOne({
-      where: { name: 'Project Off Day', isSystem: true },
-    });
-    return this.projectOffDayVariantCache;
+    await this.ensureSystemRateVariants();
+    return this.projectOffDayVariantCache ?? null;
   }
 
   /**
@@ -1181,10 +1240,8 @@ export class PayrollService {
     if (this.idleVariantCache !== undefined) {
       return this.idleVariantCache;
     }
-    this.idleVariantCache = await this.rateVariantRepository.findOne({
-      where: { name: 'Idle', isSystem: true },
-    });
-    return this.idleVariantCache;
+    await this.ensureSystemRateVariants();
+    return this.idleVariantCache ?? null;
   }
 
   /**

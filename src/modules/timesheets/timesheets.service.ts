@@ -256,8 +256,16 @@ export class TimesheetsService {
 
     // Employees who worked on this project on at least one day this month
     // (includes mid-month transfers to/from other projects).
-    const employeeIdsForProject =
-      employeeIdsByProjectForMonth.get(project.id) ?? new Set<number>();
+    const employeeIdsForProject = new Set<number>(
+      employeeIdsByProjectForMonth.get(project.id) ?? [],
+    );
+    // Also include anyone with saved entries on this timesheet (source of truth
+    // for payroll — keeps hours even if later mobilization edits change carry-forward).
+    for (const entry of timesheet?.entries || []) {
+      if (entry.employeeId) {
+        employeeIdsForProject.add(entry.employeeId);
+      }
+    }
 
     const pickRepresentativeMob = (
       mobs: Mobilization[],
@@ -288,7 +296,12 @@ export class TimesheetsService {
         employeeMobilizations,
         project.id,
       );
-      if (!latestMob?.employee) {
+      // Prefer employee relation from a mobilization; fall back to timesheet entry.
+      const entryEmployee = timesheet?.entries?.find(
+        (e) => e.employeeId === employeeId,
+      )?.employee;
+      const employeeEntity = latestMob?.employee ?? entryEmployee;
+      if (!employeeEntity) {
         continue;
       }
 
@@ -303,15 +316,16 @@ export class TimesheetsService {
 
         const carriedStatus = this.normalizeJobStatus(effectiveMob?.jobStatus);
 
-        // Only show days mobilized to THIS project (mid-month transfers handled per day).
-        if (!isAssignedToProject(effectiveMob, project.id)) {
-          continue;
-        }
-
         const existingEntry = timesheet?.entries?.find(
           (e) =>
             e.employeeId === employeeId && formatDateOnly(e.date) === dateStr,
         );
+
+        // Prefer mobilization assignment; still keep saved timesheet entries so
+        // payroll hours stay aligned with what was entered/approved on the sheet.
+        if (!isAssignedToProject(effectiveMob, project.id) && !existingEntry) {
+          continue;
+        }
 
         const effectiveMobDateStr = effectiveMob
           ? formatDateOnly(effectiveMob.actionDate)
@@ -388,11 +402,11 @@ export class TimesheetsService {
       if (dailyHours.length > 0) {
         employees.push({
           srNo: srNo++,
-          employeeId: latestMob.employee.id,
-          idNo: latestMob.employee.adaa_emp_code,
-          name: latestMob.employee.name,
-          trade: latestMob.mobilizedTrade?.skill || '',
-          skillId: latestMob.mobilizedTradeId,
+          employeeId: employeeEntity.id,
+          idNo: employeeEntity.adaa_emp_code,
+          name: employeeEntity.name,
+          trade: latestMob?.mobilizedTrade?.skill || '',
+          skillId: latestMob?.mobilizedTradeId,
           dailyHours,
         });
       }
