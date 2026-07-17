@@ -35,6 +35,7 @@ import { SpecialDaysService } from '../special-days/special-days.service';
 import { SpecialDayType } from '../special-days/entities/special-day.entity';
 import {
   formatDateOnly,
+  getMonthDateRange,
   parseDateOnly,
 } from '../../common/utils/date.util';
 import {
@@ -158,15 +159,110 @@ export class TimesheetsService {
     return jobStatus === JobStatus.IDLE || jobStatus === JobStatus.ANNUAL_LEAVE;
   }
 
+  private isLeaveStatus(jobStatus: string | null | undefined): boolean {
+    const normalized = this.normalizeJobStatus(jobStatus);
+    return (
+      normalized === JobStatus.ABSENT ||
+      normalized === JobStatus.SICK_LEAVE ||
+      normalized === JobStatus.CASUAL_LEAVE ||
+      normalized === JobStatus.URGENT_LEAVE ||
+      normalized === JobStatus.ANNUAL_LEAVE
+    );
+  }
+
+  /**
+   * Pair status with hours on the timesheet:
+   * - leave WITH hours > 0 → active (hours mean the employee worked)
+   * - leave WITH 0 hours → real leave (show A / SL / AL)
+   * - off / terminal: keep hours as entered
+   * - active / idle with 0 hours → default hours
+   */
+  private normalizeStatusAndHours(
+    jobStatus: string | null | undefined,
+    hoursWorked: number,
+    preserveExplicitZero = false,
+  ): { jobStatus: string; hoursWorked: number } {
+    const status =
+      this.normalizeJobStatus(jobStatus) ?? JobStatus.ACTIVE;
+    const hours = Number(hoursWorked) || 0;
+
+    // Working hours on a leave day = worked → treat as active.
+    if (this.isLeaveStatus(status) && hours > 0) {
+      return { jobStatus: JobStatus.ACTIVE, hoursWorked: hours };
+    }
+
+    if (this.isLeaveStatus(status)) {
+      return { jobStatus: status, hoursWorked: 0 };
+    }
+
+    if (
+      status === JobStatus.CANCELLED ||
+      status === JobStatus.ABSCONDED ||
+      status === JobStatus.RESIGNED
+    ) {
+      return { jobStatus: status, hoursWorked: 0 };
+    }
+
+    if (status === JobStatus.OFF) {
+      return { jobStatus: status, hoursWorked: hours };
+    }
+
+    if (hours <= 0) {
+      // Explicitly saved entries keep their 0 hours (don't inflate to default).
+      // Only mobilization-derived days (no saved entry) get the default hours.
+      return {
+        jobStatus: status,
+        hoursWorked: preserveExplicitZero
+          ? 0
+          : this.getDefaultHoursForStatus(status),
+      };
+    }
+
+    return { jobStatus: status, hoursWorked: hours };
+  }
+
+  private getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  /**
+   * Fix leave/terminal rows that still have hours > 0 by setting status to active
+   * (hours mean worked). Real leave stays leave with 0 hours.
+   */
+  async repairInconsistentStatusHours(month?: string): Promise<number> {
+    const leaveStatuses = [
+      JobStatus.ABSENT,
+      JobStatus.SICK_LEAVE,
+      JobStatus.CASUAL_LEAVE,
+      JobStatus.URGENT_LEAVE,
+      JobStatus.ANNUAL_LEAVE,
+    ];
+
+    const qb = this.entryRepository
+      .createQueryBuilder()
+      .update(TimesheetEntry)
+      .set({ jobStatus: JobStatus.ACTIVE as any })
+      .where('jobStatus IN (:...statuses)', { statuses: leaveStatuses })
+      .andWhere('"hoursWorked" > 0');
+
+    if (month) {
+      const { start, end } = getMonthDateRange(month);
+      qb.andWhere('date >= :start AND date <= :end', { start, end });
+    }
+
+    const result = await qb.execute();
+    return result.affected ?? 0;
+  }
+
   /** Load all mobilizations for a month once (avoids N×repeat per project). */
   async buildMonthlyMobilizationContext(
     month: string,
   ): Promise<MonthlyMobilizationContext> {
     const [year, monthNum] = month.split('-').map(Number);
-    const startDate = new Date(year, monthNum - 1, 1);
-    const endDate = new Date(year, monthNum, 0);
-    const daysInMonth = endDate.getDate();
-    const endDateStr = formatDateOnly(endDate);
+    const { start: startDateStr, end: endDateStr } = getMonthDateRange(month);
+    const startDate = parseDateOnly(startDateStr);
+    const endDate = parseDateOnly(endDateStr);
+    const daysInMonth = endDate.getUTCDate();
 
     const dayInfo: MonthlyDayInfo[] = [];
     for (let day = 1; day <= daysInMonth; day++) {
@@ -233,6 +329,11 @@ export class TimesheetsService {
     month: string, // Format: YYYY-MM
     sharedContext?: MonthlyMobilizationContext,
   ): Promise<MonthlyProjectTimesheetData> {
+    // Standalone project loads also heal inconsistent rows for the month.
+    if (!sharedContext) {
+      await this.repairInconsistentStatusHours(month);
+    }
+
     const ctx =
       sharedContext ?? (await this.buildMonthlyMobilizationContext(month));
     const { endDateStr, startDate, endDate, dayInfo, mobilizationsByEmployee, employeeIdsByProjectForMonth } =
@@ -259,13 +360,6 @@ export class TimesheetsService {
     const employeeIdsForProject = new Set<number>(
       employeeIdsByProjectForMonth.get(project.id) ?? [],
     );
-    // Also include anyone with saved entries on this timesheet (source of truth
-    // for payroll — keeps hours even if later mobilization edits change carry-forward).
-    for (const entry of timesheet?.entries || []) {
-      if (entry.employeeId) {
-        employeeIdsForProject.add(entry.employeeId);
-      }
-    }
 
     const pickRepresentativeMob = (
       mobs: Mobilization[],
@@ -321,9 +415,10 @@ export class TimesheetsService {
             e.employeeId === employeeId && formatDateOnly(e.date) === dateStr,
         );
 
-        // Prefer mobilization assignment; still keep saved timesheet entries so
-        // payroll hours stay aligned with what was entered/approved on the sheet.
-        if (!isAssignedToProject(effectiveMob, project.id) && !existingEntry) {
+        // Only show hours when mobilization says the employee is on this project
+        // that day (demobilized / leave / transfer = blank). Saved entries do not
+        // override assignment — stale auto-sync rows must not create phantom hours.
+        if (!isAssignedToProject(effectiveMob, project.id)) {
           continue;
         }
 
@@ -353,16 +448,28 @@ export class TimesheetsService {
         let jobStatus: string;
 
         if (existingEntry) {
-          hours = Number(existingEntry.hoursWorked);
           // Saved timesheet status wins (e.g. absent must show "A", not carried active).
-          jobStatus =
+          const rawStatus =
             this.normalizeJobStatus(existingEntry.jobStatus) ??
             carriedStatus ??
             JobStatus.ACTIVE;
+          // Respect the saved hours exactly, including an explicit 0 on an
+          // active day (do not inflate to the default 10h).
+          const normalized = this.normalizeStatusAndHours(
+            rawStatus,
+            Number(existingEntry.hoursWorked),
+            true,
+          );
+          hours = normalized.hoursWorked;
+          jobStatus = normalized.jobStatus;
         } else if (isActualMobilizationForThisDate) {
           // There's an actual mobilization record for this specific date
-          hours = this.getDefaultHoursForStatus(effectiveMob!.jobStatus);
-          jobStatus = effectiveMob!.jobStatus;
+          const normalized = this.normalizeStatusAndHours(
+            effectiveMob!.jobStatus,
+            this.getDefaultHoursForStatus(effectiveMob!.jobStatus),
+          );
+          hours = normalized.hoursWorked;
+          jobStatus = normalized.jobStatus;
         } else if (
           specialDayRates.isSpecialDay &&
           specialDayRates.isMandatoryOff
@@ -380,8 +487,12 @@ export class TimesheetsService {
           hours = 0;
           jobStatus = JobStatus.OFF;
         } else if (effectiveMob) {
-          hours = this.getDefaultHoursForStatus(effectiveMob.jobStatus);
-          jobStatus = effectiveMob.jobStatus;
+          const normalized = this.normalizeStatusAndHours(
+            effectiveMob.jobStatus,
+            this.getDefaultHoursForStatus(effectiveMob.jobStatus),
+          );
+          hours = normalized.hoursWorked;
+          jobStatus = normalized.jobStatus;
         } else {
           continue;
         }
@@ -426,6 +537,9 @@ export class TimesheetsService {
   async getAllProjectTimesheets(
     month: string,
   ): Promise<MonthlyProjectTimesheetData[]> {
+    // Heal inconsistent leave/off + hours rows for every employee in this month.
+    await this.repairInconsistentStatusHours(month);
+
     const projects = await this.projectRepository.find({
       relations: ['client'],
       order: { name: 'ASC' },
@@ -443,7 +557,7 @@ export class TimesheetsService {
           );
         } catch (error) {
           this.logger.warn(
-            `Failed to get timesheet for project ${project.id}: ${error.message}`,
+            `Failed to get timesheet for project ${project.id}: ${this.getErrorMessage(error)}`,
           );
           return null;
         }
@@ -681,9 +795,9 @@ export class TimesheetsService {
 
       // Check if entry exists (date is now a string)
       const dateString = formatDateOnly(entryDate);
-      let hoursWorked = entryDto.hoursWorked;
+      let hoursWorked = Number(entryDto.hoursWorked) || 0;
       let jobStatus = entryDto.jobStatus;
-      const lowerStatus =
+      let lowerStatus =
         typeof entryDto.jobStatus === 'string'
           ? entryDto.jobStatus.toLowerCase()
           : '';
@@ -694,7 +808,13 @@ export class TimesheetsService {
       ) {
         hoursWorked = 0;
         jobStatus = JobStatus.OFF;
+        lowerStatus = JobStatus.OFF;
       }
+      // Enforce pairing: leave/off → 0h; active with 0h → default 10h.
+      const normalized = this.normalizeStatusAndHours(jobStatus, hoursWorked);
+      hoursWorked = normalized.hoursWorked;
+      jobStatus = normalized.jobStatus;
+      lowerStatus = normalized.jobStatus;
 
       const existingEntry = await this.entryRepository.findOne({
         where: {
@@ -805,30 +925,62 @@ export class TimesheetsService {
   }
 
   /**
-   * Auto-remove timesheet entries for an employee on a specific date so the grid
-   * falls back to mobilization-derived data. Skips submitted/approved timesheets.
-   * Called by MobilizationsService when a mobilization is created or updated.
+   * When mobilization status changes, update matching timesheet entries for that
+   * exact date. Leave from mob sets leave + 0h. If the timesheet already has
+   * hours > 0, normalize keeps those hours and status becomes active.
    */
   async syncTimesheetFromMobilization(
     employeeId: number,
     date: string,
   ): Promise<void> {
+    const dateStr = formatDateOnly(date);
+
+    const mobilizations = await this.mobilizationRepository.find({
+      where: {
+        employeeId,
+        actionDate: LessThanOrEqual(dateStr) as any,
+      },
+      order: { actionDate: 'DESC', createdAt: 'DESC' },
+    });
+    if (mobilizations.length === 0) {
+      return;
+    }
+
+    const exactDateMob = mobilizations.find(
+      (m) => formatDateOnly(m.actionDate) === dateStr,
+    );
+    const effective =
+      exactDateMob ??
+      getEffectiveMobilizationForDate(mobilizations, dateStr);
+    if (!effective) {
+      return;
+    }
+
     const entries = await this.entryRepository
       .createQueryBuilder('entry')
       .innerJoinAndSelect('entry.timesheet', 'timesheet')
       .where('entry.employeeId = :employeeId', { employeeId })
-      .andWhere('entry.date >= :date', { date })
+      .andWhere('entry.date = :date', { date: dateStr })
       .getMany();
 
     for (const entry of entries) {
-      const status = entry.timesheet?.status;
-      if (
-        status === TimesheetStatus.SUBMITTED ||
-        status === TimesheetStatus.APPROVED
-      ) {
+      // Only update the timesheet for the project this mobilization belongs to
+      // (null projectId = idle / annual-leave sheet).
+      if (entry.timesheet.projectId !== effective.projectId) {
         continue;
       }
-      await this.entryRepository.remove(entry);
+      const existingHours = Number(entry.hoursWorked) || 0;
+      // Leave mob → 0h unless timesheet already has hours (then → active via normalize).
+      const hoursForNormalize = this.isLeaveStatus(effective.jobStatus)
+        ? existingHours
+        : this.getDefaultHoursForStatus(effective.jobStatus);
+      const normalized = this.normalizeStatusAndHours(
+        effective.jobStatus,
+        hoursForNormalize,
+      );
+      entry.jobStatus = normalized.jobStatus as any;
+      entry.hoursWorked = normalized.hoursWorked;
+      await this.entryRepository.save(entry);
     }
   }
 
@@ -966,7 +1118,7 @@ export class TimesheetsService {
     } catch (error) {
       // Log error but don't fail the timesheet save
       this.logger.error(
-        `Failed to sync mobilization for employee ${entry.employeeId}: ${error.message}`,
+        `Failed to sync mobilization for employee ${entry.employeeId}: ${this.getErrorMessage(error)}`,
       );
     }
   }

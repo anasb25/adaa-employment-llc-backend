@@ -42,6 +42,14 @@ export interface ImportResult {
   errors: string[];
 }
 
+type IdleBreakdownRow = {
+  date: string;
+  hours: number;
+  additionalAmount: number;
+  hourlyRate: number;
+  amount: number;
+};
+
 /** One calendar row for payroll; sourceProjectId applies project-specific rate overrides */
 type PayrollComputationDay = {
   date: string;
@@ -260,6 +268,9 @@ export class PayrollService {
   async calculatePayrollForMonth(month: string): Promise<Payroll[]> {
     this.clearPayrollCalcCaches();
     try {
+      // Heal leave/off entries that still have hours for all employees.
+      await this.timesheetsService.repairInconsistentStatusHours(month);
+
       const projectIds = await this.getApprovedProjectIdsForMonth(month);
       if (projectIds.length === 0) {
         throw new BadRequestException(
@@ -340,34 +351,30 @@ export class PayrollService {
         });
 
         if (existingPayroll) {
-          // Merge idle hours into existing payroll
+          // Merge idle hours into existing payroll (one row per calendar day).
           const existingBreakdown = existingPayroll.hoursBreakdown || {
             regular: [],
             specialDays: [],
             offDays: [],
             idle: [],
           };
-          const mergedIdle: Array<{
-            date: string;
-            hours: number;
-            additionalAmount: number;
-            hourlyRate: number;
-            amount: number;
-          }> = [
-            ...(existingBreakdown.idle || []),
-            ...(calculations.hoursBreakdown.idle || []),
-          ];
-          const idleAmount = (calculations.hoursBreakdown.idle || []).reduce(
-            (sum: number, row: any) => sum + (row.amount || 0),
+          const oldIdleAmount = (existingBreakdown.idle || []).reduce(
+            (sum: number, row: IdleBreakdownRow) =>
+              sum + Number(row.amount || 0),
             0,
           );
+          const { merged: mergedIdle, totalHours: mergedIdleHours, totalAmount: mergedIdleAmount } =
+            this.mergeIdleBreakdownDeduped(
+              existingBreakdown.idle || [],
+              calculations.hoursBreakdown.idle || [],
+            );
 
-          existingPayroll.totalIdleDayHours =
-            Number(existingPayroll.totalIdleDayHours) +
-            Number(calculations.totalIdleDayHours);
+          existingPayroll.totalIdleDayHours = mergedIdleHours;
           // Idle must NOT be added to totalHours (regular hours only).
           existingPayroll.totalGrossSalary =
-            Number(existingPayroll.totalGrossSalary) + idleAmount;
+            Number(existingPayroll.totalGrossSalary) -
+            oldIdleAmount +
+            mergedIdleAmount;
           existingPayroll.hoursBreakdown = {
             ...existingBreakdown,
             idle: mergedIdle,
@@ -386,17 +393,31 @@ export class PayrollService {
           payrolls.push(updated);
         } else {
           // No existing payroll: create one from idle only
+          const idleBreakdown = this.dedupeIdleBreakdownByDate(
+            calculations.hoursBreakdown.idle || [],
+          );
+          const idleHours = idleBreakdown.reduce(
+            (sum, row) => sum + Number(row.hours || 0),
+            0,
+          );
+          const idleGross = idleBreakdown.reduce(
+            (sum, row) => sum + Number(row.amount || 0),
+            0,
+          );
           const payrollData: CreatePayrollDto = {
             employeeId: employee.employeeId,
             month,
             totalHours: 0,
             totalOtHours: 0,
             totalOffdaysWorkedHours: 0,
-            totalIdleDayHours: calculations.totalIdleDayHours,
+            totalIdleDayHours: Math.round(idleHours * 100) / 100,
             absentDaysDeductible: 0,
-            hoursBreakdown: calculations.hoursBreakdown,
+            hoursBreakdown: {
+              ...calculations.hoursBreakdown,
+              idle: idleBreakdown,
+            },
             baseHourlyRate: calculations.baseHourlyRate,
-            totalGrossSalary: calculations.totalGrossSalary,
+            totalGrossSalary: Math.round(idleGross * 100) / 100,
             notes: 'Calculated from approved idle timesheet.',
           };
 
@@ -461,6 +482,59 @@ export class PayrollService {
           .filter((id): id is number => id != null && id > 0),
       ),
     ];
+  }
+
+  /**
+   * Keep at most one idle row per calendar day. Project-sheet idle wins over idle-sheet
+   * rows for the same date; otherwise keep the row with more hours.
+   */
+  private dedupeIdleBreakdownByDate(rows: IdleBreakdownRow[]): IdleBreakdownRow[] {
+    const byDate = new Map<string, IdleBreakdownRow>();
+    for (const row of rows || []) {
+      const key = formatDateOnly(row.date);
+      if (!key) continue;
+      const prev = byDate.get(key);
+      const nextHours = Number(row.hours) || 0;
+      if (!prev || nextHours > Number(prev.hours)) {
+        byDate.set(key, row);
+      }
+    }
+    return [...byDate.values()].sort((a, b) =>
+      formatDateOnly(a.date).localeCompare(formatDateOnly(b.date)),
+    );
+  }
+
+  /**
+   * Merge idle-sheet rows into project payroll without double-counting days already paid.
+   */
+  private mergeIdleBreakdownDeduped(
+    existingIdle: IdleBreakdownRow[],
+    incomingIdle: IdleBreakdownRow[],
+  ): {
+    merged: IdleBreakdownRow[];
+    totalHours: number;
+    totalAmount: number;
+  } {
+    const existingDeduped = this.dedupeIdleBreakdownByDate(existingIdle);
+    const existingDates = new Set(
+      existingDeduped.map((row) => formatDateOnly(row.date)),
+    );
+    const toAdd = (incomingIdle || []).filter(
+      (row) => !existingDates.has(formatDateOnly(row.date)),
+    );
+    const merged = this.dedupeIdleBreakdownByDate([
+      ...existingDeduped,
+      ...toAdd,
+    ]);
+    const totalHours =
+      Math.round(
+        merged.reduce((sum, row) => sum + Number(row.hours || 0), 0) * 100,
+      ) / 100;
+    const totalAmount =
+      Math.round(
+        merged.reduce((sum, row) => sum + Number(row.amount || 0), 0) * 100,
+      ) / 100;
+    return { merged, totalHours, totalAmount };
   }
 
   /**
@@ -1069,14 +1143,22 @@ export class PayrollService {
         hourlyRate: Math.round((baseRate + od.additionalAmount) * 100) / 100,
         amount: Math.round((baseRate + od.additionalAmount) * od.hours * 100) / 100,
       })),
-      idle: idleDaysBreakdown.map((id) => ({
-        date: id.date,
-        hours: Math.round(id.hours * 100) / 100,
-        additionalAmount: id.additionalAmount,
-        hourlyRate: Math.round((baseRate + id.additionalAmount) * 100) / 100,
-        amount: Math.round((baseRate + id.additionalAmount) * id.hours * 100) / 100,
-      })),
+      idle: this.dedupeIdleBreakdownByDate(
+        idleDaysBreakdown.map((id) => ({
+          date: id.date,
+          hours: Math.round(id.hours * 100) / 100,
+          additionalAmount: id.additionalAmount,
+          hourlyRate: Math.round((baseRate + id.additionalAmount) * 100) / 100,
+          amount:
+            Math.round((baseRate + id.additionalAmount) * id.hours * 100) / 100,
+        })),
+      ),
     };
+
+    const dedupedIdleHours = hoursBreakdown.idle.reduce(
+      (sum, row) => sum + Number(row.hours || 0),
+      0,
+    );
 
     // Calculate total gross salary
     const totalGrossSalary =
@@ -1089,7 +1171,7 @@ export class PayrollService {
       totalHours: Math.round(totalHours * 100) / 100,
       totalOtHours: Math.round(totalOtHours * 100) / 100,
       totalOffdaysWorkedHours: Math.round(totalOffdaysWorkedHours * 100) / 100,
-      totalIdleDayHours: Math.round(totalIdleDayHours * 100) / 100,
+      totalIdleDayHours: Math.round(dedupedIdleHours * 100) / 100,
       absentDays: Math.round(absentDays * 100) / 100,
       hoursBreakdown,
       baseHourlyRate: baseRate,
