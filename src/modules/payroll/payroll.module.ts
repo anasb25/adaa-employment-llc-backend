@@ -11,6 +11,7 @@ import { SpecialDay } from '../special-days/entities/special-day.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
 import { ProjectSpecialDayRate } from '../projects/entities/project-special-day-rate.entity';
 import { ProjectRateVariantRate } from '../projects/entities/project-rate-variant-rate.entity';
+import { Employee } from '../employees/entities/employee.entity';
 import { TimesheetsModule } from '../timesheets/timesheets.module';
 
 @Module({
@@ -24,6 +25,7 @@ import { TimesheetsModule } from '../timesheets/timesheets.module';
       EmployeeSkill,
       ProjectSpecialDayRate,
       ProjectRateVariantRate,
+      Employee,
     ]),
     TimesheetsModule,
   ],

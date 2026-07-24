@@ -23,7 +23,8 @@
     "generate-migration": "npm run build && npm run typeorm -- migration:generate src/database/migrations/%npm_config_name% -d src/database/data-source.ts",
     "run-migrations": "npm run build && npm run typeorm -- migration:run -d src/database/data-source.ts",
     "revert-migration": "npm run build && npm run typeorm -- migration:revert -d src/database/data-source.ts",
-    "show-migrations": "npm run typeorm -- migration:show -d src/database/data-source.ts"
+    "show-migrations": "npm run typeorm -- migration:show -d src/database/data-source.ts",
+    "assign-suppliers": "ts-node -r tsconfig-paths/register src/scripts/assign-employee-suppliers.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

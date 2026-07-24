@@ -6,6 +6,7 @@ import { Timesheet } from '../timesheets/entities/timesheet.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { EmployeeSkill } from '../employee-skills/entities/employee-skill.entity';
 import { Mobilization, JobStatus } from '../mobilizations/entities/mobilization.entity';
+import { Supplier } from '../suppliers/entities/supplier.entity';
 import {
   PaginationUtil,
   PaginationOptions,
@@ -38,7 +39,40 @@ export class EmployeesService {
     private readonly employeeSkillRepository: Repository<EmployeeSkill>,
     @InjectRepository(Mobilization)
     private readonly mobilizationRepository: Repository<Mobilization>,
+    @InjectRepository(Supplier)
+    private readonly supplierRepository: Repository<Supplier>,
   ) {}
+
+  private buildSupplierLookupMaps(suppliers: Supplier[]): {
+    byExactName: Map<string, Supplier>;
+    byLowerName: Map<string, Supplier>;
+  } {
+    const byExactName = new Map<string, Supplier>();
+    const byLowerName = new Map<string, Supplier>();
+
+    for (const supplier of suppliers) {
+      const trimmedName = supplier.name.trim();
+      byExactName.set(trimmedName, supplier);
+      byLowerName.set(trimmedName.toLowerCase(), supplier);
+    }
+
+    return { byExactName, byLowerName };
+  }
+
+  private resolveSupplierByName(
+    supplierName: string,
+    lookup: {
+      byExactName: Map<string, Supplier>;
+      byLowerName: Map<string, Supplier>;
+    },
+  ): Supplier | null {
+    const trimmedName = supplierName.trim();
+    return (
+      lookup.byExactName.get(trimmedName) ??
+      lookup.byLowerName.get(trimmedName.toLowerCase()) ??
+      null
+    );
+  }
 
   /**
    * Get the latest mobilization status for a list of employee IDs.
@@ -118,6 +152,7 @@ export class EmployeesService {
       options,
       {
         relations: [
+          'supplier',
           'employeeSkills',
           'employeeSkills.skill',
           'employeeSkills.skill.skillType',
@@ -141,6 +176,7 @@ export class EmployeesService {
       options,
       {
         relations: [
+          'supplier',
           'employeeSkills',
           'employeeSkills.skill',
           'employeeSkills.skill.skillType',
@@ -165,6 +201,7 @@ export class EmployeesService {
     const employee = await this.employeeRepository.findOne({
       where: { id },
       relations: [
+        'supplier',
         'employeeSkills',
         'employeeSkills.skill',
         'employeeSkills.skill.skillType',
@@ -624,6 +661,9 @@ export class EmployeesService {
     }
 
     // Second pass: Import the valid rows
+    const suppliers = await this.supplierRepository.find();
+    const supplierLookup = this.buildSupplierLookupMaps(suppliers);
+
     for (let i = 0; i < validation.data.length; i++) {
       const row = validation.data[i];
       const rowNumber = i + 2; // +2 because Excel is 1-indexed and has header row
@@ -637,8 +677,8 @@ export class EmployeesService {
         // Map Excel row to employee data
         const mappedData = ExcelValidatorUtil.mapRowToEmployee(row);
 
-        // Extract trade, rate_per_hr, and prepare employee data
-        const { trade, rate_per_hr, ...employeeData } = mappedData;
+        // Extract trade, rate_per_hr, supplier, and prepare employee data
+        const { trade, rate_per_hr, supplier_name, ...employeeData } = mappedData;
 
         // Validate required fields
         if (!employeeData.adaa_emp_code || !employeeData.name) {
@@ -650,6 +690,31 @@ export class EmployeesService {
           });
           continue;
         }
+
+        if (!supplier_name) {
+          result.failed++;
+          result.errors.push({
+            row: rowNumber,
+            employee: employeeData.name,
+            errors: ['SUPPLIER is required'],
+          });
+          continue;
+        }
+
+        const supplier = this.resolveSupplierByName(
+          supplier_name,
+          supplierLookup,
+        );
+        if (!supplier) {
+          result.failed++;
+          result.errors.push({
+            row: rowNumber,
+            employee: employeeData.name,
+            errors: [`Supplier not matched: "${supplier_name}"`],
+          });
+          continue;
+        }
+        employeeData.supplierId = supplier.id;
 
         // Check if employee already exists
         const existingEmployee = await this.employeeRepository.findOne({
@@ -744,7 +809,7 @@ export class EmployeesService {
    */
   async exportEmployees(): Promise<Buffer> {
     const employees = await this.employeeRepository.find({
-      relations: ['employeeSkills', 'employeeSkills.skill'],
+      relations: ['employeeSkills', 'employeeSkills.skill', 'supplier'],
       order: { adaa_emp_code: 'ASC' },
     });
 

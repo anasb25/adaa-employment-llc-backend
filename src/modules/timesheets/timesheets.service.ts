@@ -1359,6 +1359,7 @@ export class TimesheetsService {
     const mobilizations = await this.mobilizationRepository
       .createQueryBuilder('m')
       .leftJoinAndSelect('m.employee', 'employee')
+      .leftJoinAndSelect('employee.supplier', 'supplier')
       .leftJoinAndSelect('m.project', 'project')
       .leftJoinAndSelect('project.client', 'client')
       .leftJoinAndSelect('m.mobilizedTrade', 'trade')
@@ -1411,7 +1412,7 @@ export class TimesheetsService {
             projectName: string;
             location: string | null;
             fat: string | null;
-            trades: Map<string, number>;
+            trades: Map<string, Map<string, number>>;
           }
         >;
       }
@@ -1426,6 +1427,7 @@ export class TimesheetsService {
       const location = mob.project.location || null;
       const fat = mob.project.fat || null;
       const tradeName = mob.mobilizedTrade?.skill || 'Unknown Trade';
+      const supplierName = mob.employee?.supplier?.name?.trim() || 'Unassigned';
 
       // Get or create client entry
       if (!clientMap.has(clientId)) {
@@ -1449,9 +1451,11 @@ export class TimesheetsService {
       }
       const project = client.projects.get(projectId)!;
 
-      // Increment trade count
-      const currentCount = project.trades.get(tradeName) || 0;
-      project.trades.set(tradeName, currentCount + 1);
+      if (!project.trades.has(tradeName)) {
+        project.trades.set(tradeName, new Map());
+      }
+      const supplierCounts = project.trades.get(tradeName)!;
+      supplierCounts.set(supplierName, (supplierCounts.get(supplierName) || 0) + 1);
     }
 
     // Convert to output format
@@ -1465,16 +1469,22 @@ export class TimesheetsService {
       for (const [projectId, projectData] of clientData.projects) {
         const trades: TradeUtilization[] = [];
 
-        for (const [tradeName, headCount] of projectData.trades) {
-          trades.push({
-            tradeInSite: tradeName,
-            headCount,
-          });
-          clientTotal += headCount;
+        for (const [tradeName, supplierCounts] of projectData.trades) {
+          for (const [supplierName, headCount] of supplierCounts) {
+            trades.push({
+              tradeInSite: tradeName,
+              supplier: supplierName,
+              headCount,
+            });
+            clientTotal += headCount;
+          }
         }
 
-        // Sort trades alphabetically
-        trades.sort((a, b) => a.tradeInSite.localeCompare(b.tradeInSite));
+        trades.sort((a, b) => {
+          const tradeCompare = a.tradeInSite.localeCompare(b.tradeInSite);
+          if (tradeCompare !== 0) return tradeCompare;
+          return a.supplier.localeCompare(b.supplier);
+        });
 
         projects.push({
           projectId: projectData.projectId,

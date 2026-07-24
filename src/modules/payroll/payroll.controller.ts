@@ -42,6 +42,15 @@ export class PayrollController {
   /**
    * Get payrolls for a specific month
    */
+  @Get('month/:month/totals')
+  @Permissions('payroll:read')
+  async getMonthTotals(@Param('month') month: string) {
+    return await this.payrollService.getMonthTotals(month);
+  }
+
+  /**
+   * Get payrolls for a specific month
+   */
   @Get('month/:month')
   @Permissions('payroll:read')
   async findByMonth(@Param('month') month: string) {

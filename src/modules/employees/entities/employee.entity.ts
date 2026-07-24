@@ -1,6 +1,7 @@
-import { Entity, Column, OneToMany } from 'typeorm';
+import { Entity, Column, OneToMany, ManyToOne, JoinColumn } from 'typeorm';
 import { BaseEntity } from '../../../common/entities';
 import { EmployeeSkill } from '../../employee-skills/entities/employee-skill.entity';
+import { Supplier } from '../../suppliers/entities/supplier.entity';
 import { DateOnlyTransformer } from '../../../common/transformers/date.transformer';
 import type { AirTicketHistoryEntry } from '../utils/air-ticket-history.util';
 
@@ -111,6 +112,16 @@ export class Employee extends BaseEntity {
       'Cumulative number of completed service months already credited to annual_leave_balance by the accrual cron. Prevents double-crediting and preserves timesheet deductions.',
   })
   annual_leave_accrued_months: number;
+
+  @Column({ nullable: true })
+  supplierId: number | null;
+
+  @ManyToOne(() => Supplier, (supplier) => supplier.employees, {
+    nullable: true,
+    onDelete: 'SET NULL',
+  })
+  @JoinColumn({ name: 'supplierId' })
+  supplier: Supplier | null;
 
   @OneToMany(() => EmployeeSkill, (employeeSkill) => employeeSkill.employee)
   employeeSkills: EmployeeSkill[];

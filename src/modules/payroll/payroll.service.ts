@@ -33,6 +33,12 @@ import { ProjectSpecialDayRate } from '../projects/entities/project-special-day-
 import { ProjectRateVariantRate } from '../projects/entities/project-rate-variant-rate.entity';
 import { AllowanceDeductionExcelValidator } from './utils/allowance-deduction-excel-validator.util';
 import { compareDateOnly, formatDateOnly } from '../../common/utils/date.util';
+import { ADAA_SUPPLIER_NAME } from '../../common/constants/supplier.constants';
+import {
+  applyAdaaSupplierPayrollFilter,
+  mapPayrollMonthTotalsRow,
+} from '../../common/utils/adaa-supplier.util';
+import { Employee } from '../employees/entities/employee.entity';
 
 export interface ImportResult {
   success: boolean;
@@ -89,8 +95,57 @@ export class PayrollService {
     private readonly projectSpecialDayRateRepository: Repository<ProjectSpecialDayRate>,
     @InjectRepository(ProjectRateVariantRate)
     private readonly projectRateVariantRateRepository: Repository<ProjectRateVariantRate>,
+    @InjectRepository(Employee)
+    private readonly employeeRepository: Repository<Employee>,
     private readonly timesheetsService: TimesheetsService,
   ) {}
+
+  private createAdaaPayrollQueryBuilder(alias = 'p') {
+    return applyAdaaSupplierPayrollFilter(
+      this.payrollRepository.createQueryBuilder(alias),
+      { payrollAlias: alias, selectEmployee: true },
+    );
+  }
+
+  private async getAdaaEmployeeIdSet(ids: number[]): Promise<Set<number>> {
+    if (ids.length === 0) return new Set();
+
+    const rows = await this.employeeRepository
+      .createQueryBuilder('e')
+      .innerJoin('e.supplier', 's')
+      .select('e.id', 'id')
+      .where('e.id IN (:...ids)', { ids })
+      .andWhere('s.name = :name', { name: ADAA_SUPPLIER_NAME })
+      .getRawMany<{ id: string | number }>();
+
+    return new Set(rows.map((row) => Number(row.id)));
+  }
+
+  private async assertAdaaSupplierEmployee(employeeId: number): Promise<void> {
+    const adaaIds = await this.getAdaaEmployeeIdSet([employeeId]);
+    if (!adaaIds.has(employeeId)) {
+      throw new BadRequestException(
+        'Payroll is only available for employees assigned to ADAA supplier',
+      );
+    }
+  }
+
+  private async removeNonAdaaPayrollsForMonth(month: string): Promise<void> {
+    const nonAdaaPayrolls = await this.payrollRepository
+      .createQueryBuilder('p')
+      .innerJoin('p.employee', 'e')
+      .leftJoin('e.supplier', 's')
+      .where('p.month = :month', { month })
+      .andWhere('(s.name IS NULL OR s.name != :adaaSupplier)', {
+        adaaSupplier: ADAA_SUPPLIER_NAME,
+      })
+      .select(['p.id'])
+      .getMany();
+
+    if (nonAdaaPayrolls.length > 0) {
+      await this.payrollRepository.delete(nonAdaaPayrolls.map((p) => p.id));
+    }
+  }
 
   private clearPayrollCalcCaches(): void {
     this.activeSpecialDaysCache = null;
@@ -108,46 +163,70 @@ export class PayrollService {
     filters: PayrollFiltersDto,
   ): Promise<PaginatedResponse<Payroll>> {
     const { month, employeeId, page = 1, limit = 10 } = filters;
+    const skip = (page - 1) * limit;
 
-    // Build where conditions
-    const where: any = {};
+    let qb = this.createAdaaPayrollQueryBuilder('p');
     if (month) {
-      where.month = month;
+      qb = qb.andWhere('p.month = :month', { month });
     }
     if (employeeId) {
-      where.employeeId = employeeId;
+      qb = qb.andWhere('p.employeeId = :employeeId', { employeeId });
     }
 
-    return await PaginationUtil.paginate(
-      this.payrollRepository,
-      { page, limit },
-      {
-        where,
-        relations: ['employee'],
-        order: { month: 'DESC', employeeId: 'ASC' },
-      },
-    );
+    const total = await qb.getCount();
+    const data = await qb
+      .orderBy('p.month', 'DESC')
+      .addOrderBy('p.employeeId', 'ASC')
+      .skip(skip)
+      .take(limit)
+      .getMany();
+
+    return PaginationUtil.createPaginatedResponse(data, total, page, limit);
   }
 
   /**
    * Get payrolls for a specific month
    */
   async findByMonth(month: string): Promise<Payroll[]> {
-    return await this.payrollRepository.find({
-      where: { month },
-      relations: ['employee'],
-      order: { employeeId: 'ASC' },
-    });
+    return await this.createAdaaPayrollQueryBuilder('p')
+      .andWhere('p.month = :month', { month })
+      .orderBy('p.employeeId', 'ASC')
+      .getMany();
+  }
+
+  async getMonthTotals(month: string) {
+    const row = await this.createAdaaPayrollQueryBuilder('p')
+      .andWhere('p.month = :month', { month })
+      .select('COUNT(*)', 'employeeCount')
+      .addSelect('COALESCE(SUM(p.totalHours), 0)', 'totalHours')
+      .addSelect('COALESCE(SUM(p.totalOtHours), 0)', 'totalOtHours')
+      .addSelect(
+        'COALESCE(SUM(p.totalOffdaysWorkedHours), 0)',
+        'totalOffdaysWorkedHours',
+      )
+      .addSelect('COALESCE(SUM(p.totalIdleDayHours), 0)', 'totalIdleDayHours')
+      .addSelect('COALESCE(SUM(p.totalGrossSalary), 0)', 'grossSalary')
+      .addSelect('COALESCE(SUM(p.netSalary), 0)', 'netSalary')
+      .getRawOne<{
+        employeeCount: string;
+        totalHours: string;
+        totalOtHours: string;
+        totalOffdaysWorkedHours: string;
+        totalIdleDayHours: string;
+        grossSalary: string;
+        netSalary: string;
+      }>();
+
+    return mapPayrollMonthTotalsRow(row ?? {});
   }
 
   /**
    * Get payroll by ID
    */
   async findOne(id: number): Promise<Payroll> {
-    const payroll = await this.payrollRepository.findOne({
-      where: { id },
-      relations: ['employee'],
-    });
+    const payroll = await this.createAdaaPayrollQueryBuilder('p')
+      .andWhere('p.id = :id', { id })
+      .getOne();
 
     if (!payroll) {
       throw new NotFoundException(`Payroll with ID ${id} not found`);
@@ -163,6 +242,11 @@ export class PayrollService {
     employeeId: number,
     month: string,
   ): Promise<Payroll | null> {
+    const adaaIds = await this.getAdaaEmployeeIdSet([employeeId]);
+    if (!adaaIds.has(employeeId)) {
+      return null;
+    }
+
     return await this.payrollRepository.findOne({
       where: { employeeId, month },
       relations: ['employee'],
@@ -173,6 +257,8 @@ export class PayrollService {
    * Create a new payroll entry
    */
   async create(createPayrollDto: CreatePayrollDto): Promise<Payroll> {
+    await this.assertAdaaSupplierEmployee(createPayrollDto.employeeId);
+
     // Check if payroll already exists for this employee and month
     const existingPayroll = await this.findByEmployeeAndMonth(
       createPayrollDto.employeeId,
@@ -271,6 +357,8 @@ export class PayrollService {
       // Heal leave/off entries that still have hours for all employees.
       await this.timesheetsService.repairInconsistentStatusHours(month);
 
+      await this.removeNonAdaaPayrollsForMonth(month);
+
       const projectIds = await this.getApprovedProjectIdsForMonth(month);
       if (projectIds.length === 0) {
         throw new BadRequestException(
@@ -334,8 +422,15 @@ export class PayrollService {
     }
 
     const payrolls: Payroll[] = [];
+    const adaaEmployeeIds = await this.getAdaaEmployeeIdSet(
+      timesheetData.employees.map((employee) => employee.employeeId),
+    );
 
     for (const employee of timesheetData.employees) {
+      if (!adaaEmployeeIds.has(employee.employeeId)) {
+        continue;
+      }
+
       try {
         const calculations = await this.calculateEmployeePayrollFromTimesheetData(
           employee.employeeId,
@@ -456,6 +551,8 @@ export class PayrollService {
           `Timesheet for project ${projectId} in month ${month} is not approved`,
         );
       }
+
+      await this.removeNonAdaaPayrollsForMonth(month);
 
       const projectIds = await this.getApprovedProjectIdsForMonth(month);
       const sharedContext =
@@ -686,13 +783,20 @@ export class PayrollService {
         sharedContext,
       );
 
-    // Prefetch base rates in one query instead of per employee.
     const employeeIds = [...byEmployee.keys()];
+    const adaaEmployeeIds = await this.getAdaaEmployeeIdSet(employeeIds);
+    for (const employeeId of employeeIds) {
+      if (!adaaEmployeeIds.has(employeeId)) {
+        byEmployee.delete(employeeId);
+      }
+    }
+
+    const adaaEmployeeIdList = [...byEmployee.keys()];
     const rateByEmployee = new Map<number, number>();
-    if (employeeIds.length > 0) {
+    if (adaaEmployeeIdList.length > 0) {
       const skills = await this.employeeSkillRepository
         .createQueryBuilder('es')
-        .where('es.employeeId IN (:...ids)', { ids: employeeIds })
+        .where('es.employeeId IN (:...ids)', { ids: adaaEmployeeIdList })
         .orderBy('es.id', 'ASC')
         .getMany();
       for (const es of skills) {
@@ -703,9 +807,9 @@ export class PayrollService {
     }
 
     const existingPayrolls =
-      employeeIds.length > 0
+      adaaEmployeeIdList.length > 0
         ? await this.payrollRepository.find({
-            where: { employeeId: In(employeeIds), month },
+            where: { employeeId: In(adaaEmployeeIdList), month },
           })
         : [];
     const existingByEmployee = new Map(
@@ -1355,14 +1459,20 @@ export class PayrollService {
     for (const employeeData of validation.data) {
       try {
         // Find employee by adaa_emp_code (ID NO)
-        const employee = await this.payrollRepository.manager
-          .getRepository('employees')
-          .findOne({
-            where: { adaa_emp_code: employeeData.employeeId },
-          });
+        const employee = await this.employeeRepository.findOne({
+          where: { adaa_emp_code: employeeData.employeeId },
+          relations: ['supplier'],
+        });
 
         if (!employee) {
           notFoundEmployees.push(employeeData.employeeId);
+          continue;
+        }
+
+        if (employee.supplier?.name !== ADAA_SUPPLIER_NAME) {
+          errors.push(
+            `Employee ${employeeData.employeeId} is not assigned to ADAA supplier — skipped`,
+          );
           continue;
         }
 

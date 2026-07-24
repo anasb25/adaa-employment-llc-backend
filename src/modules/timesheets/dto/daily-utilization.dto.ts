@@ -7,6 +7,7 @@ export class DailyUtilizationQueryDto {
 
 export interface TradeUtilization {
   tradeInSite: string;
+  supplier: string;
   headCount: number;
 }
 

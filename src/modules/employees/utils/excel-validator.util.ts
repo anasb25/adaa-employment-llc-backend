@@ -32,6 +32,7 @@ export const REQUIRED_HEADERS = [
   'PERSONAL CODE',
   'WORK PERMIT',
   'WP EXPIRY',
+  'SUPPLIER',
 ];
 
 export class ExcelValidatorUtil {
@@ -160,6 +161,8 @@ export class ExcelValidatorUtil {
       rate_per_hr: row['RATE PER HR']
         ? parseFloat(row['RATE PER HR'].toString())
         : null,
+
+      supplier_name: toNullIfEmpty(row['SUPPLIER']),
     };
   }
 
@@ -190,6 +193,7 @@ export class ExcelValidatorUtil {
         'PERSONAL CODE': 'PC001',
         'WORK PERMIT': 'WP123456',
         'WP EXPIRY': '2025-06-30',
+        SUPPLIER: 'ADAA',
       },
     ];
 
@@ -247,6 +251,7 @@ export class ExcelValidatorUtil {
         'WP EXPIRY': emp.work_permit_expiry
           ? formatDateOnly(emp.work_permit_expiry)
           : '',
+        SUPPLIER: emp.supplier?.name || '',
       };
     });
 

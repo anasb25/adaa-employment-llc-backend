@@ -24,6 +24,7 @@ import { PayrollModule } from './modules/payroll/payroll.module';
 import { InvoicesModule } from './modules/invoices/invoices.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
 import { SettlementsModule } from './modules/settlements/settlements.module';
+import { SuppliersModule } from './modules/suppliers/suppliers.module';
 import { Employee } from './modules/employees/entities/employee.entity';
 import { Mobilization } from './modules/mobilizations/entities/mobilization.entity';
 import appConfig from './config/app.config';
@@ -90,6 +91,7 @@ import mailConfig from './config/mail.config';
     InvoicesModule,
     DashboardModule,
     SettlementsModule,
+    SuppliersModule,
   ],
   controllers: [AppController],
   providers: [

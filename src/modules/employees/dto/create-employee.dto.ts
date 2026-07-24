@@ -1,9 +1,19 @@
-import { IsString, IsOptional, IsDateString, IsNumber } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  IsDateString,
+  IsNumber,
+  IsInt,
+  ValidateIf,
+} from 'class-validator';
 import { Transform } from 'class-transformer';
 
-// Convert empty string to undefined so @IsOptional() skips validation for optional date fields
+// Convert empty string to undefined so @IsOptional() skips validation for optional fields
 const emptyStringToUndefined = ({ value }: { value: unknown }) =>
   value === '' ? undefined : value;
+
+const emptyNumberToUndefined = ({ value }: { value: unknown }) =>
+  value === '' || value === null ? undefined : value;
 
 export class CreateEmployeeDto {
   @IsString()
@@ -90,4 +100,10 @@ export class CreateEmployeeDto {
   @IsOptional()
   @IsNumber()
   annual_leave_balance?: number;
+
+  @IsOptional()
+  @Transform(emptyNumberToUndefined)
+  @ValidateIf((_, value) => value !== null)
+  @IsInt()
+  supplierId?: number | null;
 }
