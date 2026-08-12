@@ -44,6 +44,7 @@ import {
   isPersistentUntilRemobStatus,
   normalizeMobilizationForProjectRoster,
 } from '../../common/utils/effective-mobilization.util';
+import { getMonthDateRange } from '../../common/utils/date.util';
 import { TimesheetsService } from '../timesheets/timesheets.service';
 
 @Injectable()
@@ -182,7 +183,7 @@ export class MobilizationsService {
         saved.actionDate,
       );
     }
-    await this.autoSyncTimesheet(saved.employeeId, saved.actionDate);
+    await this.autoSyncTimesheet(saved);
 
     const result = await this.findOne(saved.id);
     if (!result) {
@@ -257,7 +258,7 @@ export class MobilizationsService {
           mob.actionDate,
         );
       }
-      await this.autoSyncTimesheet(mob.employeeId, mob.actionDate);
+      await this.autoSyncTimesheet(mob);
     }
 
     this.logger.log(
@@ -792,7 +793,9 @@ export class MobilizationsService {
         result.actionDate,
       );
     }
-    await this.autoSyncTimesheet(result.employeeId, result.actionDate);
+    const previousProjectId =
+      existing.projectId !== result.projectId ? existing.projectId : null;
+    await this.autoSyncTimesheet(result, previousProjectId);
 
     return result;
   }
@@ -1189,7 +1192,7 @@ export class MobilizationsService {
             mobilization.actionDate,
           );
         }
-        await this.autoSyncTimesheet(employee.id, mappedData.actionDate);
+        await this.autoSyncTimesheet(mobilization);
 
         result.success++;
         result.imported.push({
@@ -1210,19 +1213,139 @@ export class MobilizationsService {
   }
 
   private async autoSyncTimesheet(
-    employeeId: number,
-    actionDate: string,
+    mob: Mobilization,
+    explicitPreviousProjectId?: number | null,
   ): Promise<void> {
     try {
+      const actionDateStr = formatDateOnly(mob.actionDate);
+      const fromProject =
+        explicitPreviousProjectId ??
+        (await this.resolvePriorProjectForTransfer(
+          mob.employeeId,
+          actionDateStr,
+          mob.projectId,
+        ));
+
+      if (
+        mob.projectId &&
+        mob.mobStatus === MobStatus.MOBILIZED &&
+        !MobilizationsService.NO_PROJECT_JOB_STATUSES.has(
+          String(mob.jobStatus).toLowerCase(),
+        ) &&
+        fromProject &&
+        fromProject !== mob.projectId
+      ) {
+        await this.reassignMobilizationsOnProjectTransfer(
+          mob.employeeId,
+          actionDateStr,
+          fromProject,
+          mob.projectId,
+          mob.updatedBy ?? mob.createdBy ?? 1,
+        );
+        await this.timesheetsService.shiftTimesheetEntriesOnProjectTransfer(
+          mob.employeeId,
+          actionDateStr,
+          fromProject,
+          mob.projectId,
+          mob.updatedBy ?? mob.createdBy ?? 1,
+        );
+        await this.timesheetsService.materializeTransferredTimesheetEntries(
+          mob.employeeId,
+          actionDateStr,
+          fromProject,
+          mob.projectId,
+          mob.updatedBy ?? mob.createdBy ?? 1,
+        );
+      }
+
       await this.timesheetsService.syncTimesheetFromMobilization(
-        employeeId,
-        actionDate,
+        mob.employeeId,
+        actionDateStr,
       );
     } catch (error) {
       this.logger.error(
-        `Failed to auto-sync timesheet for employee ${employeeId} on ${actionDate}: ${this.getErrorMessage(error)}`,
+        `Failed to auto-sync timesheet for employee ${mob.employeeId} on ${formatDateOnly(mob.actionDate)}: ${this.getErrorMessage(error)}`,
       );
     }
+  }
+
+  /** Project the employee was on immediately before a mid-month transfer. */
+  private async resolvePriorProjectForTransfer(
+    employeeId: number,
+    actionDateStr: string,
+    newProjectId: number | null,
+  ): Promise<number | null> {
+    if (!newProjectId) {
+      return null;
+    }
+
+    const dayBeforeDate = parseDateOnly(actionDateStr);
+    dayBeforeDate.setUTCDate(dayBeforeDate.getUTCDate() - 1);
+    const dayBefore = formatDateOnly(dayBeforeDate);
+
+    const mobs = await this.mobilizationRepository.find({
+      where: {
+        employeeId,
+        actionDate: LessThanOrEqual(dayBefore) as any,
+      },
+      order: { actionDate: 'DESC', createdAt: 'DESC' },
+    });
+
+    if (mobs.length === 0) {
+      return null;
+    }
+
+    const effective = getEffectiveMobilizationForDate(mobs, dayBefore);
+    if (
+      effective?.projectId &&
+      effective.mobStatus === MobStatus.MOBILIZED &&
+      effective.projectId !== newProjectId
+    ) {
+      return effective.projectId;
+    }
+
+    return null;
+  }
+
+  /**
+   * Move mobilization rows still pointing at the old project on/after the transfer
+   * date so day-specific statuses (sick leave, absent, etc.) follow the employee.
+   */
+  private async reassignMobilizationsOnProjectTransfer(
+    employeeId: number,
+    transferDateStr: string,
+    fromProjectId: number,
+    toProjectId: number,
+    updatedBy: number,
+  ): Promise<number> {
+    const month = transferDateStr.slice(0, 7);
+    const { end: monthEnd } = getMonthDateRange(month);
+
+    const staleMobs = await this.mobilizationRepository
+      .createQueryBuilder('m')
+      .where('m.employeeId = :employeeId', { employeeId })
+      .andWhere('m.projectId = :fromProjectId', { fromProjectId })
+      .andWhere('m.mobStatus = :mobilized', { mobilized: MobStatus.MOBILIZED })
+      .andWhere('m.actionDate >= :transferDate', { transferDate: transferDateStr })
+      .andWhere('m.actionDate <= :monthEnd', { monthEnd })
+      .getMany();
+
+    let reassigned = 0;
+    for (const staleMob of staleMobs) {
+      staleMob.projectId = toProjectId;
+      staleMob.updatedBy = updatedBy;
+      await this.mobilizationRepository.save(staleMob);
+      reassigned++;
+    }
+
+    if (reassigned > 0) {
+      this.logger.log(
+        `Reassigned ${reassigned} mobilization(s) for employee ${employeeId} ` +
+          `from project ${fromProjectId} to ${toProjectId} on/after ${transferDateStr}`,
+      );
+    }
+
+    return reassigned;
   }
 
   /**
