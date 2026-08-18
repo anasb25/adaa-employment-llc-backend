@@ -67,7 +67,7 @@ export class MobilizationsService {
   ]);
 
   /**
-   * Business rule: idle / annual leave / urgent leave / terminal leave statuses are demobilized
+   * Business rule: idle / annual leave / terminal leave statuses are demobilized
    * with no project so they appear only on the idle + annual-leave timesheet, not
    * on any project grid from the leave start date onward.
    */
@@ -76,29 +76,14 @@ export class MobilizationsService {
       jobStatus?: JobStatus | string | null;
       mobStatus?: MobStatus | string | null;
       projectId?: number | null;
-      notes?: string | null;
     },
-  >(data: T, existingProjectId?: number | null): T {
+  >(data: T): T {
     const jobStatus = String(data.jobStatus ?? '').toLowerCase();
     if (MobilizationsService.NO_PROJECT_JOB_STATUSES.has(jobStatus)) {
-      const previousProjectId = data.projectId ?? existingProjectId ?? null;
       data.mobStatus = MobStatus.DEMOBILIZED;
       data.projectId = null;
-      if (
-        previousProjectId &&
-        !String(data.notes ?? '').includes('previousProjectId=')
-      ) {
-        const prefix = `previousProjectId=${previousProjectId}`;
-        data.notes = data.notes?.trim()
-          ? `${prefix}; ${data.notes.trim()}`
-          : prefix;
-      }
     }
     return data;
-  }
-
-  private getErrorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
   }
 
   constructor(
@@ -153,14 +138,7 @@ export class MobilizationsService {
     // Note: Multiple mobilization records can exist for the same employee
     // This allows tracking mobilization history over time
 
-    const priorMob = await this.mobilizationRepository.findOne({
-      where: { employeeId: createDto.employeeId },
-      order: { actionDate: 'DESC', createdAt: 'DESC' },
-    });
-    const normalizedDto = this.normalizeMobilizationWrite(
-      { ...createDto },
-      priorMob?.projectId ?? null,
-    );
+    const normalizedDto = this.normalizeMobilizationWrite({ ...createDto });
     const mobilization = this.mobilizationRepository.create({
       ...normalizedDto,
       createdBy,
@@ -173,10 +151,7 @@ export class MobilizationsService {
       saved.projectId,
       saved.actionDate,
     );
-    if (
-      saved.jobStatus === JobStatus.ANNUAL_LEAVE ||
-      saved.jobStatus === JobStatus.URGENT_LEAVE
-    ) {
+    if (saved.jobStatus === JobStatus.ANNUAL_LEAVE) {
       await this.cleanupFutureAutoSyncedMobsAfterLeave(
         saved.employeeId,
         saved.actionDate,
@@ -248,10 +223,7 @@ export class MobilizationsService {
         mob.projectId,
         mob.actionDate,
       );
-      if (
-        mob.jobStatus === JobStatus.ANNUAL_LEAVE ||
-        mob.jobStatus === JobStatus.URGENT_LEAVE
-      ) {
+      if (mob.jobStatus === JobStatus.ANNUAL_LEAVE) {
         await this.cleanupFutureAutoSyncedMobsAfterLeave(
           mob.employeeId,
           mob.actionDate,
@@ -589,7 +561,12 @@ export class MobilizationsService {
     const latestMobDateStr = formatDateOnly(latestMob.actionDate);
 
     // List of temporary one-day statuses that should not carry forward
-    const temporaryStatuses: string[] = ['absent', 'sick_leave', 'casual_leave'];
+    const temporaryStatuses: string[] = [
+      'absent',
+      'sick_leave',
+      'casual_leave',
+      'urgent_leave',
+    ];
 
     // If the effective mobilization is on the exact date we're looking at -> use it as-is
     if (latestMobDateStr === targetDateStr) {
@@ -760,13 +737,10 @@ export class MobilizationsService {
     // Normalize: if the effective jobStatus after this update is IDLE, force
     // mobStatus=DEMOBILIZED and projectId=null regardless of what the caller sent.
     const effectiveJobStatus = updateDto.jobStatus ?? existing.jobStatus;
-    const normalizedUpdate = this.normalizeMobilizationWrite(
-      {
-        ...updateDto,
-        jobStatus: effectiveJobStatus,
-      },
-      existing.projectId,
-    );
+    const normalizedUpdate = this.normalizeMobilizationWrite({
+      ...updateDto,
+      jobStatus: effectiveJobStatus,
+    });
 
     await this.mobilizationRepository.update(id, {
       ...normalizedUpdate,
@@ -783,10 +757,7 @@ export class MobilizationsService {
       result.projectId,
       result.actionDate,
     );
-    if (
-      result.jobStatus === JobStatus.ANNUAL_LEAVE ||
-      result.jobStatus === JobStatus.URGENT_LEAVE
-    ) {
+    if (result.jobStatus === JobStatus.ANNUAL_LEAVE) {
       await this.cleanupFutureAutoSyncedMobsAfterLeave(
         result.employeeId,
         result.actionDate,
@@ -1074,17 +1045,14 @@ export class MobilizationsService {
 
           if (hasChanged) {
             // Update existing mobilization (normalized: idle => demobilized + null project)
-            const updatePayload = this.normalizeMobilizationWrite(
-              {
-                mobilizedTradeId: mobilizedTrade.id,
-                projectId: project?.id || null,
-                mobStatus: mappedData.mobStatus as MobStatus,
-                jobStatus: mappedData.jobStatus as JobStatus,
-                notes: mappedData.notes,
-                updatedBy: createdBy,
-              },
-              existingMobilization.projectId,
-            );
+            const updatePayload = this.normalizeMobilizationWrite({
+              mobilizedTradeId: mobilizedTrade.id,
+              projectId: project?.id || null,
+              mobStatus: mappedData.mobStatus as MobStatus,
+              jobStatus: mappedData.jobStatus as JobStatus,
+              notes: mappedData.notes,
+              updatedBy: createdBy,
+            });
             await this.mobilizationRepository.update(
               existingMobilization.id,
               updatePayload,
@@ -1180,10 +1148,7 @@ export class MobilizationsService {
           mappedData.projectId,
           mappedData.actionDate,
         );
-        if (
-          mobilization.jobStatus === JobStatus.ANNUAL_LEAVE ||
-          mobilization.jobStatus === JobStatus.URGENT_LEAVE
-        ) {
+        if (mobilization.jobStatus === JobStatus.ANNUAL_LEAVE) {
           await this.cleanupFutureAutoSyncedMobsAfterLeave(
             employee.id,
             mobilization.actionDate,
@@ -1201,7 +1166,7 @@ export class MobilizationsService {
         result.errors.push({
           row: rowNumber,
           employee: row['NAME'] || 'Unknown',
-          errors: [this.getErrorMessage(error) || 'Unknown error occurred'],
+          errors: [error.message || 'Unknown error occurred'],
         });
       }
     }
@@ -1220,7 +1185,7 @@ export class MobilizationsService {
       );
     } catch (error) {
       this.logger.error(
-        `Failed to auto-sync timesheet for employee ${employeeId} on ${actionDate}: ${this.getErrorMessage(error)}`,
+        `Failed to auto-sync timesheet for employee ${employeeId} on ${actionDate}: ${error.message}`,
       );
     }
   }
@@ -1250,18 +1215,6 @@ export class MobilizationsService {
         .andWhere('notes LIKE :pattern', {
           pattern: 'Auto-synced from timesheet%',
         })
-        .andWhere('notes NOT LIKE :remobPattern', {
-          remobPattern: 'Remobilized from idle timesheet%',
-        })
-        .andWhere('jobStatus IN (:...workingStatuses)', {
-          workingStatuses: [
-            JobStatus.ACTIVE,
-            JobStatus.NOTICE_PERIOD,
-            'active',
-            'notice_period',
-            'off',
-          ],
-        })
         .execute();
 
       if (deleted.affected && deleted.affected > 0) {
@@ -1272,7 +1225,7 @@ export class MobilizationsService {
       }
     } catch (error) {
       this.logger.error(
-        `Failed to cleanup future auto-synced mobs after leave for employee ${employeeId}: ${this.getErrorMessage(error)}`,
+        `Failed to cleanup future auto-synced mobs after leave for employee ${employeeId}: ${error.message}`,
       );
     }
   }
@@ -1305,7 +1258,7 @@ export class MobilizationsService {
       }
     } catch (error) {
       this.logger.error(
-        `Failed to cleanup conflicting auto-synced mobs for employee ${employeeId}: ${this.getErrorMessage(error)}`,
+        `Failed to cleanup conflicting auto-synced mobs for employee ${employeeId}: ${error.message}`,
       );
     }
   }

@@ -30,7 +30,12 @@ const HIDDEN_FROM_PROJECT_ROSTER = new Set([
   'urgent_leave',
 ]);
 
-const TEMPORARY_STATUSES = ['absent', 'sick_leave', 'casual_leave'];
+const TEMPORARY_STATUSES = [
+  'absent',
+  'sick_leave',
+  'casual_leave',
+  'urgent_leave',
+];
 
 export function normalizeJobStatus(
   jobStatus: string | null | undefined,
@@ -43,23 +48,15 @@ export function isAutoSyncedFromTimesheet(mob: Mobilization): boolean {
   return !!mob.notes?.startsWith('Auto-synced from timesheet');
 }
 
-export function isRemobilizedFromIdleSheet(mob: Mobilization): boolean {
-  return !!mob.notes?.startsWith('Remobilized from idle timesheet');
-}
-
 export function isExplicitRemobilization(mob: Mobilization): boolean {
   if (isAutoSyncedFromTimesheet(mob)) {
     return false;
   }
-  if (mob.mobStatus !== MobStatus.MOBILIZED || mob.projectId === null) {
-    return false;
-  }
-  if (isRemobilizedFromIdleSheet(mob)) {
-    return true;
-  }
   const jobStatus = normalizeJobStatus(mob.jobStatus);
   return (
-    jobStatus === JobStatus.ACTIVE || jobStatus === JobStatus.NOTICE_PERIOD
+    mob.mobStatus === MobStatus.MOBILIZED &&
+    jobStatus === JobStatus.ACTIVE &&
+    mob.projectId !== null
   );
 }
 
@@ -71,7 +68,6 @@ export function isPersistentUntilRemobStatus(
   return (
     TERMINAL_PERMANENT.has(normalized) ||
     normalized === JobStatus.ANNUAL_LEAVE ||
-    normalized === JobStatus.URGENT_LEAVE ||
     normalized === JobStatus.IDLE
   );
 }
@@ -126,8 +122,8 @@ export function isDaySpecificJobStatus(
 }
 
 /**
- * When multiple mobilizations share the same action date, prefer explicit remob,
- * manual records, and day-specific statuses over auto-synced rows.
+ * When multiple mobilizations share the same action date, prefer manual records
+ * and day-specific statuses (e.g. absent) over auto-synced active rows.
  */
 export function pickBestSameDayMobilization(
   sameDayMobs: Mobilization[],
@@ -137,11 +133,6 @@ export function pickBestSameDayMobilization(
   }
   if (sameDayMobs.length === 1) {
     return sameDayMobs[0];
-  }
-
-  const explicitRemob = sameDayMobs.find((m) => isExplicitRemobilization(m));
-  if (explicitRemob) {
-    return explicitRemob;
   }
 
   const manualMobs = sameDayMobs.filter((m) => !isAutoSyncedFromTimesheet(m));
@@ -183,7 +174,8 @@ export function resolveCarriedMobilization(
 
   if (isDaySpecificJobStatus(latestMob.jobStatus)) {
     const nonTemporaryMob = mobilizationsUpToDate.find(
-      (m, index) => index > 0 && !isDaySpecificJobStatus(m.jobStatus),
+      (m, index) =>
+        index > 0 && !isDaySpecificJobStatus(m.jobStatus),
     );
 
     if (nonTemporaryMob) {
@@ -202,66 +194,6 @@ export function resolveCarriedMobilization(
   return latestMob;
 }
 
-function hasSameDayExplicitRemob(
-  mobilizationsNewestFirst: Mobilization[],
-  mobDateStr: string,
-): boolean {
-  return mobilizationsNewestFirst.some(
-    (m) =>
-      formatDateOnly(m.actionDate) === mobDateStr &&
-      isExplicitRemobilization(m),
-  );
-}
-
-function findNewestPersistentLeaveUpTo(
-  mobilizationsNewestFirst: Mobilization[],
-  dateStr: string,
-): Mobilization | undefined {
-  for (const mob of mobilizationsNewestFirst) {
-    const mobDateStr = formatDateOnly(mob.actionDate);
-    if (compareDateOnly(mobDateStr, dateStr) > 0) {
-      continue;
-    }
-    if (!isPersistentUntilRemobStatus(mob.jobStatus)) {
-      continue;
-    }
-    // Same-day remob ends leave on that date — look for an earlier leave start.
-    if (hasSameDayExplicitRemob(mobilizationsNewestFirst, mobDateStr)) {
-      continue;
-    }
-    return mob;
-  }
-  return undefined;
-}
-
-function findNewestRemobAfterLeaveUpTo(
-  mobilizationsNewestFirst: Mobilization[],
-  dateStr: string,
-  leaveDateStr: string,
-): Mobilization | undefined {
-  for (const mob of mobilizationsNewestFirst) {
-    const mobDateStr = formatDateOnly(mob.actionDate);
-    if (compareDateOnly(mobDateStr, dateStr) > 0) {
-      continue;
-    }
-    if (!isExplicitRemobilization(mob)) {
-      continue;
-    }
-    // Remob on the leave start date itself also ends leave for that day onward.
-    if (compareDateOnly(mobDateStr, leaveDateStr) < 0) {
-      continue;
-    }
-    return mob;
-  }
-  return undefined;
-}
-
-/**
- * Resolve the effective mobilization for one calendar day.
- * Leave (idle / annual / urgent) persists until an explicit remobilization on
- * or after the leave start. A later leave period only affects dates on/after
- * that later leave start — remobilized days before it stay on the project.
- */
 export function getEffectiveMobilizationForDate(
   employeeMobilizations: Mobilization[],
   dateStr: string,
@@ -275,73 +207,39 @@ export function getEffectiveMobilizationForDate(
     return undefined;
   }
 
-  const governingLeave = findNewestPersistentLeaveUpTo(
-    mobilizationsUpToDate,
-    dateStr,
+  const mostRecentRemob = mobilizationsUpToDate.find((m) =>
+    isExplicitRemobilization(m),
+  );
+  const mostRecentPersistent = mobilizationsUpToDate.find((m) =>
+    isPersistentUntilRemobStatus(m.jobStatus),
   );
 
-  if (!governingLeave) {
-    return resolveCarriedMobilization(mobilizationsUpToDate, dateStr);
-  }
+  if (mostRecentPersistent) {
+    const persistentDate = formatDateOnly(mostRecentPersistent.actionDate);
+    const remobAfterPersistent =
+      mostRecentRemob &&
+      compareDateOnly(
+        formatDateOnly(mostRecentRemob.actionDate),
+        persistentDate,
+      ) > 0;
 
-  const leaveDateStr = formatDateOnly(governingLeave.actionDate);
-
-  if (compareDateOnly(dateStr, leaveDateStr) < 0) {
-    return resolveCarriedMobilization(mobilizationsUpToDate, dateStr);
-  }
-
-  const governingRemob = findNewestRemobAfterLeaveUpTo(
-    mobilizationsUpToDate,
-    dateStr,
-    leaveDateStr,
-  );
-
-  if (!governingRemob) {
-    return governingLeave;
-  }
-
-  const remobDateStr = formatDateOnly(governingRemob.actionDate);
-
-  // A newer leave period after the remob overrides the remob from its start date.
-  const laterLeave = findNewestPersistentLeaveUpTo(
-    mobilizationsUpToDate.filter(
-      (m) => compareDateOnly(formatDateOnly(m.actionDate), remobDateStr) > 0,
-    ),
-    dateStr,
-  );
-
-  if (laterLeave) {
-    const laterLeaveDateStr = formatDateOnly(laterLeave.actionDate);
-    if (compareDateOnly(dateStr, laterLeaveDateStr) >= 0) {
-      const remobAfterLaterLeave = findNewestRemobAfterLeaveUpTo(
-        mobilizationsUpToDate,
-        dateStr,
-        laterLeaveDateStr,
-      );
-      if (
-        remobAfterLaterLeave &&
-        compareDateOnly(dateStr, formatDateOnly(remobAfterLaterLeave.actionDate)) >=
-          0
-      ) {
-        const sinceLaterRemob = mobilizationsUpToDate.filter(
-          (m) =>
-            compareDateOnly(
-              formatDateOnly(m.actionDate),
-              formatDateOnly(remobAfterLaterLeave.actionDate),
-            ) >= 0,
-        );
-        return resolveCarriedMobilization(sinceLaterRemob, dateStr);
+    if (!remobAfterPersistent) {
+      if (compareDateOnly(dateStr, persistentDate) >= 0) {
+        return mostRecentPersistent;
       }
-      return laterLeave;
+    } else {
+      const remobDate = formatDateOnly(mostRecentRemob!.actionDate);
+      if (compareDateOnly(dateStr, remobDate) >= 0) {
+        const sinceRemob = mobilizationsUpToDate.filter(
+          (m) => compareDateOnly(formatDateOnly(m.actionDate), remobDate) >= 0,
+        );
+        return resolveCarriedMobilization(sinceRemob, dateStr);
+      }
+      if (compareDateOnly(dateStr, persistentDate) >= 0) {
+        return mostRecentPersistent;
+      }
     }
   }
 
-  if (compareDateOnly(dateStr, remobDateStr) >= 0) {
-    const sinceRemob = mobilizationsUpToDate.filter(
-      (m) => compareDateOnly(formatDateOnly(m.actionDate), remobDateStr) >= 0,
-    );
-    return resolveCarriedMobilization(sinceRemob, dateStr);
-  }
-
-  return governingLeave;
+  return resolveCarriedMobilization(mobilizationsUpToDate, dateStr);
 }

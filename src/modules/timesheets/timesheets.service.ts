@@ -16,7 +16,6 @@ import {
 import {
   getEffectiveMobilizationForDate,
   isAssignedToProject,
-  isRemobilizedFromIdleSheet,
   shouldHideFromProjectRoster,
 } from '../../common/utils/effective-mobilization.util';
 import { Employee } from '../employees/entities/employee.entity';
@@ -39,8 +38,6 @@ import {
   getMonthDateRange,
   parseDateOnly,
 } from '../../common/utils/date.util';
-
-const PREVIOUS_PROJECT_NOTE_PREFIX = 'previousProjectId=';
 import {
   DailyUtilizationReport,
   ClientUtilization,
@@ -142,844 +139,6 @@ export class TimesheetsService {
     return this.demobilizingJobStatuses.has(String(jobStatus).toLowerCase());
   }
 
-  /** Idle / leave statuses that can be ended from the idle timesheet back to a project. */
-  private readonly returnableDemobStatuses = new Set([
-    JobStatus.IDLE,
-    JobStatus.ANNUAL_LEAVE,
-    JobStatus.URGENT_LEAVE,
-    'idle',
-    'annual_leave',
-    'urgent_leave',
-  ]);
-
-  private isPersistentLeaveStatus(jobStatus: string | null | undefined): boolean {
-    const normalized = this.normalizeJobStatus(jobStatus);
-    return (
-      normalized === JobStatus.ANNUAL_LEAVE ||
-      normalized === JobStatus.URGENT_LEAVE
-    );
-  }
-
-  private defaultTradeId(
-    mobilizationsNewestFirst: Mobilization[],
-    tradeInSiteId?: number | null,
-  ): number | null {
-    return (
-      mobilizationsNewestFirst[0]?.mobilizedTradeId ?? tradeInSiteId ?? null
-    );
-  }
-
-  private async wasEverMobilizedToProject(
-    employeeId: number,
-    projectId: number,
-  ): Promise<boolean> {
-    return this.mobilizationRepository.exist({
-      where: {
-        employeeId,
-        projectId,
-        mobStatus: MobStatus.MOBILIZED,
-      },
-    });
-  }
-
-  /** Remove active/notice saves on the wrong project when remobilizing back from idle. */
-  private async purgeStrayProjectActiveEntries(
-    employeeId: number,
-    dateStr: string,
-    targetProjectId: number,
-  ): Promise<void> {
-    const month = dateStr.slice(0, 7);
-    const strayEntries = await this.entryRepository
-      .createQueryBuilder('entry')
-      .innerJoin('entry.timesheet', 'timesheet')
-      .where('entry.employeeId = :employeeId', { employeeId })
-      .andWhere('entry.date = :dateStr', { dateStr })
-      .andWhere('timesheet.month = :month', { month })
-      .andWhere('timesheet.projectId IS NOT NULL')
-      .andWhere('timesheet.projectId != :targetProjectId', { targetProjectId })
-      .andWhere('entry.jobStatus IN (:...statuses)', {
-        statuses: [JobStatus.ACTIVE, JobStatus.NOTICE_PERIOD],
-      })
-      .getMany();
-
-    for (const stray of strayEntries) {
-      const pid = (
-        await this.timesheetRepository.findOne({
-          where: { id: stray.timesheetId },
-        })
-      )?.projectId;
-      if (pid && !(await this.wasEverMobilizedToProject(employeeId, pid))) {
-        await this.entryRepository.delete({ id: stray.id });
-      }
-    }
-  }
-
-  private parsePreviousProjectIdFromNotes(
-    notes: string | null | undefined,
-  ): number | null {
-    if (!notes) {
-      return null;
-    }
-    const match = notes.match(/previousProjectId=(\d+)/);
-    return match ? Number(match[1]) : null;
-  }
-
-  private formatDemobilizationNotes(
-    previousProjectId: number | null,
-    entryNotes?: string | null,
-  ): string {
-    const parts = ['Auto-synced from timesheet - Auto-demobilized'];
-    if (previousProjectId) {
-      parts.push(`${PREVIOUS_PROJECT_NOTE_PREFIX}${previousProjectId}`);
-    }
-    if (entryNotes?.trim()) {
-      parts.push(entryNotes.trim());
-    }
-    return parts.join('; ');
-  }
-
-  private resolveProjectBeforeDemobilization(
-    timesheetProjectId: number | null,
-    exactDateMob: Mobilization | undefined,
-    currentMob: Mobilization,
-    mobilizationsNewestFirst: Mobilization[],
-  ): number | null {
-    if (timesheetProjectId) {
-      return timesheetProjectId;
-    }
-    if (exactDateMob?.projectId) {
-      return exactDateMob.projectId;
-    }
-    if (currentMob.projectId) {
-      return currentMob.projectId;
-    }
-    const fromHistory = this.findLastMobilizedProject(mobilizationsNewestFirst);
-    if (fromHistory?.projectId) {
-      return fromHistory.projectId;
-    }
-    for (const mob of mobilizationsNewestFirst) {
-      const fromNotes = this.parsePreviousProjectIdFromNotes(mob.notes);
-      if (fromNotes) {
-        return fromNotes;
-      }
-    }
-    return null;
-  }
-
-  private findLastMobilizedProject(
-    mobilizationsNewestFirst: Mobilization[],
-  ): Pick<Mobilization, 'projectId' | 'mobilizedTradeId'> | null {
-    for (const mob of mobilizationsNewestFirst) {
-      if (mob.projectId == null || mob.mobStatus !== MobStatus.MOBILIZED) {
-        continue;
-      }
-      const status = this.normalizeJobStatus(mob.jobStatus);
-      if (!status || this.isDemobilizingJobStatus(status)) {
-        continue;
-      }
-      return {
-        projectId: mob.projectId,
-        mobilizedTradeId: mob.mobilizedTradeId,
-      };
-    }
-    return null;
-  }
-
-  private findProjectFromPriorEffectiveDay(
-    dateStr: string,
-    mobilizationsNewestFirst: Mobilization[],
-  ): Pick<Mobilization, 'projectId' | 'mobilizedTradeId'> | null {
-    const date = parseDateOnly(dateStr);
-    date.setUTCDate(date.getUTCDate() - 1);
-    const priorDateStr = formatDateOnly(date);
-    const effective = getEffectiveMobilizationForDate(
-      mobilizationsNewestFirst,
-      priorDateStr,
-    );
-    if (
-      !effective?.projectId ||
-      effective.mobStatus !== MobStatus.MOBILIZED ||
-      this.isDemobilizingJobStatus(effective.jobStatus)
-    ) {
-      return null;
-    }
-    return {
-      projectId: effective.projectId,
-      mobilizedTradeId: effective.mobilizedTradeId,
-    };
-  }
-
-  private resolveRemobilizationProjectIdFromHistory(
-    mobilizationsNewestFirst: Mobilization[],
-  ): number | null {
-    for (const mob of mobilizationsNewestFirst) {
-      const fromNotes = this.parsePreviousProjectIdFromNotes(mob.notes);
-      if (fromNotes) {
-        return fromNotes;
-      }
-    }
-    return this.findLastMobilizedProject(mobilizationsNewestFirst)?.projectId ?? null;
-  }
-
-  /**
-   * Resolve project to remobilize onto after idle/leave.
-   */
-  private async findRemobilizationProject(
-    employeeId: number,
-    dateStr: string,
-    mobilizationsNewestFirst: Mobilization[],
-  ): Promise<Pick<Mobilization, 'projectId' | 'mobilizedTradeId'> | null> {
-    for (const mob of mobilizationsNewestFirst) {
-      const fromNotes = this.parsePreviousProjectIdFromNotes(mob.notes);
-      if (fromNotes) {
-        return {
-          projectId: fromNotes,
-          mobilizedTradeId:
-            mob.mobilizedTradeId ??
-            this.defaultTradeId(mobilizationsNewestFirst) ??
-            this.findLastMobilizedProject(mobilizationsNewestFirst)
-              ?.mobilizedTradeId ??
-            null,
-        };
-      }
-    }
-
-    const lastMobWithProject = await this.mobilizationRepository
-      .createQueryBuilder('mob')
-      .where('mob.employeeId = :employeeId', { employeeId })
-      .andWhere('mob.actionDate <= :dateStr', { dateStr })
-      .andWhere('mob.projectId IS NOT NULL')
-      .andWhere('mob.mobStatus = :mobStatus', { mobStatus: MobStatus.MOBILIZED })
-      .andWhere('mob.jobStatus NOT IN (:...leaveStatuses)', {
-        leaveStatuses: [
-          JobStatus.ANNUAL_LEAVE,
-          JobStatus.URGENT_LEAVE,
-          JobStatus.IDLE,
-          JobStatus.CANCELLED,
-          JobStatus.ABSCONDED,
-          JobStatus.RESIGNED,
-        ],
-      })
-      .orderBy('mob.actionDate', 'DESC')
-      .addOrderBy('mob.createdAt', 'DESC')
-      .getOne();
-
-    if (lastMobWithProject?.projectId) {
-      return {
-        projectId: lastMobWithProject.projectId,
-        mobilizedTradeId: lastMobWithProject.mobilizedTradeId,
-      };
-    }
-
-    const fromHistory = this.findLastMobilizedProject(mobilizationsNewestFirst);
-    if (fromHistory) {
-      return fromHistory;
-    }
-
-    const fromPriorDay = this.findProjectFromPriorEffectiveDay(
-      dateStr,
-      mobilizationsNewestFirst,
-    );
-    if (fromPriorDay) {
-      return fromPriorDay;
-    }
-
-    const sameDayProjectEntry = await this.entryRepository
-      .createQueryBuilder('entry')
-      .innerJoinAndSelect('entry.timesheet', 'timesheet')
-      .where('entry.employeeId = :employeeId', { employeeId })
-      .andWhere('entry.date = :dateStr', { dateStr })
-      .andWhere('timesheet.projectId IS NOT NULL')
-      .getOne();
-
-    if (sameDayProjectEntry?.timesheet?.projectId) {
-      const pid = sameDayProjectEntry.timesheet.projectId;
-      if (await this.wasEverMobilizedToProject(employeeId, pid)) {
-        const tradeId = this.defaultTradeId(
-          mobilizationsNewestFirst,
-          sameDayProjectEntry.tradeInSiteId,
-        );
-        if (tradeId) {
-          return {
-            projectId: pid,
-            mobilizedTradeId: tradeId,
-          };
-        }
-      }
-    }
-
-    const month = dateStr.slice(0, 7);
-    const recentProjectEntry = await this.entryRepository
-      .createQueryBuilder('entry')
-      .innerJoinAndSelect('entry.timesheet', 'timesheet')
-      .where('entry.employeeId = :employeeId', { employeeId })
-      .andWhere('timesheet.projectId IS NOT NULL')
-      .andWhere('timesheet.month = :month', { month })
-      .andWhere('entry.date <= :dateStr', { dateStr })
-      .orderBy('entry.date', 'DESC')
-      .addOrderBy('entry.id', 'DESC')
-      .getMany();
-
-    for (const candidate of recentProjectEntry) {
-      const pid = candidate.timesheet?.projectId;
-      if (!pid || !(await this.wasEverMobilizedToProject(employeeId, pid))) {
-        continue;
-      }
-      const tradeId = this.defaultTradeId(
-        mobilizationsNewestFirst,
-        candidate.tradeInSiteId,
-      );
-      if (tradeId) {
-        return {
-          projectId: pid,
-          mobilizedTradeId: tradeId,
-        };
-      }
-    }
-
-    return null;
-  }
-
-  private async upsertRemobilizationFromIdleSheet(
-    entry: TimesheetEntry,
-    dateStr: string,
-    lastProject: Pick<Mobilization, 'projectId' | 'mobilizedTradeId'>,
-    exactDateMob: Mobilization | undefined,
-    createdBy: number,
-  ): Promise<void> {
-    const remobStatus =
-      this.normalizeJobStatus(entry.jobStatus) === JobStatus.NOTICE_PERIOD
-        ? JobStatus.NOTICE_PERIOD
-        : JobStatus.ACTIVE;
-
-    let mobRecord: Mobilization;
-    if (exactDateMob) {
-      mobRecord = exactDateMob;
-    } else {
-      mobRecord = this.mobilizationRepository.create({
-        employeeId: entry.employeeId,
-        mobilizedTradeId: lastProject.mobilizedTradeId,
-        actionDate: dateStr as any,
-        createdBy,
-      });
-    }
-
-    mobRecord.jobStatus = remobStatus;
-    mobRecord.mobStatus = MobStatus.MOBILIZED;
-    mobRecord.projectId = lastProject.projectId;
-    mobRecord.mobilizedTradeId =
-      lastProject.mobilizedTradeId ??
-      exactDateMob?.mobilizedTradeId ??
-      mobRecord.mobilizedTradeId;
-    mobRecord.notes = 'Remobilized from idle timesheet';
-    mobRecord.updatedBy = createdBy;
-
-    const savedMob = await this.mobilizationRepository.save(mobRecord);
-    await this.removeSupersededSameDayLeaveMobilizations(
-      entry.employeeId,
-      dateStr,
-      savedMob.id,
-    );
-    await this.finalizeRemobilizationFromIdleSheet(
-      entry,
-      dateStr,
-      lastProject,
-      createdBy,
-    );
-
-    this.logger.log(
-      `Remobilized employee ${entry.employeeId} on ${dateStr} to project ${lastProject.projectId}`,
-    );
-  }
-
-  /** Drop stale same-day leave rows after an explicit remob on that date. */
-  private async removeSupersededSameDayLeaveMobilizations(
-    employeeId: number,
-    dateStr: string,
-    keepMobId: number,
-  ): Promise<void> {
-    await this.mobilizationRepository
-      .createQueryBuilder()
-      .delete()
-      .from(Mobilization)
-      .where('employeeId = :employeeId', { employeeId })
-      .andWhere('actionDate = :dateStr', { dateStr })
-      .andWhere('id != :keepMobId', { keepMobId })
-      .andWhere('jobStatus IN (:...statuses)', {
-        statuses: [
-          JobStatus.URGENT_LEAVE,
-          JobStatus.ANNUAL_LEAVE,
-          JobStatus.IDLE,
-        ],
-      })
-      .execute();
-  }
-
-  private async syncProjectTimesheetEntryAfterRemobilization(
-    employeeId: number,
-    dateStr: string,
-    projectId: number,
-    jobStatus: string,
-    hoursWorked: number,
-    updatedBy: number,
-  ): Promise<void> {
-    const month = dateStr.slice(0, 7);
-    let timesheet = await this.timesheetRepository.findOne({
-      where: { projectId, month },
-    });
-
-    if (!timesheet) {
-      timesheet = this.timesheetRepository.create({
-        projectId,
-        month,
-        createdBy: updatedBy,
-      });
-      timesheet = await this.timesheetRepository.save(timesheet);
-    }
-
-    const normalized = this.normalizeStatusAndHours(jobStatus, hoursWorked);
-    let entry = await this.entryRepository.findOne({
-      where: {
-        timesheetId: timesheet.id,
-        employeeId,
-        date: dateStr as any,
-      },
-    });
-
-    if (entry) {
-      entry.jobStatus = normalized.jobStatus as any;
-      entry.hoursWorked = normalized.hoursWorked;
-      entry.updatedBy = updatedBy;
-    } else {
-      entry = this.entryRepository.create({
-        timesheetId: timesheet.id,
-        employeeId,
-        date: dateStr as any,
-        jobStatus: normalized.jobStatus as any,
-        hoursWorked: normalized.hoursWorked,
-        createdBy: updatedBy,
-      });
-    }
-
-    await this.entryRepository.save(entry);
-  }
-
-  private async clearIdleTimesheetEntryAfterRemobilization(
-    employeeId: number,
-    dateStr: string,
-  ): Promise<void> {
-    const month = dateStr.slice(0, 7);
-    const timesheet = await this.timesheetRepository.findOne({
-      where: { projectId: null as any, month },
-    });
-    if (!timesheet) {
-      return;
-    }
-
-    await this.entryRepository.delete({
-      timesheetId: timesheet.id,
-      employeeId,
-      date: dateStr as any,
-    });
-  }
-
-  private async syncIdleTimesheetEntryAfterDemobilization(
-    employeeId: number,
-    dateStr: string,
-    jobStatus: string,
-    hoursWorked: number,
-    updatedBy: number,
-  ): Promise<void> {
-    const month = dateStr.slice(0, 7);
-    let timesheet = await this.timesheetRepository.findOne({
-      where: { projectId: null as any, month },
-    });
-
-    if (!timesheet) {
-      timesheet = this.timesheetRepository.create({
-        projectId: null,
-        month,
-        createdBy: updatedBy,
-      });
-      timesheet = await this.timesheetRepository.save(timesheet);
-    }
-
-    const normalized = this.normalizeStatusAndHours(jobStatus, hoursWorked);
-    let entry = await this.entryRepository.findOne({
-      where: {
-        timesheetId: timesheet.id,
-        employeeId,
-        date: dateStr as any,
-      },
-    });
-
-    if (entry) {
-      entry.jobStatus = normalized.jobStatus as any;
-      entry.hoursWorked = normalized.hoursWorked;
-      entry.updatedBy = updatedBy;
-    } else {
-      entry = this.entryRepository.create({
-        timesheetId: timesheet.id,
-        employeeId,
-        date: dateStr as any,
-        jobStatus: normalized.jobStatus as any,
-        hoursWorked: normalized.hoursWorked,
-        createdBy: updatedBy,
-      });
-    }
-
-    await this.entryRepository.save(entry);
-  }
-
-  private async clearProjectTimesheetEntryForDay(
-    employeeId: number,
-    dateStr: string,
-    projectId: number,
-  ): Promise<void> {
-    const month = dateStr.slice(0, 7);
-    const timesheet = await this.timesheetRepository.findOne({
-      where: { projectId, month },
-    });
-    if (!timesheet) {
-      return;
-    }
-
-    await this.entryRepository.delete({
-      timesheetId: timesheet.id,
-      employeeId,
-      date: dateStr as any,
-    });
-  }
-
-  /** After leave/idle demob from a project grid: idle sheet row + remove project cell. */
-  private async finalizeDemobilizationFromProjectTimesheet(
-    employeeId: number,
-    dateStr: string,
-    jobStatus: string,
-    hoursWorked: number,
-    sourceProjectId: number,
-    updatedBy: number,
-  ): Promise<void> {
-    await this.syncIdleTimesheetEntryAfterDemobilization(
-      employeeId,
-      dateStr,
-      jobStatus,
-      hoursWorked,
-      updatedBy,
-    );
-    await this.clearProjectTimesheetEntryForDay(
-      employeeId,
-      dateStr,
-      sourceProjectId,
-    );
-    await this.purgeProjectTimesheetLeaveEntries(employeeId, dateStr);
-  }
-
-  private async finalizeRemobilizationFromIdleSheet(
-    entry: TimesheetEntry,
-    dateStr: string,
-    lastProject: Pick<Mobilization, 'projectId' | 'mobilizedTradeId'>,
-    updatedBy: number,
-  ): Promise<void> {
-    const hours = Number(entry.hoursWorked) || 0;
-    const normalized = this.normalizeStatusAndHours(entry.jobStatus, hours);
-    await this.purgeProjectTimesheetLeaveEntries(entry.employeeId, dateStr);
-    await this.purgeStrayProjectActiveEntries(
-      entry.employeeId,
-      dateStr,
-      lastProject.projectId!,
-    );
-    await this.syncProjectTimesheetEntryAfterRemobilization(
-      entry.employeeId,
-      dateStr,
-      lastProject.projectId!,
-      normalized.jobStatus,
-      normalized.hoursWorked,
-      updatedBy,
-    );
-    await this.clearIdleTimesheetEntryAfterRemobilization(
-      entry.employeeId,
-      dateStr,
-    );
-  }
-
-  /**
-   * Idle sheet → Active when mobilization already assigns the employee to a project
-   * (e.g. remob on an earlier day in the same leave span). Ensures the project grid
-   * gets an entry and stale idle-sheet rows are removed.
-   */
-  private async syncActiveFromIdleSheetWhenOnProject(
-    entry: TimesheetEntry,
-    dateStr: string,
-    mobilizationsNewestFirst: Mobilization[],
-    updatedBy: number,
-  ): Promise<boolean> {
-    const entryStatus = this.normalizeJobStatus(entry.jobStatus);
-    if (
-      entryStatus !== JobStatus.ACTIVE &&
-      entryStatus !== JobStatus.NOTICE_PERIOD
-    ) {
-      return false;
-    }
-
-    const effective = getEffectiveMobilizationForDate(
-      mobilizationsNewestFirst,
-      dateStr,
-    );
-    if (
-      !effective?.projectId ||
-      effective.mobStatus !== MobStatus.MOBILIZED ||
-      this.isDemobilizingJobStatus(effective.jobStatus)
-    ) {
-      return false;
-    }
-
-    await this.finalizeRemobilizationFromIdleSheet(
-      entry,
-      dateStr,
-      {
-        projectId: effective.projectId,
-        mobilizedTradeId: effective.mobilizedTradeId,
-      },
-      updatedBy,
-    );
-    return true;
-  }
-
-  /**
-   * Changing idle / annual leave / urgent leave → active on the idle sheet, or on
-   * the employee's own prior project timesheet, should remobilize them.
-   */
-  private shouldRemobilizeFromTimesheetEntry(
-    entry: TimesheetEntry,
-    timesheetProjectId: number | null,
-    mobilizationsNewestFirst: Mobilization[],
-    dateStr: string,
-  ): boolean {
-    const entryStatus = this.normalizeJobStatus(entry.jobStatus);
-    if (
-      entryStatus !== JobStatus.ACTIVE &&
-      entryStatus !== JobStatus.NOTICE_PERIOD
-    ) {
-      return false;
-    }
-
-    const effective = getEffectiveMobilizationForDate(
-      mobilizationsNewestFirst,
-      dateStr,
-    );
-    if (
-      effective?.projectId &&
-      effective.mobStatus === MobStatus.MOBILIZED &&
-      !this.isDemobilizingJobStatus(effective.jobStatus) &&
-      (timesheetProjectId === null ||
-        effective.projectId === timesheetProjectId)
-    ) {
-      return false;
-    }
-
-    const priorProjectId = this.resolveRemobilizationProjectIdFromHistory(
-      mobilizationsNewestFirst,
-    );
-
-    if (timesheetProjectId !== null) {
-      return (
-        priorProjectId !== null && priorProjectId === timesheetProjectId
-      );
-    }
-
-    const effectiveStatus = this.normalizeJobStatus(effective?.jobStatus);
-    if (
-      effectiveStatus &&
-      this.returnableDemobStatuses.has(effectiveStatus)
-    ) {
-      return true;
-    }
-
-    const sameDayMob = mobilizationsNewestFirst.find(
-      (mob) => formatDateOnly(mob.actionDate) === dateStr,
-    );
-    const sameDayStatus = this.normalizeJobStatus(sameDayMob?.jobStatus);
-    if (sameDayStatus && this.returnableDemobStatuses.has(sameDayStatus)) {
-      return true;
-    }
-
-    if (effective?.mobStatus === MobStatus.DEMOBILIZED) {
-      return true;
-    }
-
-    return priorProjectId !== null;
-  }
-
-  /**
-   * Remobilize when timesheet shows Active on idle sheet or the employee's prior project.
-   * Returns true when remobilization was applied (caller should return early).
-   */
-  private async attemptRemobilizationFromTimesheetEntry(
-    entry: TimesheetEntry,
-    timesheetProjectId: number | null,
-    currentMobilizations: Mobilization[],
-    dateStr: string,
-    createdBy: number,
-  ): Promise<boolean> {
-    const entryStatus = this.normalizeJobStatus(entry.jobStatus);
-    if (
-      entryStatus !== JobStatus.ACTIVE &&
-      entryStatus !== JobStatus.NOTICE_PERIOD
-    ) {
-      return false;
-    }
-
-    const priorProjectId = this.resolveRemobilizationProjectIdFromHistory(
-      currentMobilizations,
-    );
-    if (!priorProjectId) {
-      return false;
-    }
-    if (timesheetProjectId !== null && timesheetProjectId !== priorProjectId) {
-      const onTimesheetProject = await this.wasEverMobilizedToProject(
-        entry.employeeId,
-        timesheetProjectId,
-      );
-      if (onTimesheetProject) {
-        return false;
-      }
-      await this.purgeStrayProjectActiveEntries(
-        entry.employeeId,
-        dateStr,
-        priorProjectId,
-      );
-    }
-
-    const exactDateMob = currentMobilizations.find(
-      (m) => formatDateOnly(m.actionDate) === dateStr,
-    );
-
-    const alreadyMobilizedOnProject =
-      exactDateMob?.mobStatus === MobStatus.MOBILIZED &&
-      exactDateMob.projectId === priorProjectId &&
-      !this.isDemobilizingJobStatus(exactDateMob.jobStatus) &&
-      this.normalizeJobStatus(exactDateMob.jobStatus) === entryStatus;
-
-    if (alreadyMobilizedOnProject) {
-      await this.finalizeRemobilizationFromIdleSheet(
-        entry,
-        dateStr,
-        {
-          projectId: priorProjectId,
-          mobilizedTradeId: exactDateMob!.mobilizedTradeId,
-        },
-        createdBy,
-      );
-      return true;
-    }
-
-    let lastProject = await this.findRemobilizationProject(
-      entry.employeeId,
-      dateStr,
-      currentMobilizations,
-    );
-    if (!lastProject || lastProject.projectId !== priorProjectId) {
-      const tradeId =
-        exactDateMob?.mobilizedTradeId ??
-        currentMobilizations.find((m) => m.mobilizedTradeId)?.mobilizedTradeId ??
-        this.defaultTradeId(currentMobilizations, entry.tradeInSiteId) ??
-        this.findLastMobilizedProject(currentMobilizations)?.mobilizedTradeId ??
-        null;
-      if (!tradeId) {
-        this.logger.warn(
-          `Cannot remobilize employee ${entry.employeeId} on ${dateStr}: no trade found`,
-        );
-        return false;
-      }
-      lastProject = {
-        projectId: priorProjectId,
-        mobilizedTradeId: tradeId,
-      };
-    }
-    if (!lastProject?.mobilizedTradeId) {
-      this.logger.warn(
-        `Cannot remobilize employee ${entry.employeeId} on ${dateStr}: no trade found`,
-      );
-      return false;
-    }
-
-    await this.upsertRemobilizationFromIdleSheet(
-      entry,
-      dateStr,
-      lastProject,
-      exactDateMob,
-      createdBy,
-    );
-    return true;
-  }
-
-  private applyDemobilizationFields(
-    mob: Mobilization,
-    previousProjectId: number | null,
-    entryNotes?: string | null,
-  ): void {
-    mob.mobStatus = MobStatus.DEMOBILIZED;
-    mob.projectId = null;
-    mob.notes = this.formatDemobilizationNotes(previousProjectId, entryNotes);
-  }
-
-  /** Leave/idle rows must not live on a project timesheet grid — idle sheet + mobilization only. */
-  private async purgeProjectTimesheetLeaveEntries(
-    employeeId: number,
-    dateStr: string,
-  ): Promise<void> {
-    const month = dateStr.slice(0, 7);
-    const leaveEntries = await this.entryRepository
-      .createQueryBuilder('entry')
-      .innerJoin('entry.timesheet', 'timesheet')
-      .where('entry.employeeId = :employeeId', { employeeId })
-      .andWhere('entry.date = :dateStr', { dateStr })
-      .andWhere('timesheet.month = :month', { month })
-      .andWhere('timesheet.projectId IS NOT NULL')
-      .andWhere('entry.jobStatus IN (:...statuses)', {
-        statuses: [
-          JobStatus.URGENT_LEAVE,
-          JobStatus.ANNUAL_LEAVE,
-          JobStatus.IDLE,
-        ],
-      })
-      .getMany();
-
-    if (leaveEntries.length === 0) {
-      return;
-    }
-
-    await this.entryRepository.remove(leaveEntries);
-  }
-
-  /** Remove all leave-status cells wrongly saved on project grids for a month. */
-  async purgeProjectTimesheetLeaveEntriesForMonth(month: string): Promise<number> {
-    const { start, end } = getMonthDateRange(month);
-    const entries = await this.entryRepository
-      .createQueryBuilder('entry')
-      .innerJoin('entry.timesheet', 'timesheet')
-      .where('timesheet.month = :month', { month })
-      .andWhere('timesheet.projectId IS NOT NULL')
-      .andWhere('entry.date >= :start AND entry.date <= :end', { start, end })
-      .andWhere('entry.jobStatus IN (:...statuses)', {
-        statuses: [
-          JobStatus.URGENT_LEAVE,
-          JobStatus.ANNUAL_LEAVE,
-          JobStatus.IDLE,
-        ],
-      })
-      .select('entry.id')
-      .getMany();
-
-    if (entries.length === 0) {
-      return 0;
-    }
-
-    await this.entryRepository.remove(entries);
-    return entries.length;
-  }
-
   private normalizeJobStatus(
     jobStatus: string | null | undefined,
   ): string | null {
@@ -997,11 +156,7 @@ export class TimesheetsService {
   ): boolean {
     if (!effectiveMob) return false;
     const jobStatus = this.normalizeJobStatus(effectiveMob.jobStatus);
-    return (
-      jobStatus === JobStatus.IDLE ||
-      jobStatus === JobStatus.ANNUAL_LEAVE ||
-      jobStatus === JobStatus.URGENT_LEAVE
-    );
+    return jobStatus === JobStatus.IDLE || jobStatus === JobStatus.ANNUAL_LEAVE;
   }
 
   private isLeaveStatus(jobStatus: string | null | undefined): boolean {
@@ -1097,220 +252,6 @@ export class TimesheetsService {
 
     const result = await qb.execute();
     return result.affected ?? 0;
-  }
-
-  /**
-   * Fix demobilized rows that disagree with saved timesheet intent (e.g. leave on mob
-   * but active saved on idle sheet, or active + demobilized corrupt state).
-   */
-  async repairCorruptMobilizationRows(month?: string): Promise<number> {
-    const qb = this.mobilizationRepository
-      .createQueryBuilder('m')
-      .where('m.mobStatus = :demobilized', { demobilized: MobStatus.DEMOBILIZED })
-      .andWhere(
-        '(m.jobStatus IN (:...workingStatuses) OR m.jobStatus IN (:...leaveStatuses))',
-        {
-          workingStatuses: [JobStatus.ACTIVE, JobStatus.NOTICE_PERIOD],
-          leaveStatuses: [
-            JobStatus.URGENT_LEAVE,
-            JobStatus.ANNUAL_LEAVE,
-            JobStatus.IDLE,
-          ],
-        },
-      );
-
-    if (month) {
-      const { start, end } = getMonthDateRange(month);
-      qb.andWhere('m.actionDate >= :start AND m.actionDate <= :end', {
-        start,
-        end,
-      });
-    }
-
-    const corruptMobs = await qb.getMany();
-    let repaired = 0;
-
-    for (const mob of corruptMobs) {
-      const dateStr = formatDateOnly(mob.actionDate);
-      const priorProjectId = this.parsePreviousProjectIdFromNotes(mob.notes);
-
-      let entries = await this.entryRepository
-        .createQueryBuilder('entry')
-        .innerJoinAndSelect('entry.timesheet', 'timesheet')
-        .where('entry.employeeId = :employeeId', { employeeId: mob.employeeId })
-        .andWhere('entry.date = :dateStr', { dateStr })
-        .getMany();
-
-      const activeStrayOnWrongProject = entries.find(
-        (e) =>
-          priorProjectId !== null &&
-          e.timesheet.projectId !== null &&
-          e.timesheet.projectId !== priorProjectId &&
-          (this.normalizeJobStatus(e.jobStatus) === JobStatus.ACTIVE ||
-            this.normalizeJobStatus(e.jobStatus) === JobStatus.NOTICE_PERIOD),
-      );
-
-      if (activeStrayOnWrongProject && priorProjectId) {
-        const strayProjectId = activeStrayOnWrongProject.timesheet.projectId!;
-        if (!(await this.wasEverMobilizedToProject(mob.employeeId, strayProjectId))) {
-          const source = activeStrayOnWrongProject;
-          const tradeId =
-            mob.mobilizedTradeId ?? source.tradeInSiteId ?? null;
-          if (tradeId) {
-            mob.jobStatus = JobStatus.ACTIVE;
-            mob.mobStatus = MobStatus.MOBILIZED;
-            mob.projectId = priorProjectId;
-            mob.mobilizedTradeId = tradeId;
-            mob.notes = 'Remobilized from idle timesheet';
-            const saved = await this.mobilizationRepository.save(mob);
-            await this.removeSupersededSameDayLeaveMobilizations(
-              mob.employeeId,
-              dateStr,
-              saved.id,
-            );
-            await this.entryRepository.delete({ id: source.id });
-            await this.syncProjectTimesheetEntryAfterRemobilization(
-              mob.employeeId,
-              dateStr,
-              priorProjectId,
-              JobStatus.ACTIVE,
-              Number(source.hoursWorked) || 10,
-              source.updatedBy ?? source.createdBy ?? 1,
-            );
-            await this.clearIdleTimesheetEntryAfterRemobilization(
-              mob.employeeId,
-              dateStr,
-            );
-            repaired++;
-            continue;
-          }
-        }
-      }
-
-      // Drop stray saves on projects this employee has never been mobilized to.
-      for (const entry of entries) {
-        const pid = entry.timesheet.projectId;
-        if (pid === null || pid === priorProjectId) {
-          continue;
-        }
-        if (!(await this.wasEverMobilizedToProject(mob.employeeId, pid))) {
-          await this.entryRepository.delete({ id: entry.id });
-        }
-      }
-
-      entries = await this.entryRepository
-        .createQueryBuilder('entry')
-        .innerJoinAndSelect('entry.timesheet', 'timesheet')
-        .where('entry.employeeId = :employeeId', { employeeId: mob.employeeId })
-        .andWhere('entry.date = :dateStr', { dateStr })
-        .getMany();
-
-      const idleEntries = entries.filter((e) => e.timesheet.projectId === null);
-      const leaveEntry = idleEntries.find((e) =>
-        this.returnableDemobStatuses.has(
-          this.normalizeJobStatus(e.jobStatus) ?? '',
-        ),
-      );
-
-      const activeOnPriorProject = entries.find(
-        (e) =>
-          priorProjectId !== null &&
-          e.timesheet.projectId === priorProjectId &&
-          (this.normalizeJobStatus(e.jobStatus) === JobStatus.ACTIVE ||
-            this.normalizeJobStatus(e.jobStatus) === JobStatus.NOTICE_PERIOD),
-      );
-      const idleActive = idleEntries.find(
-        (e) =>
-          this.normalizeJobStatus(e.jobStatus) === JobStatus.ACTIVE ||
-          this.normalizeJobStatus(e.jobStatus) === JobStatus.NOTICE_PERIOD,
-      );
-
-      if ((activeOnPriorProject || idleActive) && priorProjectId) {
-        const source = activeOnPriorProject ?? idleActive!;
-        const tradeId =
-          mob.mobilizedTradeId ?? source.tradeInSiteId ?? null;
-        mob.jobStatus = JobStatus.ACTIVE;
-        mob.mobStatus = MobStatus.MOBILIZED;
-        mob.projectId = priorProjectId;
-        if (tradeId) {
-          mob.mobilizedTradeId = tradeId;
-        }
-        mob.notes = 'Remobilized from idle timesheet';
-        const saved = await this.mobilizationRepository.save(mob);
-        await this.removeSupersededSameDayLeaveMobilizations(
-          mob.employeeId,
-          dateStr,
-          saved.id,
-        );
-        await this.syncProjectTimesheetEntryAfterRemobilization(
-          mob.employeeId,
-          dateStr,
-          priorProjectId,
-          JobStatus.ACTIVE,
-          Number(source.hoursWorked) || 10,
-          source.updatedBy ?? source.createdBy ?? 1,
-        );
-        await this.clearIdleTimesheetEntryAfterRemobilization(
-          mob.employeeId,
-          dateStr,
-        );
-        repaired++;
-        continue;
-      }
-
-      if (leaveEntry) {
-        mob.jobStatus = this.normalizeJobStatus(leaveEntry.jobStatus) as JobStatus;
-        this.applyDemobilizationFields(mob, priorProjectId, leaveEntry.notes);
-        await this.mobilizationRepository.save(mob);
-        repaired++;
-        continue;
-      }
-
-      // Stuck active+demobilized (corrupt) with a known prior project → restore remobilization.
-      const mobJobStatus = this.normalizeJobStatus(mob.jobStatus);
-      if (
-        priorProjectId &&
-        (mobJobStatus === JobStatus.ACTIVE ||
-          mobJobStatus === JobStatus.NOTICE_PERIOD)
-      ) {
-        const historyMobs = await this.mobilizationRepository.find({
-          where: { employeeId: mob.employeeId },
-          order: { actionDate: 'DESC', createdAt: 'DESC' },
-        });
-        const tradeId =
-          mob.mobilizedTradeId ??
-          this.findLastMobilizedProject(historyMobs)?.mobilizedTradeId ??
-          null;
-        if (tradeId) {
-          mob.jobStatus = JobStatus.ACTIVE;
-          mob.mobStatus = MobStatus.MOBILIZED;
-          mob.projectId = priorProjectId;
-          mob.mobilizedTradeId = tradeId;
-          mob.notes = 'Remobilized from idle timesheet';
-          const saved = await this.mobilizationRepository.save(mob);
-          await this.removeSupersededSameDayLeaveMobilizations(
-            mob.employeeId,
-            dateStr,
-            saved.id,
-          );
-          await this.syncProjectTimesheetEntryAfterRemobilization(
-            mob.employeeId,
-            dateStr,
-            priorProjectId,
-            JobStatus.ACTIVE,
-            10,
-            mob.updatedBy ?? mob.createdBy ?? 1,
-          );
-          await this.clearIdleTimesheetEntryAfterRemobilization(
-            mob.employeeId,
-            dateStr,
-          );
-          repaired++;
-        }
-      }
-    }
-
-    return repaired;
   }
 
   /** Load all mobilizations for a month once (avoids N×repeat per project). */
@@ -1508,20 +449,10 @@ export class TimesheetsService {
 
         if (existingEntry) {
           // Saved timesheet status wins (e.g. absent must show "A", not carried active).
-          let rawStatus =
+          const rawStatus =
             this.normalizeJobStatus(existingEntry.jobStatus) ??
             carriedStatus ??
             JobStatus.ACTIVE;
-          // Stale idle/leave on the project grid after remobilization — mobilization wins.
-          if (
-            isAssignedToProject(effectiveMob, project.id) &&
-            rawStatus &&
-            this.returnableDemobStatuses.has(rawStatus) &&
-            carriedStatus &&
-            !this.isDemobilizingJobStatus(carriedStatus)
-          ) {
-            rawStatus = carriedStatus;
-          }
           // Respect the saved hours exactly, including an explicit 0 on an
           // active day (do not inflate to the default 10h).
           const normalized = this.normalizeStatusAndHours(
@@ -1608,8 +539,6 @@ export class TimesheetsService {
   ): Promise<MonthlyProjectTimesheetData[]> {
     // Heal inconsistent leave/off + hours rows for every employee in this month.
     await this.repairInconsistentStatusHours(month);
-    await this.purgeProjectTimesheetLeaveEntriesForMonth(month);
-    await this.repairCorruptMobilizationRows(month);
 
     const projects = await this.projectRepository.find({
       relations: ['client'],
@@ -1645,7 +574,7 @@ export class TimesheetsService {
 
   /**
    * Monthly timesheet with projectId = null: idle employees and demobilized annual-leave days.
-   * Includes anyone with at least one idle, annual_leave, or urgent_leave day carried from mobilizations.
+   * Includes anyone with at least one idle day OR one annual_leave day carried from mobilizations.
    * Needed so approve flow can deduct annual_leave_balance from approved annual_leave entries.
    * Business rule: On this sheet, Sundays are forced off only for idle (non-leave) rows.
    * Annual leave spans include Sundays; those days remain annual_leave and sync to mobilizations.
@@ -1684,11 +613,9 @@ export class TimesheetsService {
         const carriedStatus = this.normalizeJobStatus(effectiveMob!.jobStatus)!;
         const isIdleDay = carriedStatus === JobStatus.IDLE;
         const isAnnualLeaveDay = carriedStatus === JobStatus.ANNUAL_LEAVE;
-        const isUrgentLeaveDay = carriedStatus === JobStatus.URGENT_LEAVE;
-        const isPersistentLeaveDay = isAnnualLeaveDay || isUrgentLeaveDay;
 
-        const baselineStatus = isPersistentLeaveDay
-          ? carriedStatus
+        const baselineStatus = isAnnualLeaveDay
+          ? JobStatus.ANNUAL_LEAVE
           : JobStatus.IDLE;
 
         const existingEntry = timesheet?.entries?.find(
@@ -1701,9 +628,9 @@ export class TimesheetsService {
           : this.getDefaultHoursForStatus(baselineStatus);
         let jobStatus: string = existingEntry?.jobStatus ?? baselineStatus;
 
-        if (isPersistentLeaveDay) {
-          jobStatus = carriedStatus;
-          hours = this.getDefaultHoursForStatus(carriedStatus);
+        if (isAnnualLeaveDay) {
+          jobStatus = JobStatus.ANNUAL_LEAVE;
+          hours = this.getDefaultHoursForStatus(JobStatus.ANNUAL_LEAVE);
         } else if (isIdleDay) {
           jobStatus = JobStatus.IDLE;
           hours = existingEntry
@@ -1714,17 +641,17 @@ export class TimesheetsService {
         let isOffDay = false;
         const isSunday = this.isUtcSunday(dateStr);
 
-        // Idle-only Sundays forced off (legacy rule). Sundays during leave spans stay leave.
+        // Idle-only Sundays forced off (legacy rule). Sundays during annual_leave stay leave.
         if (isSunday && isIdleDay) {
           hours = 0;
           jobStatus = JobStatus.OFF;
           isOffDay = true;
         }
 
-        // Override stale persisted "off" rows when mobilization baseline is leave (e.g. old saves).
-        if (isSunday && isPersistentLeaveDay) {
-          jobStatus = carriedStatus;
-          hours = this.getDefaultHoursForStatus(carriedStatus);
+        // Override stale persisted "off" rows when mobilization baseline is AL (e.g. old saves).
+        if (isSunday && isAnnualLeaveDay) {
+          jobStatus = JobStatus.ANNUAL_LEAVE;
+          hours = this.getDefaultHoursForStatus(JobStatus.ANNUAL_LEAVE);
           isOffDay = false;
         }
 
@@ -1877,7 +804,7 @@ export class TimesheetsService {
       if (
         isIdleTimesheet &&
         this.isUtcSunday(dateString) &&
-        !this.isPersistentLeaveStatus(lowerStatus)
+        lowerStatus !== 'annual_leave'
       ) {
         hoursWorked = 0;
         jobStatus = JobStatus.OFF;
@@ -1929,7 +856,7 @@ export class TimesheetsService {
       const skipIdleSundayMobSync =
         isIdleTimesheet &&
         this.isUtcSunday(dateString) &&
-        !this.isPersistentLeaveStatus(savedLower);
+        savedLower !== 'annual_leave';
       if (!skipIdleSundayMobSync) {
         await this.syncMobilizationFromTimesheetEntry(
           savedEntry,
@@ -1937,19 +864,6 @@ export class TimesheetsService {
           updatedBy,
         );
       }
-
-      // Leave on a project grid is invalid — demobilization is driven from idle/mobilization.
-      if (
-        !isIdleTimesheet &&
-        this.returnableDemobStatuses.has(savedLower)
-      ) {
-        await this.entryRepository.delete({ id: savedEntry.id });
-      }
-    }
-
-    if (savedEntries.length > 0) {
-      const month = formatDateOnly(savedEntries[0].date).slice(0, 7);
-      await this.repairCorruptMobilizationRows(month);
     }
 
     return savedEntries;
@@ -2073,7 +987,7 @@ export class TimesheetsService {
   /**
    * Auto-sync mobilization record when timesheet entry status changes
    * Creates a new mobilization record if the job status differs from the current mobilization
-   * Automatically demobilizes employee if status is: cancelled, absconded, annual_leave, urgent_leave, resigned, or idle
+   * Automatically demobilizes employee if status is: cancelled, absconded, annual_leave, resigned, or idle
    */
   private async syncMobilizationFromTimesheetEntry(
     entry: TimesheetEntry,
@@ -2083,21 +997,21 @@ export class TimesheetsService {
     try {
       // entry.date is now a string (YYYY-MM-DD) thanks to DateOnlyTransformer
       const dateStr = entry.date;
-      const entryStatus = String(entry.jobStatus).toLowerCase();
       if (
         projectId === null &&
         this.isUtcSunday(dateStr) &&
-        !this.isPersistentLeaveStatus(entryStatus)
+        String(entry.jobStatus).toLowerCase() !== 'annual_leave'
       ) {
         return;
       }
+
+      const entryDate = parseDateOnly(dateStr);
 
       // Define statuses that should trigger automatic demobilization
       const demobilizingStatuses = [
         'cancelled',
         'absconded',
         'annual_leave',
-        'urgent_leave',
         'resigned',
         'idle',
       ];
@@ -2127,10 +1041,10 @@ export class TimesheetsService {
 
       const currentMob = currentMobilizations[0];
 
-      // Don't sync project timesheet saves onto a different project. Idle sheet
-      // (projectId=null) must still sync — otherwise leave/remob from that folder is ignored.
+      // Don't sync if the employee's effective mobilization is on a DIFFERENT project.
+      // This prevents stale timesheet saves from creating conflicting mob records
+      // after the employee has been transferred to another project.
       if (
-        projectId !== null &&
         currentMob.mobStatus === MobStatus.MOBILIZED &&
         currentMob.projectId !== null &&
         currentMob.projectId !== projectId
@@ -2142,111 +1056,30 @@ export class TimesheetsService {
         return;
       }
 
-      // Active on idle / prior-project timesheet → always remobilize first.
-      if (
-        !shouldDemobilize &&
-        (await this.attemptRemobilizationFromTimesheetEntry(
-          entry,
-          projectId,
-          currentMobilizations,
-          dateStr,
-          createdBy,
-        ))
-      ) {
-        return;
-      }
-
       // Check if there's already a mobilization record for this exact date (using timezone-neutral comparison)
       const exactDateMob = currentMobilizations.find((m) => {
         const mobDateStr = formatDateOnly(m.actionDate);
         return mobDateStr === dateStr;
       });
 
-      // Active on idle sheet when already effectively on a project (carry-forward remob).
-      if (
-        projectId === null &&
-        !shouldDemobilize &&
-        (await this.syncActiveFromIdleSheetWhenOnProject(
-          entry,
-          dateStr,
-          currentMobilizations,
-          createdBy,
-        ))
-      ) {
-        return;
-      }
-
       // Only sync when the job STATUS actually changed — not project.
       // Project is determined by mobilization data, not by which timesheet the entry lives in.
       // This prevents default entries from creating spurious mobilization records.
       if (exactDateMob) {
-        const statusChanged =
-          this.normalizeJobStatus(exactDateMob.jobStatus) !==
-          this.normalizeJobStatus(entry.jobStatus);
+        const statusChanged = exactDateMob.jobStatus !== entry.jobStatus;
         const mobStatusChanged =
           shouldDemobilize && exactDateMob.mobStatus !== MobStatus.DEMOBILIZED;
 
         if (statusChanged || mobStatusChanged) {
-          const normalizedEntryStatus = this.normalizeJobStatus(entry.jobStatus);
-
-          // Never persist active + demobilized.
-          if (
-            !shouldDemobilize &&
-            exactDateMob.mobStatus === MobStatus.DEMOBILIZED &&
-            (normalizedEntryStatus === JobStatus.ACTIVE ||
-              normalizedEntryStatus === JobStatus.NOTICE_PERIOD)
-          ) {
-            if (
-              await this.attemptRemobilizationFromTimesheetEntry(
-                entry,
-                projectId,
-                currentMobilizations,
-                dateStr,
-                createdBy,
-              )
-            ) {
-              return;
-            }
-            this.logger.warn(
-              `Refusing to save active + demobilized for employee ${entry.employeeId} on ${dateStr}`,
-            );
-            return;
-          }
-
           exactDateMob.jobStatus = entry.jobStatus as JobStatus;
 
           if (shouldDemobilize) {
-            const previousProjectId = this.resolveProjectBeforeDemobilization(
-              projectId,
-              exactDateMob,
-              currentMob,
-              currentMobilizations,
-            );
-            this.applyDemobilizationFields(
-              exactDateMob,
-              previousProjectId,
-              entry.notes,
-            );
+            exactDateMob.mobStatus = MobStatus.DEMOBILIZED;
+            exactDateMob.projectId = null;
           }
 
           exactDateMob.updatedBy = createdBy;
           await this.mobilizationRepository.save(exactDateMob);
-
-          if (shouldDemobilize && projectId !== null) {
-            await this.finalizeDemobilizationFromProjectTimesheet(
-              entry.employeeId,
-              dateStr,
-              entry.jobStatus,
-              Number(entry.hoursWorked) || 0,
-              projectId,
-              createdBy,
-            );
-          } else if (shouldDemobilize) {
-            await this.purgeProjectTimesheetLeaveEntries(
-              entry.employeeId,
-              dateStr,
-            );
-          }
 
           const mobStatusInfo = shouldDemobilize ? ' (DEMOBILIZED)' : '';
           this.logger.log(
@@ -2255,22 +1088,11 @@ export class TimesheetsService {
         }
       } else {
         // No mobilization for this exact date - check if we need to create one
-        const statusDiffers =
-          this.normalizeJobStatus(currentMob.jobStatus) !==
-          this.normalizeJobStatus(entry.jobStatus);
+        const statusDiffers = currentMob.jobStatus !== entry.jobStatus;
         const needsDemobilization =
           shouldDemobilize && currentMob.mobStatus !== MobStatus.DEMOBILIZED;
 
         if (statusDiffers || needsDemobilization) {
-          const previousProjectId = shouldDemobilize
-            ? this.resolveProjectBeforeDemobilization(
-                projectId,
-                undefined,
-                currentMob,
-                currentMobilizations,
-              )
-            : null;
-
           const newMob = this.mobilizationRepository.create({
             employeeId: entry.employeeId,
             mobilizedTradeId: currentMob.mobilizedTradeId,
@@ -2280,29 +1102,12 @@ export class TimesheetsService {
               : currentMob.mobStatus,
             jobStatus: entry.jobStatus as JobStatus,
             actionDate: dateStr as any,
-            notes: shouldDemobilize
-              ? this.formatDemobilizationNotes(previousProjectId, entry.notes)
-              : `Auto-synced from timesheet: ${entry.notes || ''}`.trim(),
+            notes:
+              `Auto-synced from timesheet${shouldDemobilize ? ' - Auto-demobilized' : ''}: ${entry.notes || ''}`.trim(),
             createdBy,
           });
 
           await this.mobilizationRepository.save(newMob);
-
-          if (shouldDemobilize && projectId !== null) {
-            await this.finalizeDemobilizationFromProjectTimesheet(
-              entry.employeeId,
-              dateStr,
-              entry.jobStatus,
-              Number(entry.hoursWorked) || 0,
-              projectId,
-              createdBy,
-            );
-          } else if (shouldDemobilize) {
-            await this.purgeProjectTimesheetLeaveEntries(
-              entry.employeeId,
-              dateStr,
-            );
-          }
 
           const mobStatusInfo = shouldDemobilize ? ' (DEMOBILIZED)' : '';
           this.logger.log(
