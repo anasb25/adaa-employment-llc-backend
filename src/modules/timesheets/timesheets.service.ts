@@ -942,6 +942,13 @@ export class TimesheetsService {
 
     const month = transferDateStr.slice(0, 7);
     const { end: monthEnd } = getMonthDateRange(month);
+    const stintEnd = await this.getProjectStintEndDate(
+      employeeId,
+      toProjectId,
+      transferDateStr,
+    );
+    const rangeEnd =
+      compareDateOnly(stintEnd, monthEnd) <= 0 ? stintEnd : monthEnd;
 
     const fromTimesheet = await this.timesheetRepository.findOne({
       where: { projectId: fromProjectId, month },
@@ -990,7 +997,7 @@ export class TimesheetsService {
       .where('entry.timesheetId = :timesheetId', { timesheetId: fromTimesheet.id })
       .andWhere('entry.employeeId = :employeeId', { employeeId })
       .andWhere('entry.date >= :transferDate', { transferDate: transferDateStr })
-      .andWhere('entry.date <= :monthEnd', { monthEnd })
+      .andWhere('entry.date <= :rangeEnd', { rangeEnd })
       .orderBy('entry.date', 'ASC')
       .getMany();
 
@@ -1024,6 +1031,124 @@ export class TimesheetsService {
   }
 
   /**
+   * Remove saved timesheet rows that no longer match mobilization assignment
+   * (e.g. after a stint start moves from Jul 1 → Jul 2 on the same project).
+   */
+  async pruneStaleTimesheetEntriesForEmployeeMonth(
+    employeeId: number,
+    month: string,
+  ): Promise<number> {
+    const { end: monthEnd } = getMonthDateRange(month);
+
+    const mobilizations = await this.mobilizationRepository.find({
+      where: {
+        employeeId,
+        actionDate: LessThanOrEqual(monthEnd) as any,
+      },
+      order: { actionDate: 'DESC', createdAt: 'DESC' },
+    });
+
+    const entries = await this.entryRepository
+      .createQueryBuilder('entry')
+      .innerJoinAndSelect('entry.timesheet', 'timesheet')
+      .where('entry.employeeId = :employeeId', { employeeId })
+      .andWhere('timesheet.month = :month', { month })
+      .andWhere('timesheet.projectId IS NOT NULL')
+      .getMany();
+
+    let removed = 0;
+    for (const entry of entries) {
+      const dateStr = formatDateOnly(entry.date);
+      const projectId = entry.timesheet.projectId;
+      if (!projectId) {
+        continue;
+      }
+
+      const effective = getEffectiveMobilizationForDate(mobilizations, dateStr);
+      if (!isAssignedToProject(effective, projectId)) {
+        await this.entryRepository.delete({ id: entry.id });
+        removed++;
+      }
+    }
+
+    if (removed > 0) {
+      this.logger.log(
+        `Pruned ${removed} stale timesheet entry/entries for employee ${employeeId} in ${month}`,
+      );
+    }
+
+    return removed;
+  }
+
+  /** Delete project-grid rows before a corrected stint start date. */
+  async clearProjectTimesheetEntriesBeforeDate(
+    employeeId: number,
+    projectId: number,
+    month: string,
+    beforeDateStr: string,
+  ): Promise<number> {
+    const timesheet = await this.timesheetRepository.findOne({
+      where: { projectId, month },
+    });
+    if (!timesheet) {
+      return 0;
+    }
+
+    if (
+      timesheet.status === TimesheetStatus.SUBMITTED ||
+      timesheet.status === TimesheetStatus.APPROVED
+    ) {
+      return 0;
+    }
+
+    const result = await this.entryRepository
+      .createQueryBuilder()
+      .delete()
+      .from(TimesheetEntry)
+      .where('timesheetId = :timesheetId', { timesheetId: timesheet.id })
+      .andWhere('employeeId = :employeeId', { employeeId })
+      .andWhere('date < :beforeDate', { beforeDate: beforeDateStr })
+      .execute();
+
+    return result.affected ?? 0;
+  }
+
+  /** Last calendar day (inclusive) the employee stays on toProject after transferDate. */
+  async getProjectStintEndDate(
+    employeeId: number,
+    toProjectId: number,
+    transferDateStr: string,
+  ): Promise<string> {
+    const month = transferDateStr.slice(0, 7);
+    const { end: monthEnd } = getMonthDateRange(month);
+
+    const nextTransfer = await this.mobilizationRepository
+      .createQueryBuilder('m')
+      .where('m.employeeId = :employeeId', { employeeId })
+      .andWhere('m.actionDate > :transferDate', { transferDate: transferDateStr })
+      .andWhere('m.actionDate <= :monthEnd', { monthEnd })
+      .andWhere('m.projectId IS NOT NULL')
+      .andWhere('m.projectId != :toProjectId', { toProjectId })
+      .andWhere('m.mobStatus = :mobilized', { mobilized: MobStatus.MOBILIZED })
+      .orderBy('m.actionDate', 'ASC')
+      .getOne();
+
+    if (!nextTransfer) {
+      return monthEnd;
+    }
+
+    const dayBefore = parseDateOnly(formatDateOnly(nextTransfer.actionDate));
+    dayBefore.setUTCDate(dayBefore.getUTCDate() - 1);
+    const endDate = formatDateOnly(dayBefore);
+
+    if (compareDateOnly(endDate, transferDateStr) < 0) {
+      return transferDateStr;
+    }
+
+    return endDate;
+  }
+
+  /**
    * After a mid-month transfer, create project timesheet rows on the new project
    * for every day from the transfer date when mobilization assigns the employee
    * there but no saved entry exists yet (carry-forward and day-specific statuses).
@@ -1037,6 +1162,13 @@ export class TimesheetsService {
   ): Promise<number> {
     const month = transferDateStr.slice(0, 7);
     const { end: monthEnd } = getMonthDateRange(month);
+    const stintEnd = await this.getProjectStintEndDate(
+      employeeId,
+      toProjectId,
+      transferDateStr,
+    );
+    const rangeEnd =
+      compareDateOnly(stintEnd, monthEnd) <= 0 ? stintEnd : monthEnd;
 
     let toTimesheet = await this.timesheetRepository.findOne({
       where: { projectId: toProjectId, month },
@@ -1077,6 +1209,9 @@ export class TimesheetsService {
     for (let day = 1; day <= daysInMonth; day++) {
       const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
       if (compareDateOnly(dateStr, transferDateStr) < 0) {
+        continue;
+      }
+      if (compareDateOnly(dateStr, rangeEnd) > 0) {
         continue;
       }
 

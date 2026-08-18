@@ -1223,15 +1223,82 @@ export class MobilizationsService {
         );
       }
 
+      if (
+        mob.projectId &&
+        mob.mobStatus === MobStatus.MOBILIZED &&
+        this.isProjectStintStartStatus(mob.jobStatus)
+      ) {
+        await this.cleanupPriorSameProjectMobilizationsBeforeStart(
+          mob.employeeId,
+          mob.projectId,
+          actionDateStr,
+          mob.updatedBy ?? mob.createdBy ?? 1,
+        );
+      }
+
       await this.timesheetsService.syncTimesheetFromMobilization(
         mob.employeeId,
         actionDateStr,
+      );
+
+      const month = actionDateStr.slice(0, 7);
+      await this.timesheetsService.pruneStaleTimesheetEntriesForEmployeeMonth(
+        mob.employeeId,
+        month,
       );
     } catch (error) {
       this.logger.error(
         `Failed to auto-sync timesheet for employee ${mob.employeeId} on ${formatDateOnly(mob.actionDate)}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  private isProjectStintStartStatus(jobStatus: JobStatus | string): boolean {
+    const normalized = String(jobStatus).toLowerCase();
+    return (
+      normalized === JobStatus.ACTIVE || normalized === JobStatus.NOTICE_PERIOD
+    );
+  }
+
+  /**
+   * When a stint start moves later on the same project (e.g. import changes
+   * Project A from Jul 1 → Jul 2), drop superseded start rows and grid cells.
+   */
+  private async cleanupPriorSameProjectMobilizationsBeforeStart(
+    employeeId: number,
+    projectId: number,
+    newStartDateStr: string,
+    _updatedBy: number,
+  ): Promise<void> {
+    const month = newStartDateStr.slice(0, 7);
+    const { start: monthStart } = getMonthDateRange(month);
+
+    const priorStarts = await this.mobilizationRepository
+      .createQueryBuilder('m')
+      .where('m.employeeId = :employeeId', { employeeId })
+      .andWhere('m.projectId = :projectId', { projectId })
+      .andWhere('m.actionDate >= :monthStart', { monthStart })
+      .andWhere('m.actionDate < :newStartDate', { newStartDate: newStartDateStr })
+      .andWhere('m.mobStatus = :mobilized', { mobilized: MobStatus.MOBILIZED })
+      .andWhere('m.jobStatus IN (:...startStatuses)', {
+        startStatuses: [JobStatus.ACTIVE, JobStatus.NOTICE_PERIOD],
+      })
+      .getMany();
+
+    if (priorStarts.length > 0) {
+      await this.mobilizationRepository.remove(priorStarts);
+      this.logger.log(
+        `Removed ${priorStarts.length} superseded mobilization start(s) for employee ${employeeId} ` +
+          `on project ${projectId} before ${newStartDateStr}`,
+      );
+    }
+
+    await this.timesheetsService.clearProjectTimesheetEntriesBeforeDate(
+      employeeId,
+      projectId,
+      month,
+      newStartDateStr,
+    );
   }
 
   /** Project the employee was on immediately before a mid-month transfer. */
@@ -1285,6 +1352,13 @@ export class MobilizationsService {
   ): Promise<number> {
     const month = transferDateStr.slice(0, 7);
     const { end: monthEnd } = getMonthDateRange(month);
+    const stintEnd = await this.timesheetsService.getProjectStintEndDate(
+      employeeId,
+      toProjectId,
+      transferDateStr,
+    );
+    const rangeEnd =
+      compareDateOnly(stintEnd, monthEnd) <= 0 ? stintEnd : monthEnd;
 
     const staleMobs = await this.mobilizationRepository
       .createQueryBuilder('m')
@@ -1292,7 +1366,7 @@ export class MobilizationsService {
       .andWhere('m.projectId = :fromProjectId', { fromProjectId })
       .andWhere('m.mobStatus = :mobilized', { mobilized: MobStatus.MOBILIZED })
       .andWhere('m.actionDate >= :transferDate', { transferDate: transferDateStr })
-      .andWhere('m.actionDate <= :monthEnd', { monthEnd })
+      .andWhere('m.actionDate <= :rangeEnd', { rangeEnd })
       .getMany();
 
     let reassigned = 0;
