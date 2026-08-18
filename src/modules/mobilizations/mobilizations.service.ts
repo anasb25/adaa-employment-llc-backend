@@ -1229,7 +1229,7 @@ export class MobilizationsService {
       );
     } catch (error) {
       this.logger.error(
-        `Failed to auto-sync timesheet for employee ${mob.employeeId} on ${formatDateOnly(mob.actionDate)}: ${this.getErrorMessage(error)}`,
+        `Failed to auto-sync timesheet for employee ${mob.employeeId} on ${formatDateOnly(mob.actionDate)}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
