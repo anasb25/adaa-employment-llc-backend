@@ -171,6 +171,80 @@ export class TimesheetsService {
     );
   }
 
+  private isTimesheetEntryUserEdited(entry: TimesheetEntry): boolean {
+    return (
+      entry.updatedAt.getTime() > entry.createdAt.getTime() + 1000
+    );
+  }
+
+  private getDayOfWeekName(dateStr: string): string {
+    return parseDateOnly(dateStr).toLocaleDateString('en-US', {
+      weekday: 'long',
+    });
+  }
+
+  private isDateProjectOffDay(project: Project, dateStr: string): boolean {
+    if (!project.offDays || !Array.isArray(project.offDays)) {
+      return false;
+    }
+    return project.offDays.includes(this.getDayOfWeekName(dateStr));
+  }
+
+  /**
+   * Project off days (configured on the project) and special calendar off days
+   * apply on every month for assigned workers. Default is Off with 0 hours.
+   * Only a user-edited saved entry with hours > 0 means the employee worked
+   * that off day (auto-materialized rows must not block Off display).
+   */
+  private applyCalendarOffRules(
+    jobStatus: string,
+    hoursWorked: number,
+    isProjectOffDay: boolean,
+    specialDayRates: {
+      isSpecialDay: boolean;
+      isMandatoryOff: boolean;
+      isDefaultOff: boolean;
+      dayType: SpecialDayType | null;
+    },
+    savedEntryUserEdited = false,
+  ): { jobStatus: string; hoursWorked: number } {
+    const isSpecialCalendarOff =
+      specialDayRates.isSpecialDay &&
+      (specialDayRates.isMandatoryOff ||
+        specialDayRates.dayType === SpecialDayType.OPTIONAL_OFF ||
+        specialDayRates.isDefaultOff);
+
+    if (!isProjectOffDay && !isSpecialCalendarOff) {
+      return { jobStatus, hoursWorked };
+    }
+
+    const status =
+      this.normalizeJobStatus(jobStatus) ?? JobStatus.ACTIVE;
+    const hours = Number(hoursWorked) || 0;
+
+    if (this.isLeaveStatus(status)) {
+      return { jobStatus: status, hoursWorked: hours };
+    }
+
+    if (
+      status === JobStatus.CANCELLED ||
+      status === JobStatus.ABSCONDED ||
+      status === JobStatus.RESIGNED
+    ) {
+      return { jobStatus: status, hoursWorked: 0 };
+    }
+
+    if (
+      savedEntryUserEdited &&
+      hours > 0 &&
+      (status === JobStatus.ACTIVE || status === JobStatus.NOTICE_PERIOD)
+    ) {
+      return { jobStatus: status, hoursWorked: hours };
+    }
+
+    return { jobStatus: JobStatus.OFF, hoursWorked: 0 };
+  }
+
   /**
    * Pair status with hours on the timesheet:
    * - leave WITH hours > 0 → active (hours mean the employee worked)
@@ -252,7 +326,48 @@ export class TimesheetsService {
     }
 
     const result = await qb.execute();
-    return result.affected ?? 0;
+    const offDayRepairs = await this.repairAutoActiveOnProjectOffDays(month);
+    return (result.affected ?? 0) + offDayRepairs;
+  }
+
+  /**
+   * Auto-materialized rows often save active + default hours on project off days.
+   * Reset those to off/0 unless the user has edited the cell.
+   */
+  async repairAutoActiveOnProjectOffDays(month?: string): Promise<number> {
+    const qb = this.entryRepository
+      .createQueryBuilder('entry')
+      .innerJoinAndSelect('entry.timesheet', 'timesheet')
+      .innerJoinAndSelect('timesheet.project', 'project')
+      .where('timesheet.projectId IS NOT NULL')
+      .andWhere('entry.jobStatus IN (:...working)', {
+        working: [JobStatus.ACTIVE, JobStatus.NOTICE_PERIOD],
+      })
+      .andWhere('entry.hoursWorked > 0');
+
+    if (month) {
+      const { start, end } = getMonthDateRange(month);
+      qb.andWhere('entry.date >= :start AND entry.date <= :end', { start, end });
+    }
+
+    const entries = await qb.getMany();
+    let repaired = 0;
+
+    for (const entry of entries) {
+      if (this.isTimesheetEntryUserEdited(entry)) {
+        continue;
+      }
+      const project = entry.timesheet?.project;
+      if (!project || !this.isDateProjectOffDay(project, entry.date)) {
+        continue;
+      }
+      entry.jobStatus = JobStatus.OFF;
+      entry.hoursWorked = 0;
+      await this.entryRepository.save(entry);
+      repaired++;
+    }
+
+    return repaired;
   }
 
   /** Load all mobilizations for a month once (avoids N×repeat per project). */
@@ -447,6 +562,9 @@ export class TimesheetsService {
 
         let hours: number;
         let jobStatus: string;
+        const savedEntryUserEdited = existingEntry
+          ? this.isTimesheetEntryUserEdited(existingEntry)
+          : false;
 
         if (existingEntry) {
           // Saved timesheet status wins (e.g. absent must show "A", not carried active).
@@ -471,23 +589,8 @@ export class TimesheetsService {
           );
           hours = normalized.hoursWorked;
           jobStatus = normalized.jobStatus;
-        } else if (
-          specialDayRates.isSpecialDay &&
-          specialDayRates.isMandatoryOff
-        ) {
-          hours = 0;
-          jobStatus = JobStatus.OFF;
-        } else if (
-          specialDayRates.isSpecialDay &&
-          (specialDayRates.dayType === SpecialDayType.OPTIONAL_OFF ||
-            specialDayRates.isDefaultOff)
-        ) {
-          hours = 0;
-          jobStatus = JobStatus.OFF;
-        } else if (isProjectOffDay) {
-          hours = 0;
-          jobStatus = JobStatus.OFF;
         } else if (effectiveMob) {
+          // Carry-forward: working days use carried status with default hours.
           const normalized = this.normalizeStatusAndHours(
             effectiveMob.jobStatus,
             this.getDefaultHoursForStatus(effectiveMob.jobStatus),
@@ -497,6 +600,16 @@ export class TimesheetsService {
         } else {
           continue;
         }
+
+        const calendarAdjusted = this.applyCalendarOffRules(
+          jobStatus,
+          hours,
+          isProjectOffDay,
+          specialDayRates,
+          savedEntryUserEdited,
+        );
+        hours = calendarAdjusted.hoursWorked;
+        jobStatus = calendarAdjusted.jobStatus;
 
         dailyHours.push({
           date: dateStr,
@@ -1113,6 +1226,50 @@ export class TimesheetsService {
     return result.affected ?? 0;
   }
 
+  /**
+   * After a mid-month transfer, remove any rows left on the old project from the
+   * transfer date forward (shift/materialize should already have moved them).
+   */
+  async clearProjectTimesheetEntriesFromDate(
+    employeeId: number,
+    projectId: number,
+    fromDateStr: string,
+    month: string,
+  ): Promise<number> {
+    const timesheet = await this.timesheetRepository.findOne({
+      where: { projectId, month },
+    });
+    if (!timesheet) {
+      return 0;
+    }
+
+    if (
+      timesheet.status === TimesheetStatus.SUBMITTED ||
+      timesheet.status === TimesheetStatus.APPROVED
+    ) {
+      return 0;
+    }
+
+    const result = await this.entryRepository
+      .createQueryBuilder()
+      .delete()
+      .from(TimesheetEntry)
+      .where('timesheetId = :timesheetId', { timesheetId: timesheet.id })
+      .andWhere('employeeId = :employeeId', { employeeId })
+      .andWhere('date >= :fromDate', { fromDate: fromDateStr })
+      .execute();
+
+    const removed = result.affected ?? 0;
+    if (removed > 0) {
+      this.logger.log(
+        `Cleared ${removed} stale timesheet entry/entries for employee ${employeeId} ` +
+          `on project ${projectId} from ${fromDateStr} in ${month}`,
+      );
+    }
+
+    return removed;
+  }
+
   /** Last calendar day (inclusive) the employee stays on toProject after transferDate. */
   async getProjectStintEndDate(
     employeeId: number,
@@ -1194,6 +1351,13 @@ export class TimesheetsService {
       where: { projectId: fromProjectId, month },
     });
 
+    const toProject = await this.projectRepository.findOne({
+      where: { id: toProjectId },
+    });
+    if (!toProject) {
+      return 0;
+    }
+
     const mobilizations = await this.mobilizationRepository.find({
       where: {
         employeeId,
@@ -1240,7 +1404,7 @@ export class TimesheetsService {
           },
         });
         if (staleOnSource) {
-          continue;
+          await this.entryRepository.delete({ id: staleOnSource.id });
         }
       }
 
@@ -1249,13 +1413,26 @@ export class TimesheetsService {
         effective.jobStatus,
         hours,
       );
+      const isProjectOffDay = this.isDateProjectOffDay(toProject, dateStr);
+      const calendarAdjusted = this.applyCalendarOffRules(
+        normalized.jobStatus,
+        normalized.hoursWorked,
+        isProjectOffDay,
+        {
+          isSpecialDay: false,
+          isMandatoryOff: false,
+          isDefaultOff: false,
+          dayType: null,
+        },
+        false,
+      );
       await this.entryRepository.save(
         this.entryRepository.create({
           timesheetId: toTimesheet.id,
           employeeId,
           date: dateStr as any,
-          jobStatus: normalized.jobStatus as any,
-          hoursWorked: normalized.hoursWorked,
+          jobStatus: calendarAdjusted.jobStatus as any,
+          hoursWorked: calendarAdjusted.hoursWorked,
           createdBy: updatedBy,
         }),
       );
@@ -1317,6 +1494,14 @@ export class TimesheetsService {
       if (entry.timesheet.projectId !== effective.projectId) {
         continue;
       }
+
+      const project =
+        entry.timesheet.projectId != null
+          ? await this.projectRepository.findOne({
+              where: { id: entry.timesheet.projectId },
+            })
+          : null;
+
       const existingHours = Number(entry.hoursWorked) || 0;
       // Leave mob → 0h unless timesheet already has hours (then → active via normalize).
       const hoursForNormalize = this.isLeaveStatus(effective.jobStatus)
@@ -1326,8 +1511,24 @@ export class TimesheetsService {
         effective.jobStatus,
         hoursForNormalize,
       );
-      entry.jobStatus = normalized.jobStatus as any;
-      entry.hoursWorked = normalized.hoursWorked;
+
+      const isProjectOffDay =
+        project != null && this.isDateProjectOffDay(project, dateStr);
+      const calendarAdjusted = this.applyCalendarOffRules(
+        normalized.jobStatus,
+        normalized.hoursWorked,
+        isProjectOffDay,
+        {
+          isSpecialDay: false,
+          isMandatoryOff: false,
+          isDefaultOff: false,
+          dayType: null,
+        },
+        this.isTimesheetEntryUserEdited(entry),
+      );
+
+      entry.jobStatus = calendarAdjusted.jobStatus as any;
+      entry.hoursWorked = calendarAdjusted.hoursWorked;
       await this.entryRepository.save(entry);
     }
   }
@@ -1387,19 +1588,20 @@ export class TimesheetsService {
         return;
       }
 
-      const currentMob = currentMobilizations[0];
+      const effectiveMob = getEffectiveMobilizationForDate(
+        currentMobilizations,
+        dateStr,
+      );
 
-      // Don't sync if the employee's effective mobilization is on a DIFFERENT project.
-      // This prevents stale timesheet saves from creating conflicting mob records
-      // after the employee has been transferred to another project.
+      // Don't sync when this timesheet belongs to a project the employee is
+      // not assigned to on this date (e.g. after a mid-month transfer).
       if (
-        currentMob.mobStatus === MobStatus.MOBILIZED &&
-        currentMob.projectId !== null &&
-        currentMob.projectId !== projectId
+        projectId !== null &&
+        !isAssignedToProject(effectiveMob, projectId)
       ) {
         this.logger.log(
           `Skipping sync for employee ${entry.employeeId} on ${dateStr}: ` +
-            `employee is on project ${currentMob.projectId}, not timesheet project ${projectId}`,
+            `not assigned to timesheet project ${projectId}`,
         );
         return;
       }
@@ -1436,18 +1638,19 @@ export class TimesheetsService {
         }
       } else {
         // No mobilization for this exact date - check if we need to create one
-        const statusDiffers = currentMob.jobStatus !== entry.jobStatus;
+        const baseMob = effectiveMob ?? currentMobilizations[0];
+        const statusDiffers = baseMob.jobStatus !== entry.jobStatus;
         const needsDemobilization =
-          shouldDemobilize && currentMob.mobStatus !== MobStatus.DEMOBILIZED;
+          shouldDemobilize && baseMob.mobStatus !== MobStatus.DEMOBILIZED;
 
         if (statusDiffers || needsDemobilization) {
           const newMob = this.mobilizationRepository.create({
             employeeId: entry.employeeId,
-            mobilizedTradeId: currentMob.mobilizedTradeId,
-            projectId: shouldDemobilize ? null : currentMob.projectId,
+            mobilizedTradeId: baseMob.mobilizedTradeId,
+            projectId: shouldDemobilize ? null : (projectId ?? baseMob.projectId),
             mobStatus: shouldDemobilize
               ? MobStatus.DEMOBILIZED
-              : currentMob.mobStatus,
+              : baseMob.mobStatus,
             jobStatus: entry.jobStatus as JobStatus,
             actionDate: dateStr as any,
             notes:

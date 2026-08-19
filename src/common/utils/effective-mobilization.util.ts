@@ -30,11 +30,13 @@ const HIDDEN_FROM_PROJECT_ROSTER = new Set([
   'urgent_leave',
 ]);
 
+/** Day-specific statuses — apply only on their action date, not on carry-forward days. */
 const TEMPORARY_STATUSES = [
   'absent',
   'sick_leave',
   'casual_leave',
   'urgent_leave',
+  'off',
 ];
 
 export function normalizeJobStatus(

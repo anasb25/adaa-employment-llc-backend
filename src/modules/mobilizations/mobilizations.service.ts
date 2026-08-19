@@ -567,6 +567,7 @@ export class MobilizationsService {
       'sick_leave',
       'casual_leave',
       'urgent_leave',
+      'off',
     ];
 
     // If the effective mobilization is on the exact date we're looking at -> use it as-is
@@ -1148,7 +1149,7 @@ export class MobilizationsService {
 
         await this.cleanupConflictingAutoSyncedMobs(
           employee.id,
-          mappedData.projectId,
+          project?.id ?? null,
           mappedData.actionDate,
         );
         if (mobilization.jobStatus === JobStatus.ANNUAL_LEAVE) {
@@ -1157,7 +1158,12 @@ export class MobilizationsService {
             mobilization.actionDate,
           );
         }
-        await this.autoSyncTimesheet(mobilization);
+        await this.autoSyncTimesheet(
+          mobilization,
+          existingMobilization && existingMobilization.projectId !== mobilization.projectId
+            ? existingMobilization.projectId
+            : undefined,
+        );
 
         result.success++;
         result.imported.push({
@@ -1183,6 +1189,7 @@ export class MobilizationsService {
   ): Promise<void> {
     try {
       const actionDateStr = formatDateOnly(mob.actionDate);
+      const month = actionDateStr.slice(0, 7);
       const fromProject =
         explicitPreviousProjectId ??
         (await this.resolvePriorProjectForTransfer(
@@ -1221,6 +1228,18 @@ export class MobilizationsService {
           mob.projectId,
           mob.updatedBy ?? mob.createdBy ?? 1,
         );
+        await this.timesheetsService.clearProjectTimesheetEntriesFromDate(
+          mob.employeeId,
+          fromProject,
+          actionDateStr,
+          month,
+        );
+        await this.cleanupMobilizationsOnOldProjectAfterTransfer(
+          mob.employeeId,
+          fromProject,
+          mob.projectId,
+          actionDateStr,
+        );
       }
 
       if (
@@ -1241,7 +1260,6 @@ export class MobilizationsService {
         actionDateStr,
       );
 
-      const month = actionDateStr.slice(0, 7);
       await this.timesheetsService.pruneStaleTimesheetEntriesForEmployeeMonth(
         mob.employeeId,
         month,
@@ -1298,6 +1316,31 @@ export class MobilizationsService {
       projectId,
       month,
       newStartDateStr,
+    );
+  }
+
+  /** Remove stale mobilizations left on the old project after a transfer. */
+  private async cleanupMobilizationsOnOldProjectAfterTransfer(
+    employeeId: number,
+    fromProjectId: number,
+    toProjectId: number,
+    transferDateStr: string,
+  ): Promise<void> {
+    const staleOnOldProject = await this.mobilizationRepository
+      .createQueryBuilder('m')
+      .where('m.employeeId = :employeeId', { employeeId })
+      .andWhere('m.projectId = :fromProjectId', { fromProjectId })
+      .andWhere('m.actionDate >= :transferDate', { transferDate: transferDateStr })
+      .getMany();
+
+    if (staleOnOldProject.length === 0) {
+      return;
+    }
+
+    await this.mobilizationRepository.remove(staleOnOldProject);
+    this.logger.log(
+      `Removed ${staleOnOldProject.length} stale mobilization(s) for employee ${employeeId} ` +
+        `on project ${fromProjectId} on/after ${transferDateStr} (transferred to ${toProjectId})`,
     );
   }
 
