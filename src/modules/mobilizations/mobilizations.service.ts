@@ -1198,46 +1198,48 @@ export class MobilizationsService {
           mob.projectId,
         ));
 
-      if (
+      const transferHandled = Boolean(
         mob.projectId &&
-        mob.mobStatus === MobStatus.MOBILIZED &&
-        !MobilizationsService.NO_PROJECT_JOB_STATUSES.has(
-          String(mob.jobStatus).toLowerCase(),
-        ) &&
-        fromProject &&
-        fromProject !== mob.projectId
-      ) {
+          mob.mobStatus === MobStatus.MOBILIZED &&
+          !MobilizationsService.NO_PROJECT_JOB_STATUSES.has(
+            String(mob.jobStatus).toLowerCase(),
+          ) &&
+          fromProject &&
+          fromProject !== mob.projectId,
+      );
+
+      if (transferHandled) {
         await this.reassignMobilizationsOnProjectTransfer(
           mob.employeeId,
           actionDateStr,
-          fromProject,
-          mob.projectId,
+          fromProject!,
+          mob.projectId!,
           mob.updatedBy ?? mob.createdBy ?? 1,
         );
         await this.timesheetsService.shiftTimesheetEntriesOnProjectTransfer(
           mob.employeeId,
           actionDateStr,
-          fromProject,
-          mob.projectId,
+          fromProject!,
+          mob.projectId!,
           mob.updatedBy ?? mob.createdBy ?? 1,
         );
         await this.timesheetsService.materializeTransferredTimesheetEntries(
           mob.employeeId,
           actionDateStr,
-          fromProject,
-          mob.projectId,
+          fromProject!,
+          mob.projectId!,
           mob.updatedBy ?? mob.createdBy ?? 1,
         );
         await this.timesheetsService.clearProjectTimesheetEntriesFromDate(
           mob.employeeId,
-          fromProject,
+          fromProject!,
           actionDateStr,
           month,
         );
         await this.cleanupMobilizationsOnOldProjectAfterTransfer(
           mob.employeeId,
-          fromProject,
-          mob.projectId,
+          fromProject!,
+          mob.projectId!,
           actionDateStr,
         );
       }
@@ -1247,6 +1249,11 @@ export class MobilizationsService {
         mob.mobStatus === MobStatus.MOBILIZED &&
         this.isProjectStintStartStatus(mob.jobStatus)
       ) {
+        await this.syncEarlierProjectStintStart(
+          mob,
+          mob.updatedBy ?? mob.createdBy ?? 1,
+          transferHandled,
+        );
         await this.cleanupPriorSameProjectMobilizationsBeforeStart(
           mob.employeeId,
           mob.projectId,
@@ -1276,6 +1283,247 @@ export class MobilizationsService {
     return (
       normalized === JobStatus.ACTIVE || normalized === JobStatus.NOTICE_PERIOD
     );
+  }
+
+  /**
+   * When a stint start on project A moves earlier (e.g. A was Aug 10–31, B was
+   * Aug 1–9, import mobilizes A from Aug 1), shift Aug 1–9 timesheet rows from
+   * other projects into A without changing Aug 10+ on A.
+   */
+  private async syncEarlierProjectStintStart(
+    mob: Mobilization,
+    updatedBy: number,
+    transferAlreadyHandled: boolean,
+  ): Promise<void> {
+    if (!mob.projectId) {
+      return;
+    }
+
+    const newStartDateStr = formatDateOnly(mob.actionDate);
+    const month = newStartDateStr.slice(0, 7);
+    const { end: monthEnd } = getMonthDateRange(month);
+
+    const laterStartDateStr = await this.findLaterSameProjectStintStart(
+      mob.employeeId,
+      mob.projectId,
+      newStartDateStr,
+      month,
+      mob.id,
+    );
+
+    let rangeEnd: string;
+    if (laterStartDateStr) {
+      const dayBeforeLater = parseDateOnly(laterStartDateStr);
+      dayBeforeLater.setUTCDate(dayBeforeLater.getUTCDate() - 1);
+      rangeEnd = formatDateOnly(dayBeforeLater);
+    } else if (transferAlreadyHandled) {
+      return;
+    } else {
+      rangeEnd = monthEnd;
+    }
+
+    if (compareDateOnly(rangeEnd, newStartDateStr) < 0) {
+      return;
+    }
+
+    const sourceProjectIds = new Set<number>(
+      await this.timesheetsService.findOtherProjectIdsWithEntriesInRange(
+        mob.employeeId,
+        month,
+        newStartDateStr,
+        rangeEnd,
+        mob.projectId,
+      ),
+    );
+
+    for (const projectId of await this.findOtherProjectIdsFromMobilizationsInRange(
+      mob.employeeId,
+      month,
+      newStartDateStr,
+      rangeEnd,
+      mob.projectId,
+    )) {
+      sourceProjectIds.add(projectId);
+    }
+
+    if (sourceProjectIds.size === 0) {
+      if (laterStartDateStr) {
+        await this.cleanupLaterSameProjectMobilizationsAfterStart(
+          mob.employeeId,
+          mob.projectId,
+          newStartDateStr,
+        );
+      }
+      return;
+    }
+
+    for (const fromProjectId of sourceProjectIds) {
+      await this.reassignMobilizationsOnProjectTransfer(
+        mob.employeeId,
+        newStartDateStr,
+        fromProjectId,
+        mob.projectId,
+        updatedBy,
+        rangeEnd,
+      );
+      await this.timesheetsService.shiftTimesheetEntriesOnProjectTransfer(
+        mob.employeeId,
+        newStartDateStr,
+        fromProjectId,
+        mob.projectId,
+        updatedBy,
+        rangeEnd,
+      );
+      await this.timesheetsService.clearProjectTimesheetEntriesInRange(
+        mob.employeeId,
+        fromProjectId,
+        month,
+        newStartDateStr,
+        rangeEnd,
+      );
+      await this.cleanupMobilizationsOnOldProjectInRange(
+        mob.employeeId,
+        fromProjectId,
+        newStartDateStr,
+        rangeEnd,
+      );
+    }
+
+    for (const fromProjectId of sourceProjectIds) {
+      await this.timesheetsService.materializeTransferredTimesheetEntries(
+        mob.employeeId,
+        newStartDateStr,
+        fromProjectId,
+        mob.projectId,
+        updatedBy,
+        rangeEnd,
+      );
+    }
+
+    if (laterStartDateStr) {
+      await this.cleanupLaterSameProjectMobilizationsAfterStart(
+        mob.employeeId,
+        mob.projectId,
+        newStartDateStr,
+      );
+    }
+
+    this.logger.log(
+      `Earlier stint start for employee ${mob.employeeId} on project ${mob.projectId} ` +
+        `from ${newStartDateStr} to ${rangeEnd}; shifted from project(s) ${[...sourceProjectIds].join(', ')}`,
+    );
+  }
+
+  /** Next active/notice stint start on the same project after newStartDateStr. */
+  private async findLaterSameProjectStintStart(
+    employeeId: number,
+    projectId: number,
+    newStartDateStr: string,
+    month: string,
+    excludeMobilizationId?: number,
+  ): Promise<string | null> {
+    const { end: monthEnd } = getMonthDateRange(month);
+
+    const qb = this.mobilizationRepository
+      .createQueryBuilder('m')
+      .where('m.employeeId = :employeeId', { employeeId })
+      .andWhere('m.projectId = :projectId', { projectId })
+      .andWhere('m.actionDate > :newStartDate', { newStartDate: newStartDateStr })
+      .andWhere('m.actionDate <= :monthEnd', { monthEnd })
+      .andWhere('m.mobStatus = :mobilized', { mobilized: MobStatus.MOBILIZED })
+      .andWhere('m.jobStatus IN (:...startStatuses)', {
+        startStatuses: [JobStatus.ACTIVE, JobStatus.NOTICE_PERIOD],
+      })
+      .orderBy('m.actionDate', 'ASC')
+      .limit(1);
+
+    if (excludeMobilizationId) {
+      qb.andWhere('m.id != :excludeMobilizationId', { excludeMobilizationId });
+    }
+
+    const laterStart = await qb.getOne();
+    return laterStart ? formatDateOnly(laterStart.actionDate) : null;
+  }
+
+  private async findOtherProjectIdsFromMobilizationsInRange(
+    employeeId: number,
+    month: string,
+    rangeStart: string,
+    rangeEnd: string,
+    excludeProjectId: number,
+  ): Promise<number[]> {
+    const { end: monthEnd } = getMonthDateRange(month);
+
+    const mobs = await this.mobilizationRepository
+      .createQueryBuilder('m')
+      .where('m.employeeId = :employeeId', { employeeId })
+      .andWhere('m.projectId IS NOT NULL')
+      .andWhere('m.projectId != :excludeProjectId', { excludeProjectId })
+      .andWhere('m.actionDate >= :rangeStart', { rangeStart })
+      .andWhere('m.actionDate <= :rangeEnd', { rangeEnd: rangeEnd <= monthEnd ? rangeEnd : monthEnd })
+      .andWhere('m.mobStatus = :mobilized', { mobilized: MobStatus.MOBILIZED })
+      .getMany();
+
+    return [
+      ...new Set(
+        mobs
+          .map((m) => m.projectId)
+          .filter((id): id is number => id != null && id !== excludeProjectId),
+      ),
+    ];
+  }
+
+  /**
+   * When stint start moves earlier on the same project, drop the superseded
+   * later start row (e.g. Aug 10 start removed when Aug 1 becomes the start).
+   */
+  private async cleanupLaterSameProjectMobilizationsAfterStart(
+    employeeId: number,
+    projectId: number,
+    newStartDateStr: string,
+  ): Promise<void> {
+    const month = newStartDateStr.slice(0, 7);
+    const laterStarts = await this.mobilizationRepository
+      .createQueryBuilder('m')
+      .where('m.employeeId = :employeeId', { employeeId })
+      .andWhere('m.projectId = :projectId', { projectId })
+      .andWhere('m.actionDate > :newStartDate', { newStartDate: newStartDateStr })
+      .andWhere('m.mobStatus = :mobilized', { mobilized: MobStatus.MOBILIZED })
+      .andWhere('m.jobStatus IN (:...startStatuses)', {
+        startStatuses: [JobStatus.ACTIVE, JobStatus.NOTICE_PERIOD],
+      })
+      .getMany();
+
+    if (laterStarts.length === 0) {
+      return;
+    }
+
+    await this.mobilizationRepository.remove(laterStarts);
+    this.logger.log(
+      `Removed ${laterStarts.length} superseded later mobilization start(s) for employee ${employeeId} ` +
+        `on project ${projectId} after ${newStartDateStr}`,
+    );
+  }
+
+  private async cleanupMobilizationsOnOldProjectInRange(
+    employeeId: number,
+    fromProjectId: number,
+    rangeStart: string,
+    rangeEnd: string,
+  ): Promise<void> {
+    const stale = await this.mobilizationRepository
+      .createQueryBuilder('m')
+      .where('m.employeeId = :employeeId', { employeeId })
+      .andWhere('m.projectId = :fromProjectId', { fromProjectId })
+      .andWhere('m.actionDate >= :rangeStart', { rangeStart })
+      .andWhere('m.actionDate <= :rangeEnd', { rangeEnd })
+      .getMany();
+
+    if (stale.length === 0) {
+      return;
+    }
+
+    await this.mobilizationRepository.remove(stale);
   }
 
   /**
@@ -1392,16 +1640,14 @@ export class MobilizationsService {
     fromProjectId: number,
     toProjectId: number,
     updatedBy: number,
+    rangeEndCap?: string,
   ): Promise<number> {
-    const month = transferDateStr.slice(0, 7);
-    const { end: monthEnd } = getMonthDateRange(month);
-    const stintEnd = await this.timesheetsService.getProjectStintEndDate(
+    const rangeEnd = await this.timesheetsService.resolveTransferRangeEnd(
       employeeId,
       toProjectId,
       transferDateStr,
+      rangeEndCap,
     );
-    const rangeEnd =
-      compareDateOnly(stintEnd, monthEnd) <= 0 ? stintEnd : monthEnd;
 
     const staleMobs = await this.mobilizationRepository
       .createQueryBuilder('m')

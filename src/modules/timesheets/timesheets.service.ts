@@ -1042,26 +1042,81 @@ export class TimesheetsService {
    * Move saved timesheet rows from the old project to the new project for every
    * day from the transfer date through month end (statuses and hours preserved).
    */
+  /** Resolve inclusive end date for a transfer/shift (optional hard cap). */
+  async resolveTransferRangeEnd(
+    employeeId: number,
+    toProjectId: number,
+    transferDateStr: string,
+    rangeEndCap?: string,
+  ): Promise<string> {
+    const month = transferDateStr.slice(0, 7);
+    const { end: monthEnd } = getMonthDateRange(month);
+
+    let rangeEnd = monthEnd;
+    if (rangeEndCap && compareDateOnly(rangeEndCap, monthEnd) <= 0) {
+      rangeEnd = rangeEndCap;
+    } else if (!rangeEndCap) {
+      const stintEnd = await this.getProjectStintEndDate(
+        employeeId,
+        toProjectId,
+        transferDateStr,
+      );
+      rangeEnd =
+        compareDateOnly(stintEnd, monthEnd) <= 0 ? stintEnd : monthEnd;
+    }
+
+    if (compareDateOnly(rangeEnd, transferDateStr) < 0) {
+      return transferDateStr;
+    }
+    return rangeEnd;
+  }
+
+  /** Project ids (excluding one) where the employee has saved rows in a date range. */
+  async findOtherProjectIdsWithEntriesInRange(
+    employeeId: number,
+    month: string,
+    rangeStart: string,
+    rangeEnd: string,
+    excludeProjectId: number,
+  ): Promise<number[]> {
+    const rows = await this.entryRepository
+      .createQueryBuilder('entry')
+      .innerJoin('entry.timesheet', 'timesheet')
+      .select('DISTINCT timesheet.projectId', 'projectId')
+      .where('entry.employeeId = :employeeId', { employeeId })
+      .andWhere('timesheet.month = :month', { month })
+      .andWhere('timesheet.projectId IS NOT NULL')
+      .andWhere('timesheet.projectId != :excludeProjectId', {
+        excludeProjectId,
+      })
+      .andWhere('entry.date >= :rangeStart', { rangeStart })
+      .andWhere('entry.date <= :rangeEnd', { rangeEnd })
+      .getRawMany<{ projectId: string }>();
+
+    return rows
+      .map((row) => Number(row.projectId))
+      .filter((id) => Number.isFinite(id) && id > 0);
+  }
+
   async shiftTimesheetEntriesOnProjectTransfer(
     employeeId: number,
     transferDateStr: string,
     fromProjectId: number,
     toProjectId: number,
     updatedBy: number,
+    rangeEndCap?: string,
   ): Promise<number> {
     if (fromProjectId === toProjectId) {
       return 0;
     }
 
     const month = transferDateStr.slice(0, 7);
-    const { end: monthEnd } = getMonthDateRange(month);
-    const stintEnd = await this.getProjectStintEndDate(
+    const rangeEnd = await this.resolveTransferRangeEnd(
       employeeId,
       toProjectId,
       transferDateStr,
+      rangeEndCap,
     );
-    const rangeEnd =
-      compareDateOnly(stintEnd, monthEnd) <= 0 ? stintEnd : monthEnd;
 
     const fromTimesheet = await this.timesheetRepository.findOne({
       where: { projectId: fromProjectId, month },
@@ -1270,6 +1325,41 @@ export class TimesheetsService {
     return removed;
   }
 
+  /** Remove saved rows on a project within an inclusive date range. */
+  async clearProjectTimesheetEntriesInRange(
+    employeeId: number,
+    projectId: number,
+    month: string,
+    rangeStart: string,
+    rangeEnd: string,
+  ): Promise<number> {
+    const timesheet = await this.timesheetRepository.findOne({
+      where: { projectId, month },
+    });
+    if (!timesheet) {
+      return 0;
+    }
+
+    if (
+      timesheet.status === TimesheetStatus.SUBMITTED ||
+      timesheet.status === TimesheetStatus.APPROVED
+    ) {
+      return 0;
+    }
+
+    const result = await this.entryRepository
+      .createQueryBuilder()
+      .delete()
+      .from(TimesheetEntry)
+      .where('timesheetId = :timesheetId', { timesheetId: timesheet.id })
+      .andWhere('employeeId = :employeeId', { employeeId })
+      .andWhere('date >= :rangeStart', { rangeStart })
+      .andWhere('date <= :rangeEnd', { rangeEnd })
+      .execute();
+
+    return result.affected ?? 0;
+  }
+
   /** Last calendar day (inclusive) the employee stays on toProject after transferDate. */
   async getProjectStintEndDate(
     employeeId: number,
@@ -1316,16 +1406,16 @@ export class TimesheetsService {
     fromProjectId: number,
     toProjectId: number,
     updatedBy: number,
+    rangeEndCap?: string,
   ): Promise<number> {
     const month = transferDateStr.slice(0, 7);
     const { end: monthEnd } = getMonthDateRange(month);
-    const stintEnd = await this.getProjectStintEndDate(
+    const rangeEnd = await this.resolveTransferRangeEnd(
       employeeId,
       toProjectId,
       transferDateStr,
+      rangeEndCap,
     );
-    const rangeEnd =
-      compareDateOnly(stintEnd, monthEnd) <= 0 ? stintEnd : monthEnd;
 
     let toTimesheet = await this.timesheetRepository.findOne({
       where: { projectId: toProjectId, month },
