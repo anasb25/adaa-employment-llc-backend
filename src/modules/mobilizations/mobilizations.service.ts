@@ -54,6 +54,8 @@ import { TimesheetsService } from '../timesheets/timesheets.service';
 @Injectable()
 export class MobilizationsService {
   private readonly logger = new Logger(MobilizationsService.name);
+  /** Tracks mob dates removed during an in-flight Excel import (re-import skip). */
+  private importDeletedMobKeys: Set<string> | null = null;
 
   /** Statuses that demobilize the employee and clear project assignment. */
   private static readonly NO_PROJECT_JOB_STATUSES = new Set<string>([
@@ -903,6 +905,9 @@ export class MobilizationsService {
       return compareDateOnly(dateA, dateB);
     });
 
+    this.importDeletedMobKeys = new Set<string>();
+
+    try {
     for (let i = 0; i < sortedRows.length; i++) {
       const row = sortedRows[i];
       const rowNumber = i + 2; // +2 because Excel is 1-indexed and has header row
@@ -1065,28 +1070,12 @@ export class MobilizationsService {
         });
 
         const actionDateStr = mappedData.actionDate as string;
-        const importMonth = actionDateStr.slice(0, 7);
-        const isActiveStintStart =
-          mappedData.mobStatus === MobStatus.MOBILIZED &&
-          project?.id &&
-          this.isProjectStintStartStatus(mappedData.jobStatus);
 
-        if (isActiveStintStart) {
-          const superseded =
-            await this.isSupersededByEarlierOtherProjectConsolidation(
-              employee.id,
-              project!.id,
-              actionDateStr,
-              importMonth,
-              existingMobilization?.id,
-            );
-          if (superseded) {
-            if (existingMobilization) {
-              await this.mobilizationRepository.remove(existingMobilization);
-            }
-            result.success++;
-            continue;
-          }
+        if (
+          this.importDeletedMobKeys?.has(`${employee.id}|${actionDateStr}`)
+        ) {
+          result.success++;
+          continue;
         }
 
         let mobilization: Mobilization;
@@ -1236,6 +1225,9 @@ export class MobilizationsService {
           errors: [error.message || 'Unknown error occurred'],
         });
       }
+    }
+    } finally {
+      this.importDeletedMobKeys = null;
     }
 
     return result;
@@ -1460,6 +1452,13 @@ export class MobilizationsService {
     }
 
     await this.mobilizationRepository.remove(stale);
+    if (this.importDeletedMobKeys) {
+      for (const mob of stale) {
+        this.importDeletedMobKeys.add(
+          `${employeeId}|${formatDateOnly(mob.actionDate)}`,
+        );
+      }
+    }
     this.logger.log(
       `Removed ${stale.length} superseded later mobilization start(s) on other project(s) ` +
         `for employee ${employeeId} after ${fromDateStr} (consolidated onto project ${targetProjectId})`,
@@ -1720,50 +1719,6 @@ export class MobilizationsService {
       throw new NotFoundException('Mobilization not found');
     }
     await this.autoSyncTimesheet(mob);
-  }
-
-  /**
-   * True when an earlier active/notice start on another project already
-   * consolidates this date (e.g. Aug 1 LASR supersedes Aug 10 AL A2M on re-import).
-   */
-  private async isSupersededByEarlierOtherProjectConsolidation(
-    employeeId: number,
-    projectId: number,
-    actionDateStr: string,
-    month: string,
-    excludeMobilizationId?: number,
-  ): Promise<boolean> {
-    const { start: monthStart } = getMonthDateRange(month);
-
-    const qb = this.mobilizationRepository
-      .createQueryBuilder('m')
-      .where('m.employeeId = :employeeId', { employeeId })
-      .andWhere('m.projectId IS NOT NULL')
-      .andWhere('m.projectId != :projectId', { projectId })
-      .andWhere('m.actionDate >= :monthStart', { monthStart })
-      .andWhere('m.actionDate < :actionDate', { actionDate: actionDateStr })
-      .andWhere('m.mobStatus = :mobilized', { mobilized: MobStatus.MOBILIZED })
-      .andWhere('m.jobStatus IN (:...startStatuses)', {
-        startStatuses: [JobStatus.ACTIVE, JobStatus.NOTICE_PERIOD],
-      })
-      .orderBy('m.actionDate', 'ASC');
-
-    if (excludeMobilizationId) {
-      qb.andWhere('m.id != :excludeMobilizationId', { excludeMobilizationId });
-    }
-
-    const earlierStarts = await qb.getMany();
-    for (const earlier of earlierStarts) {
-      const rangeEnd = await this.resolveMobilizationShiftRangeEnd(earlier);
-      if (
-        compareDateOnly(actionDateStr, formatDateOnly(earlier.actionDate)) >= 0 &&
-        compareDateOnly(actionDateStr, rangeEnd) <= 0
-      ) {
-        return true;
-      }
-    }
-
-    return false;
   }
 
   /** Next active/notice stint start on another project after newStartDateStr. */

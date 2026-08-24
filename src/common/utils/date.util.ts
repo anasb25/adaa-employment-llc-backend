@@ -91,14 +91,26 @@ export function excelSerialToDateString(serial: any): string | null {
 
   // If it's already a string in YYYY-MM-DD format, return as-is
   if (typeof serial === 'string') {
-    const match = serial.match(/^\d{4}-\d{2}-\d{2}/);
-    if (match) {
-      return match[0];
+    const trimmed = serial.trim();
+    const isoMatch = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (isoMatch) {
+      return isoMatch[0];
+    }
+
+    // DD/MM/YYYY or DD-MM-YYYY (common Excel export format)
+    const dmyMatch = trimmed.match(/^(\d{1,2})[\/-](\d{1,2})[\/-](\d{4})$/);
+    if (dmyMatch) {
+      const day = Number(dmyMatch[1]);
+      const month = Number(dmyMatch[2]);
+      const year = Number(dmyMatch[3]);
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+        return formatDateOnly(new Date(Date.UTC(year, month - 1, day)));
+      }
     }
 
     // Try to parse as date and format (handles various string formats)
     try {
-      const date = new Date(serial);
+      const date = new Date(trimmed);
       if (!isNaN(date.getTime())) {
         return formatDateOnly(date);
       }
