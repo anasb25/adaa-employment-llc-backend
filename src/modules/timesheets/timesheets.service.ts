@@ -1250,6 +1250,39 @@ export class TimesheetsService {
     return rangeEnd;
   }
 
+  /** Best source project to pull timesheet rows from during a same-month transfer. */
+  async findPrimarySourceProjectForTransfer(
+    employeeId: number,
+    toProjectId: number,
+    transferDateStr: string,
+  ): Promise<number | null> {
+    const month = transferDateStr.slice(0, 7);
+    const { end: monthEnd } = getMonthDateRange(month);
+
+    const row = await this.entryRepository
+      .createQueryBuilder('entry')
+      .innerJoin('entry.timesheet', 'timesheet')
+      .select('timesheet.projectId', 'projectId')
+      .addSelect('MIN(entry.date)', 'minDate')
+      .where('entry.employeeId = :employeeId', { employeeId })
+      .andWhere('timesheet.month = :month', { month })
+      .andWhere('timesheet.projectId IS NOT NULL')
+      .andWhere('timesheet.projectId != :toProjectId', { toProjectId })
+      .andWhere('entry.date >= :transferDate', { transferDate: transferDateStr })
+      .andWhere('entry.date <= :rangeEnd', { rangeEnd: monthEnd })
+      .groupBy('timesheet.projectId')
+      .orderBy('MIN(entry.date)', 'ASC')
+      .limit(1)
+      .getRawOne<{ projectId: string }>();
+
+    if (!row?.projectId) {
+      return null;
+    }
+
+    const projectId = Number(row.projectId);
+    return Number.isFinite(projectId) && projectId > 0 ? projectId : null;
+  }
+
   /** Project ids (excluding one) where the employee has saved rows in a date range. */
   async findOtherProjectIdsWithEntriesInRange(
     employeeId: number,

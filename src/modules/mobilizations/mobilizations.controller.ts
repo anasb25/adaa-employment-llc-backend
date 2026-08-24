@@ -174,6 +174,17 @@ export class MobilizationsController {
     return await this.mobilizationsService.update(+id, updateDto, user.id);
   }
 
+  @Post(':id/resync-timesheet')
+  @Roles('admin', 'manager')
+  @Permissions('employee:update')
+  async resyncTimesheet(
+    @Param('id') id: string,
+    @CurrentUser() user: User,
+  ) {
+    await this.mobilizationsService.resyncTimesheetForMobilization(+id, user.id);
+    return { success: true };
+  }
+
   @Post('actions/delete-many')
   @Roles('admin', 'manager')
   @Permissions('employee:delete')
