@@ -21,7 +21,11 @@ import {
   JobStatus,
 } from './entities/mobilization.entity';
 import { Employee } from '../employees/entities/employee.entity';
-import { Project } from '../projects/entities/project.entity';
+import {
+  DEFAULT_PROJECT_OFF_DAYS,
+  getEffectiveProjectOffDays,
+  Project,
+} from '../projects/entities/project.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import { Client } from '../clients/entities/client.entity';
 import {
@@ -606,13 +610,11 @@ export class MobilizationsService {
       }
     }
 
-    // Check if target date is a project off day
-    if (
-      latestMob.project?.offDays &&
-      Array.isArray(latestMob.project.offDays)
-    ) {
+    // Check if target date is a project off day (defaults to Sunday when unset)
+    const offDays = getEffectiveProjectOffDays(latestMob.project);
+    if (offDays.length > 0) {
       const dayOfWeek = this.getDayOfWeek(targetDate);
-      if (latestMob.project.offDays.includes(dayOfWeek)) {
+      if (offDays.includes(dayOfWeek)) {
         return normalizeMobilizationForProjectRoster({
           ...latestMob,
           jobStatus: JobStatus.OFF,
@@ -654,7 +656,7 @@ export class MobilizationsService {
       'Friday',
       'Saturday',
     ];
-    return days[date.getDay()];
+    return days[date.getUTCDay()];
   }
 
   /**
@@ -1004,6 +1006,16 @@ export class MobilizationsService {
             relations: ['client'],
           });
 
+          if (
+            project &&
+            (!project.offDays ||
+              !Array.isArray(project.offDays) ||
+              project.offDays.length === 0)
+          ) {
+            project.offDays = [...DEFAULT_PROJECT_OFF_DAYS];
+            project = await this.projectRepository.save(project);
+          }
+
           // If project not found and client name is provided, try to create it
           if (!project && mappedData.clientName) {
             // Find or create client
@@ -1018,10 +1030,11 @@ export class MobilizationsService {
               client = await this.clientRepository.save(client);
             }
 
-            // Create project
+            // Create project (Sunday off matches existing project defaults)
             project = this.projectRepository.create({
               name: mappedData.siteName,
               clientId: client.id,
+              offDays: [...DEFAULT_PROJECT_OFF_DAYS],
             });
             project = await this.projectRepository.save(project);
           }
@@ -1266,6 +1279,25 @@ export class MobilizationsService {
         mob.employeeId,
         actionDateStr,
       );
+
+      if (
+        mob.projectId &&
+        mob.mobStatus === MobStatus.MOBILIZED &&
+        !MobilizationsService.NO_PROJECT_JOB_STATUSES.has(
+          String(mob.jobStatus).toLowerCase(),
+        )
+      ) {
+        await this.timesheetsService.enforceProjectCalendarForEmployeeOnProject(
+          mob.employeeId,
+          mob.projectId,
+          month,
+          actionDateStr,
+        );
+        await this.timesheetsService.repairAutoActiveOnProjectOffDays(
+          month,
+          mob.employeeId,
+        );
+      }
 
       await this.timesheetsService.pruneStaleTimesheetEntriesForEmployeeMonth(
         mob.employeeId,

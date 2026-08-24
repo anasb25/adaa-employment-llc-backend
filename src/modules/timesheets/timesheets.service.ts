@@ -19,7 +19,11 @@ import {
   shouldHideFromProjectRoster,
 } from '../../common/utils/effective-mobilization.util';
 import { Employee } from '../employees/entities/employee.entity';
-import { Project } from '../projects/entities/project.entity';
+import {
+  DEFAULT_PROJECT_OFF_DAYS,
+  getEffectiveProjectOffDays,
+  Project,
+} from '../projects/entities/project.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import {
   CreateTimesheetDto,
@@ -31,7 +35,7 @@ import {
   ApproveTimesheetDto,
 } from './dto/update-timesheet.dto';
 import { TimesheetFiltersDto } from './dto/timesheet-filters.dto';
-import { SpecialDaysService } from '../special-days/special-days.service';
+import { SpecialDaysService, SpecialDayRates } from '../special-days/special-days.service';
 import { SpecialDayType } from '../special-days/entities/special-day.entity';
 import {
   formatDateOnly,
@@ -178,16 +182,184 @@ export class TimesheetsService {
   }
 
   private getDayOfWeekName(dateStr: string): string {
-    return parseDateOnly(dateStr).toLocaleDateString('en-US', {
-      weekday: 'long',
+    const days = [
+      'Sunday',
+      'Monday',
+      'Tuesday',
+      'Wednesday',
+      'Thursday',
+      'Friday',
+      'Saturday',
+    ];
+    return days[parseDateOnly(dateStr).getUTCDay()];
+  }
+
+  private defaultSpecialDayRates(dateStr: string): SpecialDayRates {
+    return {
+      isSpecialDay: false,
+      specialDay: null,
+      clientRateMultiplier: 1.0,
+      employeeAdditionalAmount: 0,
+      isDefaultOff: false,
+      isMandatoryOff: false,
+      dayType: null,
+    };
+  }
+
+  /** Apply project/special calendar off rules to a status/hours pair. */
+  private resolveCalendarAdjustedCell(
+    project: Project | null,
+    dateStr: string,
+    jobStatus: string,
+    hoursWorked: number,
+    specialDayRates: SpecialDayRates = this.defaultSpecialDayRates(dateStr),
+    savedEntryUserEdited = false,
+  ): { jobStatus: string; hoursWorked: number } {
+    const isProjectOffDay =
+      project != null && this.isDateProjectOffDay(project, dateStr);
+    return this.applyCalendarOffRules(
+      jobStatus,
+      hoursWorked,
+      isProjectOffDay,
+      specialDayRates,
+      savedEntryUserEdited,
+    );
+  }
+
+  /**
+   * After mobilization sync, ensure saved rows on a project respect off days
+   * (auto-materialized / shifted active rows become off with 0 hours).
+   */
+  async enforceProjectCalendarForEmployeeOnProject(
+    employeeId: number,
+    projectId: number,
+    month: string,
+    fromDateStr?: string,
+  ): Promise<number> {
+    let project = await this.projectRepository.findOne({
+      where: { id: projectId },
     });
+    if (!project) {
+      return 0;
+    }
+    project = await this.ensureProjectOffDaysConfigured(project);
+
+    const { start: monthStart, end: monthEnd } = getMonthDateRange(month);
+    const rangeStart =
+      fromDateStr && compareDateOnly(fromDateStr, monthStart) > 0
+        ? fromDateStr
+        : monthStart;
+
+    const timesheet = await this.timesheetRepository.findOne({
+      where: { projectId, month },
+    });
+    if (!timesheet) {
+      return 0;
+    }
+
+    if (
+      timesheet.status === TimesheetStatus.SUBMITTED ||
+      timesheet.status === TimesheetStatus.APPROVED
+    ) {
+      return 0;
+    }
+
+    const mobilizations = await this.mobilizationRepository.find({
+      where: {
+        employeeId,
+        actionDate: LessThanOrEqual(monthEnd) as any,
+      },
+      order: { actionDate: 'DESC', createdAt: 'DESC' },
+    });
+
+    const specialDayRatesMap =
+      await this.specialDaysService.getSpecialDayRatesForRange(
+        parseDateOnly(rangeStart),
+        parseDateOnly(monthEnd),
+        projectId,
+      );
+
+    const entries = await this.entryRepository
+      .createQueryBuilder('entry')
+      .where('entry.timesheetId = :timesheetId', { timesheetId: timesheet.id })
+      .andWhere('entry.employeeId = :employeeId', { employeeId })
+      .andWhere('entry.date >= :rangeStart', { rangeStart })
+      .andWhere('entry.date <= :monthEnd', { monthEnd })
+      .getMany();
+
+    let fixed = 0;
+    for (const entry of entries) {
+      const dateStr = formatDateOnly(entry.date);
+      const effective = getEffectiveMobilizationForDate(mobilizations, dateStr);
+      if (!isAssignedToProject(effective, projectId)) {
+        continue;
+      }
+
+      const specialDayRates =
+        specialDayRatesMap.get(dateStr) ?? this.defaultSpecialDayRates(dateStr);
+      const adjusted = this.resolveCalendarAdjustedCell(
+        project,
+        dateStr,
+        entry.jobStatus,
+        Number(entry.hoursWorked),
+        specialDayRates,
+        this.isTimesheetEntryUserEdited(entry),
+      );
+
+      if (
+        adjusted.jobStatus !== entry.jobStatus ||
+        Number(adjusted.hoursWorked) !== Number(entry.hoursWorked)
+      ) {
+        entry.jobStatus = adjusted.jobStatus as any;
+        entry.hoursWorked = adjusted.hoursWorked;
+        await this.entryRepository.save(entry);
+        fixed++;
+      }
+    }
+
+    if (fixed > 0) {
+      this.logger.log(
+        `Enforced project calendar on ${fixed} timesheet entry/entries for employee ${employeeId} ` +
+          `on project ${projectId} in ${month}`,
+      );
+    }
+
+    return fixed;
   }
 
   private isDateProjectOffDay(project: Project, dateStr: string): boolean {
-    if (!project.offDays || !Array.isArray(project.offDays)) {
-      return false;
+    return getEffectiveProjectOffDays(project).includes(
+      this.getDayOfWeekName(dateStr),
+    );
+  }
+
+  /** Persist default Sunday off when import auto-created a project without offDays. */
+  private async ensureProjectOffDaysConfigured(
+    project: Project,
+  ): Promise<Project> {
+    if (
+      project.offDays &&
+      Array.isArray(project.offDays) &&
+      project.offDays.length > 0
+    ) {
+      return project;
     }
-    return project.offDays.includes(this.getDayOfWeekName(dateStr));
+    project.offDays = [...DEFAULT_PROJECT_OFF_DAYS];
+    return this.projectRepository.save(project);
+  }
+
+  /** One-time heal for projects created before offDays default existed. */
+  private async backfillMissingProjectOffDays(): Promise<void> {
+    const projects = await this.projectRepository
+      .createQueryBuilder('project')
+      .where('project.offDays IS NULL')
+      .orWhere(`project.offDays = '[]'::jsonb`)
+      .getMany();
+
+    for (const project of projects) {
+      project.offDays = [...DEFAULT_PROJECT_OFF_DAYS];
+      await this.projectRepository.save(project);
+    }
   }
 
   /**
@@ -200,12 +372,7 @@ export class TimesheetsService {
     jobStatus: string,
     hoursWorked: number,
     isProjectOffDay: boolean,
-    specialDayRates: {
-      isSpecialDay: boolean;
-      isMandatoryOff: boolean;
-      isDefaultOff: boolean;
-      dayType: SpecialDayType | null;
-    },
+    specialDayRates: SpecialDayRates,
     savedEntryUserEdited = false,
   ): { jobStatus: string; hoursWorked: number } {
     const isSpecialCalendarOff =
@@ -334,7 +501,10 @@ export class TimesheetsService {
    * Auto-materialized rows often save active + default hours on project off days.
    * Reset those to off/0 unless the user has edited the cell.
    */
-  async repairAutoActiveOnProjectOffDays(month?: string): Promise<number> {
+  async repairAutoActiveOnProjectOffDays(
+    month?: string,
+    employeeId?: number,
+  ): Promise<number> {
     const qb = this.entryRepository
       .createQueryBuilder('entry')
       .innerJoinAndSelect('entry.timesheet', 'timesheet')
@@ -344,6 +514,15 @@ export class TimesheetsService {
         working: [JobStatus.ACTIVE, JobStatus.NOTICE_PERIOD],
       })
       .andWhere('entry.hoursWorked > 0');
+
+    if (month) {
+      const { start, end } = getMonthDateRange(month);
+      qb.andWhere('entry.date >= :start AND entry.date <= :end', { start, end });
+    }
+
+    if (employeeId != null) {
+      qb.andWhere('entry.employeeId = :employeeId', { employeeId });
+    }
 
     if (month) {
       const { start, end } = getMonthDateRange(month);
@@ -383,10 +562,7 @@ export class TimesheetsService {
     const dayInfo: MonthlyDayInfo[] = [];
     for (let day = 1; day <= daysInMonth; day++) {
       const dateStr = `${year}-${String(monthNum).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      const currentDate = parseDateOnly(dateStr);
-      const dayOfWeekName = currentDate.toLocaleDateString('en-US', {
-        weekday: 'long',
-      });
+      const dayOfWeekName = this.getDayOfWeekName(dateStr);
       dayInfo.push({ dateStr, dayOfWeekName, day });
     }
 
@@ -456,7 +632,7 @@ export class TimesheetsService {
       ctx;
 
     // Get project
-    const project = await this.projectRepository.findOne({
+    let project = await this.projectRepository.findOne({
       where: { id: projectId },
       relations: ['client'],
     });
@@ -464,6 +640,8 @@ export class TimesheetsService {
     if (!project) {
       throw new NotFoundException('Project not found');
     }
+
+    project = await this.ensureProjectOffDaysConfigured(project);
 
     // Get or create timesheet
     const timesheet = await this.timesheetRepository.findOne({
@@ -554,11 +732,10 @@ export class TimesheetsService {
           dayType: null,
         };
 
-        // Check if this day is a project off day
-        const isProjectOffDay =
-          project.offDays &&
-          Array.isArray(project.offDays) &&
-          project.offDays.includes(dayOfWeekName);
+        // Check if this day is a project off day (defaults to Sunday when unset)
+        const isProjectOffDay = getEffectiveProjectOffDays(project).includes(
+          dayOfWeekName,
+        );
 
         let hours: number;
         let jobStatus: string;
@@ -651,6 +828,8 @@ export class TimesheetsService {
   async getAllProjectTimesheets(
     month: string,
   ): Promise<MonthlyProjectTimesheetData[]> {
+    await this.backfillMissingProjectOffDays();
+
     // Heal inconsistent leave/off + hours rows for every employee in this month.
     await this.repairInconsistentStatusHours(month);
 
@@ -1160,6 +1339,17 @@ export class TimesheetsService {
       return 0;
     }
 
+    const toProject = await this.projectRepository.findOne({
+      where: { id: toProjectId },
+    });
+    const specialDayRatesMap = toProject
+      ? await this.specialDaysService.getSpecialDayRatesForRange(
+          parseDateOnly(transferDateStr),
+          parseDateOnly(rangeEnd),
+          toProjectId,
+        )
+      : new Map();
+
     const entries = await this.entryRepository
       .createQueryBuilder('entry')
       .where('entry.timesheetId = :timesheetId', { timesheetId: fromTimesheet.id })
@@ -1184,6 +1374,22 @@ export class TimesheetsService {
 
       entry.timesheetId = toTimesheet.id;
       entry.updatedBy = updatedBy;
+
+      const dateStr = formatDateOnly(entry.date);
+      const specialDayRates =
+        specialDayRatesMap.get(dateStr) ??
+        this.defaultSpecialDayRates(dateStr);
+      const adjusted = this.resolveCalendarAdjustedCell(
+        toProject,
+        dateStr,
+        entry.jobStatus,
+        Number(entry.hoursWorked),
+        specialDayRates,
+        this.isTimesheetEntryUserEdited(entry),
+      );
+      entry.jobStatus = adjusted.jobStatus as any;
+      entry.hoursWorked = adjusted.hoursWorked;
+
       await this.entryRepository.save(entry);
       moved++;
     }
@@ -1456,6 +1662,13 @@ export class TimesheetsService {
       order: { actionDate: 'DESC', createdAt: 'DESC' },
     });
 
+    const specialDayRatesMap =
+      await this.specialDaysService.getSpecialDayRatesForRange(
+        parseDateOnly(transferDateStr),
+        parseDateOnly(rangeEnd),
+        toProjectId,
+      );
+
     const [year, monthNum] = month.split('-').map(Number);
     const daysInMonth = parseDateOnly(monthEnd).getUTCDate();
     let created = 0;
@@ -1503,17 +1716,14 @@ export class TimesheetsService {
         effective.jobStatus,
         hours,
       );
-      const isProjectOffDay = this.isDateProjectOffDay(toProject, dateStr);
-      const calendarAdjusted = this.applyCalendarOffRules(
+      const specialDayRates =
+        specialDayRatesMap.get(dateStr) ?? this.defaultSpecialDayRates(dateStr);
+      const calendarAdjusted = this.resolveCalendarAdjustedCell(
+        toProject,
+        dateStr,
         normalized.jobStatus,
         normalized.hoursWorked,
-        isProjectOffDay,
-        {
-          isSpecialDay: false,
-          isMandatoryOff: false,
-          isDefaultOff: false,
-          dayType: null,
-        },
+        specialDayRates,
         false,
       );
       await this.entryRepository.save(
@@ -1592,6 +1802,13 @@ export class TimesheetsService {
             })
           : null;
 
+      const specialDayRates = project
+        ? await this.specialDaysService.getSpecialDayRates(
+            parseDateOnly(dateStr),
+            project.id,
+          )
+        : this.defaultSpecialDayRates(dateStr);
+
       const existingHours = Number(entry.hoursWorked) || 0;
       // Leave mob → 0h unless timesheet already has hours (then → active via normalize).
       const hoursForNormalize = this.isLeaveStatus(effective.jobStatus)
@@ -1602,18 +1819,12 @@ export class TimesheetsService {
         hoursForNormalize,
       );
 
-      const isProjectOffDay =
-        project != null && this.isDateProjectOffDay(project, dateStr);
-      const calendarAdjusted = this.applyCalendarOffRules(
+      const calendarAdjusted = this.resolveCalendarAdjustedCell(
+        project,
+        dateStr,
         normalized.jobStatus,
         normalized.hoursWorked,
-        isProjectOffDay,
-        {
-          isSpecialDay: false,
-          isMandatoryOff: false,
-          isDefaultOff: false,
-          dayType: null,
-        },
+        specialDayRates,
         this.isTimesheetEntryUserEdited(entry),
       );
 

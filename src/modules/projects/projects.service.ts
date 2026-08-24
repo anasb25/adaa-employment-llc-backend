@@ -1,7 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike, In } from 'typeorm';
-import { Project } from './entities/project.entity';
+import {
+  DEFAULT_PROJECT_OFF_DAYS,
+  Project,
+} from './entities/project.entity';
 import { Client } from '../clients/entities/client.entity';
 import { ProjectSpecialDayRate } from './entities/project-special-day-rate.entity';
 import { ProjectRateVariantRate } from './entities/project-rate-variant-rate.entity';
@@ -119,7 +122,13 @@ export class ProjectsService {
     const { specialDayRates, rateVariantRates, ...projectData } = data;
 
     // Create project
-    const entity = this.projectRepository.create(projectData);
+    const entity = this.projectRepository.create({
+      ...projectData,
+      offDays:
+        projectData.offDays != null
+          ? projectData.offDays
+          : [...DEFAULT_PROJECT_OFF_DAYS],
+    });
     const project = await this.projectRepository.save(entity);
 
     // Handle special day rates if provided

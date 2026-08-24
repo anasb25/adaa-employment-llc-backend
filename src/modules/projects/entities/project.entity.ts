@@ -10,6 +10,23 @@ export enum ProjectFAT {
   CLIENT = 'CLIENT',
 }
 
+/** Default weekly off days when a project is created without explicit offDays. */
+export const DEFAULT_PROJECT_OFF_DAYS: string[] = ['Sunday'];
+
+/** Off days used for calendar rules when the project row has none configured. */
+export function getEffectiveProjectOffDays(
+  project: Pick<Project, 'offDays'> | null | undefined,
+): string[] {
+  if (
+    project?.offDays &&
+    Array.isArray(project.offDays) &&
+    project.offDays.length > 0
+  ) {
+    return project.offDays;
+  }
+  return DEFAULT_PROJECT_OFF_DAYS;
+}
+
 @Entity('projects')
 export class Project extends BaseEntity {
   @Column()
