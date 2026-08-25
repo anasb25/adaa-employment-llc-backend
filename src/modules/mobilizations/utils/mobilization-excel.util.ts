@@ -232,6 +232,106 @@ export class MobilizationExcelUtil {
     };
   }
 
+  /** Map stored job status to the STATUS column used in mobilization import files. */
+  static jobStatusToImportStatus(jobStatus: string | null | undefined): string {
+    const normalized = String(jobStatus || 'active').toLowerCase();
+    switch (normalized) {
+      case 'active':
+        return 'Active';
+      case 'annual_leave':
+        return 'Annual Leave';
+      case 'cancelled':
+        return 'Cancelled';
+      case 'absconded':
+        return 'Absconded';
+      case 'absent':
+        return 'Absent';
+      case 'sick_leave':
+        return 'Sick Leave';
+      case 'casual_leave':
+        return 'Casual Leave';
+      case 'urgent_leave':
+        return 'Urgent Leave';
+      case 'notice_period':
+        return 'Notice Period';
+      case 'resigned':
+        return 'Resigned';
+      case 'idle':
+        return 'Idle';
+      case 'off':
+        return 'Off';
+      default:
+        return 'Active';
+    }
+  }
+
+  private static importInstructionsRows() {
+    return [
+      {
+        Field: 'ID NO',
+        Description: 'Employee ADAA Code (Required)',
+        'Valid Values': 'Any valid employee code',
+      },
+      {
+        Field: 'MOBILIZED TRADE',
+        Description: 'Trade/Skill for mobilization',
+        'Valid Values': 'Any trade name',
+      },
+      {
+        Field: 'CLIENT',
+        Description: 'Client name (Required when STATUS implies Mobilized)',
+        'Valid Values': 'Any client name',
+      },
+      {
+        Field: 'SITE',
+        Description: 'Site/Project name (Required when STATUS implies Mobilized)',
+        'Valid Values': 'Any site name',
+      },
+      {
+        Field: 'STATUS',
+        Description:
+          'Job Status (Required). Mobilization status is set automatically from this.',
+        'Valid Values':
+          'Active, Annual Leave, Urgent Leave, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle, Off',
+      },
+      {
+        Field: 'DATE',
+        Description: 'Action Date (Required)',
+        'Valid Values': 'YYYY-MM-DD format (e.g., 2024-01-15)',
+      },
+    ];
+  }
+
+  /**
+   * Excel rows matching the mobilization import template (ID NO, STATUS, DATE, etc.).
+   */
+  static generateImportFormatExport(mobilizations: any[]): Buffer {
+    const exportData = [...mobilizations]
+      .sort((a, b) =>
+        String(a.employee?.adaa_emp_code || '').localeCompare(
+          String(b.employee?.adaa_emp_code || ''),
+        ),
+      )
+      .map((mob) => ({
+        'ID NO': mob.employee?.adaa_emp_code || '',
+        'MOBILIZED TRADE': mob.mobilizedTrade?.skill || '',
+        CLIENT: mob.project?.client?.name || '',
+        SITE: mob.project?.name || '',
+        STATUS: MobilizationExcelUtil.jobStatusToImportStatus(mob.jobStatus),
+        DATE: mob.actionDate ? formatDateOnly(mob.actionDate) : '',
+      }));
+
+    const worksheet = XLSX.utils.json_to_sheet(exportData);
+    const instructionsSheet = XLSX.utils.json_to_sheet(
+      MobilizationExcelUtil.importInstructionsRows(),
+    );
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Mobilizations');
+    XLSX.utils.book_append_sheet(workbook, instructionsSheet, 'Instructions');
+
+    return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+  }
+
   /**
    * Generates an Excel template for mobilization import
    * @returns Excel buffer
@@ -256,43 +356,10 @@ export class MobilizationExcelUtil {
       },
     ];
 
-    // Create instructions sheet with valid values (Mobilization status is derived from STATUS)
-    const instructionsData = [
-      {
-        Field: 'ID NO',
-        Description: 'Employee ADAA Code (Required)',
-        'Valid Values': 'Any valid employee code',
-      },
-      {
-        Field: 'MOBILIZED TRADE',
-        Description: 'Trade/Skill for mobilization',
-        'Valid Values': 'Any trade name',
-      },
-      {
-        Field: 'CLIENT',
-        Description: 'Client name (Required when STATUS implies Mobilized)',
-        'Valid Values': 'Any client name',
-      },
-      {
-        Field: 'SITE',
-        Description: 'Site/Project name (Required when STATUS implies Mobilized)',
-        'Valid Values': 'Any site name',
-      },
-      {
-        Field: 'STATUS',
-        Description: 'Job Status (Required). Mobilization status is set automatically from this.',
-        'Valid Values':
-          'Active, Annual Leave, Urgent Leave, Cancelled, Absconded, Absent, Sick Leave, Casual Leave, Notice Period, Resigned, Idle, Off',
-      },
-      {
-        Field: 'DATE',
-        Description: 'Action Date (Required)',
-        'Valid Values': 'YYYY-MM-DD format (e.g., 2024-01-15)',
-      },
-    ];
-
     const worksheet = XLSX.utils.json_to_sheet(templateData);
-    const instructionsSheet = XLSX.utils.json_to_sheet(instructionsData);
+    const instructionsSheet = XLSX.utils.json_to_sheet(
+      MobilizationExcelUtil.importInstructionsRows(),
+    );
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Mobilizations');

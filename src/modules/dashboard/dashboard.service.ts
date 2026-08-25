@@ -21,6 +21,8 @@ import {
 } from '../settlements/entities/settlement.entity';
 import { DashboardStats } from './dashboard-stats.interface';
 import { ADAA_SUPPLIER_NAME } from '../../common/constants/supplier.constants';
+import { MobilizationExcelUtil } from '../mobilizations/utils/mobilization-excel.util';
+import { formatDateOnly } from '../../common/utils/date.util';
 
 export interface ExpiringDocument {
   field: string;
@@ -219,6 +221,26 @@ export class DashboardService {
     });
 
     return employeesWithExpiringDocs;
+  }
+
+  /**
+   * Export today's workforce snapshot in mobilization import format.
+   * Row count matches dashboard Active Workforce total (effective status per employee).
+   */
+  async exportActiveWorkforce(): Promise<Buffer> {
+    const today = new Date();
+    const effectiveMobilizations =
+      await this.mobilizationsService.getEffectiveStatusForAllEmployeesOnDate(
+        today,
+      );
+
+    const snapshotDate = formatDateOnly(today);
+    const rowsForExport = effectiveMobilizations.map((mob) => ({
+      ...mob,
+      actionDate: snapshotDate,
+    }));
+
+    return MobilizationExcelUtil.generateImportFormatExport(rowsForExport);
   }
 
   async getDashboardStats(month?: string): Promise<DashboardStats> {
