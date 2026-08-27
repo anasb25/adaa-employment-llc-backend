@@ -45,6 +45,7 @@ import { SpecialDayType } from '../special-days/entities/special-day.entity';
 import { parseDateOnly, formatDateOnly, compareDateOnly } from '../../common/utils/date.util';
 import {
   getEffectiveMobilizationForDate,
+  isDaySpecificJobStatus,
   isPersistentUntilRemobStatus,
   normalizeMobilizationForProjectRoster,
 } from '../../common/utils/effective-mobilization.util';
@@ -1157,7 +1158,14 @@ export class MobilizationsService {
             previousMobilization.mobStatus !== mappedData.mobStatus ||
             previousMobilization.jobStatus !== mappedData.jobStatus;
 
-          if (isDifferentFromPrevious) {
+          // Day-specific statuses (absent, sick leave, etc.) need an explicit row
+          // per date — they do not carry forward, so skip-if-unchanged would leave
+          // the target day showing the prior day's active status after import.
+          const requiresExplicitDayRecord = isDaySpecificJobStatus(
+            mappedData.jobStatus,
+          );
+
+          if (isDifferentFromPrevious || requiresExplicitDayRecord) {
             // Create new mobilization (actual change occurred)
             // actionDate is already a YYYY-MM-DD string from Excel import
             const createPayload = this.normalizeMobilizationWrite({
@@ -1222,6 +1230,7 @@ export class MobilizationsService {
         result.errors.push({
           row: rowNumber,
           employee: row['NAME'] || 'Unknown',
+          //@ts-ignore
           errors: [error.message || 'Unknown error occurred'],
         });
       }
@@ -2070,6 +2079,7 @@ export class MobilizationsService {
       }
     } catch (error) {
       this.logger.error(
+         //@ts-ignore
         `Failed to cleanup future auto-synced mobs after leave for employee ${employeeId}: ${error.message}`,
       );
     }
@@ -2103,6 +2113,7 @@ export class MobilizationsService {
       }
     } catch (error) {
       this.logger.error(
+         //@ts-ignore
         `Failed to cleanup conflicting auto-synced mobs for employee ${employeeId}: ${error.message}`,
       );
     }
