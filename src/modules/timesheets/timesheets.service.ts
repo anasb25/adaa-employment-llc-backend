@@ -16,6 +16,7 @@ import {
 import {
   getEffectiveMobilizationForDate,
   isAssignedToProject,
+  isDaySpecificJobStatus,
   shouldHideFromProjectRoster,
 } from '../../common/utils/effective-mobilization.util';
 import { Employee } from '../employees/entities/employee.entity';
@@ -1784,8 +1785,9 @@ export class TimesheetsService {
 
   /**
    * When mobilization status changes, update matching timesheet entries for that
-   * exact date. Leave from mob sets leave + 0h. If the timesheet already has
-   * hours > 0, normalize keeps those hours and status becomes active.
+   * exact date. Day-specific statuses (absent, sick leave, etc.) always win with
+   * 0h when an explicit mobilization row exists on that date. Other leave types
+   * keep existing hours > 0 as worked time (status becomes active).
    */
   async syncTimesheetFromMobilization(
     employeeId: number,
@@ -1843,10 +1845,14 @@ export class TimesheetsService {
         : this.defaultSpecialDayRates(dateStr);
 
       const existingHours = Number(entry.hoursWorked) || 0;
-      // Leave mob → 0h unless timesheet already has hours (then → active via normalize).
-      const hoursForNormalize = this.isLeaveStatus(effective.jobStatus)
-        ? existingHours
-        : this.getDefaultHoursForStatus(effective.jobStatus);
+      const mobAuthoritativeForDay =
+        exactDateMob != null &&
+        isDaySpecificJobStatus(exactDateMob.jobStatus);
+      const hoursForNormalize = mobAuthoritativeForDay
+        ? this.getDefaultHoursForStatus(exactDateMob!.jobStatus)
+        : this.isLeaveStatus(effective.jobStatus)
+          ? existingHours
+          : this.getDefaultHoursForStatus(effective.jobStatus);
       const normalized = this.normalizeStatusAndHours(
         effective.jobStatus,
         hoursForNormalize,

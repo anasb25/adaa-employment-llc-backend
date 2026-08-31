@@ -1351,7 +1351,8 @@ export class MobilizationsService {
         mob.mobStatus === MobStatus.MOBILIZED &&
         !MobilizationsService.NO_PROJECT_JOB_STATUSES.has(
           String(mob.jobStatus).toLowerCase(),
-        )
+        ) &&
+        !isDaySpecificJobStatus(mob.jobStatus)
       ) {
         await this.timesheetsService.enforceProjectCalendarForEmployeeOnProject(
           mob.employeeId,
