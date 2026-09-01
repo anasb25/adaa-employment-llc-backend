@@ -298,13 +298,18 @@ export class TimesheetsService {
 
       const specialDayRates =
         specialDayRatesMap.get(dateStr) ?? this.defaultSpecialDayRates(dateStr);
+      const isProjectOffDay = this.isDateProjectOffDay(project, dateStr);
       const adjusted = this.resolveCalendarAdjustedCell(
         project,
         dateStr,
         entry.jobStatus,
         Number(entry.hoursWorked),
         specialDayRates,
-        this.isTimesheetEntryUserEdited(entry),
+        this.isTimesheetEntryUserEdited(entry) ||
+          (isProjectOffDay &&
+            Number(entry.hoursWorked) > 0 &&
+            Number(entry.hoursWorked) !==
+              this.getDefaultHoursForStatus(JobStatus.ACTIVE)),
       );
 
       if (
@@ -405,9 +410,29 @@ export class TimesheetsService {
     if (
       savedEntryUserEdited &&
       hours > 0 &&
-      (status === JobStatus.ACTIVE || status === JobStatus.NOTICE_PERIOD)
+      (status === JobStatus.ACTIVE ||
+        status === JobStatus.NOTICE_PERIOD ||
+        status === JobStatus.OFF)
     ) {
-      return { jobStatus: status, hoursWorked: hours };
+      const workStatus =
+        status === JobStatus.NOTICE_PERIOD
+          ? JobStatus.NOTICE_PERIOD
+          : JobStatus.ACTIVE;
+      return { jobStatus: workStatus, hoursWorked: hours };
+    }
+
+    // Saved non-default hours on an off day (e.g. 8h) even when edit timestamp
+    // was not detected — distinguishes user entry from auto-materialized 10h.
+    if (
+      hours > 0 &&
+      (status === JobStatus.ACTIVE || status === JobStatus.NOTICE_PERIOD) &&
+      hours !== this.getDefaultHoursForStatus(JobStatus.ACTIVE)
+    ) {
+      const workStatus =
+        status === JobStatus.NOTICE_PERIOD
+          ? JobStatus.NOTICE_PERIOD
+          : JobStatus.ACTIVE;
+      return { jobStatus: workStatus, hoursWorked: hours };
     }
 
     return { jobStatus: JobStatus.OFF, hoursWorked: 0 };
@@ -535,6 +560,13 @@ export class TimesheetsService {
 
     for (const entry of entries) {
       if (this.isTimesheetEntryUserEdited(entry)) {
+        continue;
+      }
+      // Non-default hours on an off day were entered manually — do not reset.
+      if (
+        Number(entry.hoursWorked) !==
+        this.getDefaultHoursForStatus(JobStatus.ACTIVE)
+      ) {
         continue;
       }
       const project = entry.timesheet?.project;
@@ -784,7 +816,10 @@ export class TimesheetsService {
           hours,
           isProjectOffDay,
           specialDayRates,
-          savedEntryUserEdited,
+          savedEntryUserEdited ||
+            (isProjectOffDay &&
+              hours > 0 &&
+              hours !== this.getDefaultHoursForStatus(JobStatus.ACTIVE)),
         );
         hours = calendarAdjusted.hoursWorked;
         jobStatus = calendarAdjusted.jobStatus;
@@ -1082,6 +1117,22 @@ export class TimesheetsService {
 
     const isIdleTimesheet = timesheet.projectId === null;
     const savedEntries: TimesheetEntry[] = [];
+    let projectForCalendar: Project | null = null;
+
+    const resolveProjectForCalendar = async (): Promise<Project | null> => {
+      if (isIdleTimesheet || timesheet.projectId == null) {
+        return null;
+      }
+      if (!projectForCalendar) {
+        const project = await this.projectRepository.findOne({
+          where: { id: timesheet.projectId },
+        });
+        projectForCalendar = project
+          ? await this.ensureProjectOffDaysConfigured(project)
+          : null;
+      }
+      return projectForCalendar;
+    };
 
     for (const entryDto of saveEntriesDto.entries) {
       // Parse date as timezone-neutral
@@ -1103,6 +1154,18 @@ export class TimesheetsService {
         hoursWorked = 0;
         jobStatus = JobStatus.OFF;
         lowerStatus = JobStatus.OFF;
+      }
+      // Project off day only: entered hours mean the employee worked that day.
+      if (
+        !isIdleTimesheet &&
+        hoursWorked > 0 &&
+        lowerStatus === JobStatus.OFF
+      ) {
+        const project = await resolveProjectForCalendar();
+        if (project && this.isDateProjectOffDay(project, dateString)) {
+          jobStatus = JobStatus.ACTIVE;
+          lowerStatus = JobStatus.ACTIVE;
+        }
       }
       // Enforce pairing: leave/off → 0h; active with 0h → default 10h.
       const normalized = this.normalizeStatusAndHours(jobStatus, hoursWorked);
@@ -1140,6 +1203,20 @@ export class TimesheetsService {
       }
 
       const savedEntry = await this.entryRepository.save(entry);
+      // Off-day worked entries must count as user-edited so calendar rules keep hours.
+      const project = await resolveProjectForCalendar();
+      const isProjectOffDayWorked =
+        !isIdleTimesheet &&
+        project != null &&
+        this.isDateProjectOffDay(project, dateString) &&
+        Number(savedEntry.hoursWorked) > 0;
+      if (isProjectOffDayWorked) {
+        const editedAt = new Date(
+          Math.max(Date.now(), savedEntry.createdAt.getTime() + 2000),
+        );
+        await this.entryRepository.update(savedEntry.id, { updatedAt: editedAt });
+        savedEntry.updatedAt = editedAt;
+      }
       savedEntries.push(savedEntry);
 
       // Sync to mobilization when the entry's status differs from the effective
