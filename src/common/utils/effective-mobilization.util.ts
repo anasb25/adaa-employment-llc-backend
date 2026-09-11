@@ -62,9 +62,31 @@ export function isExplicitRemobilization(mob: Mobilization): boolean {
   );
 }
 
+type MobilizationStatusContext = Pick<
+  Mobilization,
+  'jobStatus' | 'mobStatus' | 'projectId'
+>;
+
+/** Demobilized urgent leave persists on the idle sheet until remobilization. */
+export function isDemobilizedUrgentLeave(
+  mob: MobilizationStatusContext | undefined,
+): boolean {
+  if (!mob) return false;
+  const jobStatus = normalizeJobStatus(mob.jobStatus);
+  if (jobStatus !== JobStatus.URGENT_LEAVE) return false;
+  return (
+    mob.mobStatus === MobStatus.DEMOBILIZED ||
+    mob.projectId === null
+  );
+}
+
 export function isPersistentUntilRemobStatus(
   jobStatus: string | null | undefined,
+  mob?: MobilizationStatusContext,
 ): boolean {
+  if (mob && isDemobilizedUrgentLeave(mob)) {
+    return true;
+  }
   const normalized = normalizeJobStatus(jobStatus);
   if (!normalized) return false;
   return (
@@ -118,7 +140,11 @@ export function normalizeMobilizationForProjectRoster(
 /** Day-specific statuses (absent, sick leave, etc.) apply only on their action date. */
 export function isDaySpecificJobStatus(
   jobStatus: string | null | undefined,
+  mob?: MobilizationStatusContext,
 ): boolean {
+  if (mob && isDemobilizedUrgentLeave(mob)) {
+    return false;
+  }
   const normalized = normalizeJobStatus(jobStatus);
   return normalized !== null && TEMPORARY_STATUSES.includes(normalized);
 }
@@ -140,7 +166,7 @@ export function pickBestSameDayMobilization(
   const manualMobs = sameDayMobs.filter((m) => !isAutoSyncedFromTimesheet(m));
   const pool = manualMobs.length > 0 ? manualMobs : sameDayMobs;
 
-  const daySpecific = pool.find((m) => isDaySpecificJobStatus(m.jobStatus));
+  const daySpecific = pool.find((m) => isDaySpecificJobStatus(m.jobStatus, m));
   if (daySpecific) {
     return daySpecific;
   }
@@ -174,22 +200,34 @@ export function resolveCarriedMobilization(
     return pickBestSameDayMobilization(sameDayMobs) ?? latestMob;
   }
 
-  if (isDaySpecificJobStatus(latestMob.jobStatus)) {
+  if (isDaySpecificJobStatus(latestMob.jobStatus, latestMob)) {
     const nonTemporaryMob = mobilizationsUpToDate.find(
       (m, index) =>
-        index > 0 && !isDaySpecificJobStatus(m.jobStatus),
+        index > 0 && !isDaySpecificJobStatus(m.jobStatus, m),
     );
 
     if (nonTemporaryMob) {
-      return {
-        ...latestMob,
-        jobStatus: nonTemporaryMob.jobStatus as JobStatus,
-      };
+      // Same project: resume prior status after a one-day leave (e.g. absent then active).
+      // Different project: do not keep the leave day's project — revert to the prior stint.
+      if (
+        latestMob.projectId != null &&
+        nonTemporaryMob.projectId === latestMob.projectId
+      ) {
+        return {
+          ...latestMob,
+          jobStatus: nonTemporaryMob.jobStatus as JobStatus,
+        };
+      }
+      return nonTemporaryMob;
     }
 
+    // No earlier baseline: do not keep the employee on the leave day's project.
     return {
       ...latestMob,
       jobStatus: JobStatus.ACTIVE,
+      mobStatus: MobStatus.DEMOBILIZED,
+      projectId: null,
+      project: null,
     };
   }
 
@@ -213,7 +251,7 @@ export function getEffectiveMobilizationForDate(
     isExplicitRemobilization(m),
   );
   const mostRecentPersistent = mobilizationsUpToDate.find((m) =>
-    isPersistentUntilRemobStatus(m.jobStatus),
+    isPersistentUntilRemobStatus(m.jobStatus, m),
   );
 
   if (mostRecentPersistent) {

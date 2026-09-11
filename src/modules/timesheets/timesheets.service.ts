@@ -162,7 +162,13 @@ export class TimesheetsService {
   ): boolean {
     if (!effectiveMob) return false;
     const jobStatus = this.normalizeJobStatus(effectiveMob.jobStatus);
-    return jobStatus === JobStatus.IDLE || jobStatus === JobStatus.ANNUAL_LEAVE;
+    if (jobStatus === JobStatus.IDLE || jobStatus === JobStatus.ANNUAL_LEAVE) {
+      return true;
+    }
+    return (
+      jobStatus === JobStatus.URGENT_LEAVE &&
+      effectiveMob.mobStatus === MobStatus.DEMOBILIZED
+    );
   }
 
   private isLeaveStatus(jobStatus: string | null | undefined): boolean {
@@ -902,8 +908,9 @@ export class TimesheetsService {
   }
 
   /**
-   * Monthly timesheet with projectId = null: idle employees and demobilized annual-leave days.
-   * Includes anyone with at least one idle day OR one annual_leave day carried from mobilizations.
+   * Monthly timesheet with projectId = null: idle employees, demobilized annual-leave days,
+   * and demobilized urgent-leave days.
+   * Includes anyone with at least one idle, annual_leave, or demobilized urgent_leave day.
    * Needed so approve flow can deduct annual_leave_balance from approved annual_leave entries.
    * Business rule: On this sheet, Sundays are forced off only for idle (non-leave) rows.
    * Annual leave spans include Sundays; those days remain annual_leave and sync to mobilizations.
@@ -942,10 +949,13 @@ export class TimesheetsService {
         const carriedStatus = this.normalizeJobStatus(effectiveMob!.jobStatus)!;
         const isIdleDay = carriedStatus === JobStatus.IDLE;
         const isAnnualLeaveDay = carriedStatus === JobStatus.ANNUAL_LEAVE;
+        const isUrgentLeaveDay = carriedStatus === JobStatus.URGENT_LEAVE;
 
         const baselineStatus = isAnnualLeaveDay
           ? JobStatus.ANNUAL_LEAVE
-          : JobStatus.IDLE;
+          : isUrgentLeaveDay
+            ? JobStatus.URGENT_LEAVE
+            : JobStatus.IDLE;
 
         const existingEntry = timesheet?.entries?.find(
           (e) =>
@@ -960,6 +970,9 @@ export class TimesheetsService {
         if (isAnnualLeaveDay) {
           jobStatus = JobStatus.ANNUAL_LEAVE;
           hours = this.getDefaultHoursForStatus(JobStatus.ANNUAL_LEAVE);
+        } else if (isUrgentLeaveDay) {
+          jobStatus = JobStatus.URGENT_LEAVE;
+          hours = this.getDefaultHoursForStatus(JobStatus.URGENT_LEAVE);
         } else if (isIdleDay) {
           jobStatus = JobStatus.IDLE;
           hours = existingEntry
@@ -977,10 +990,12 @@ export class TimesheetsService {
           isOffDay = true;
         }
 
-        // Override stale persisted "off" rows when mobilization baseline is AL (e.g. old saves).
-        if (isSunday && isAnnualLeaveDay) {
-          jobStatus = JobStatus.ANNUAL_LEAVE;
-          hours = this.getDefaultHoursForStatus(JobStatus.ANNUAL_LEAVE);
+        // Override stale persisted "off" rows when mobilization baseline is leave (e.g. old saves).
+        if (isSunday && (isAnnualLeaveDay || isUrgentLeaveDay)) {
+          jobStatus = isAnnualLeaveDay
+            ? JobStatus.ANNUAL_LEAVE
+            : JobStatus.URGENT_LEAVE;
+          hours = this.getDefaultHoursForStatus(jobStatus);
           isOffDay = false;
         }
 
@@ -1149,7 +1164,8 @@ export class TimesheetsService {
       if (
         isIdleTimesheet &&
         this.isUtcSunday(dateString) &&
-        lowerStatus !== 'annual_leave'
+        lowerStatus !== 'annual_leave' &&
+        lowerStatus !== 'urgent_leave'
       ) {
         hoursWorked = 0;
         jobStatus = JobStatus.OFF;
@@ -1227,7 +1243,8 @@ export class TimesheetsService {
       const skipIdleSundayMobSync =
         isIdleTimesheet &&
         this.isUtcSunday(dateString) &&
-        savedLower !== 'annual_leave';
+        savedLower !== 'annual_leave' &&
+        savedLower !== 'urgent_leave';
       if (!skipIdleSundayMobSync) {
         await this.syncMobilizationFromTimesheetEntry(
           savedEntry,
@@ -1924,7 +1941,7 @@ export class TimesheetsService {
       const existingHours = Number(entry.hoursWorked) || 0;
       const mobAuthoritativeForDay =
         exactDateMob != null &&
-        isDaySpecificJobStatus(exactDateMob.jobStatus);
+        isDaySpecificJobStatus(exactDateMob.jobStatus, exactDateMob);
       const hoursForNormalize = mobAuthoritativeForDay
         ? this.getDefaultHoursForStatus(exactDateMob!.jobStatus)
         : this.isLeaveStatus(effective.jobStatus)

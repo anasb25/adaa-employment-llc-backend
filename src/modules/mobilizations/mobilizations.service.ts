@@ -561,7 +561,7 @@ export class MobilizationsService {
       return null;
     }
 
-    if (isPersistentUntilRemobStatus(baseEffective.jobStatus)) {
+    if (isPersistentUntilRemobStatus(baseEffective.jobStatus, baseEffective)) {
       return normalizeMobilizationForProjectRoster(baseEffective);
     }
 
@@ -1163,6 +1163,11 @@ export class MobilizationsService {
           // the target day showing the prior day's active status after import.
           const requiresExplicitDayRecord = isDaySpecificJobStatus(
             mappedData.jobStatus,
+            {
+              jobStatus: mappedData.jobStatus,
+              mobStatus: mappedData.mobStatus,
+              projectId: project?.id || null,
+            },
           );
 
           if (isDifferentFromPrevious || requiresExplicitDayRecord) {
@@ -1352,7 +1357,7 @@ export class MobilizationsService {
         !MobilizationsService.NO_PROJECT_JOB_STATUSES.has(
           String(mob.jobStatus).toLowerCase(),
         ) &&
-        !isDaySpecificJobStatus(mob.jobStatus)
+        !isDaySpecificJobStatus(mob.jobStatus, mob)
       ) {
         await this.timesheetsService.enforceProjectCalendarForEmployeeOnProject(
           mob.employeeId,
@@ -1910,10 +1915,28 @@ export class MobilizationsService {
       })
       .getMany();
 
-    if (priorStarts.length > 0) {
-      await this.mobilizationRepository.remove(priorStarts);
+    const priorDaySpecific = await this.mobilizationRepository
+      .createQueryBuilder('m')
+      .where('m.employeeId = :employeeId', { employeeId })
+      .andWhere('m.projectId = :projectId', { projectId })
+      .andWhere('m.actionDate >= :monthStart', { monthStart })
+      .andWhere('m.actionDate < :newStartDate', { newStartDate: newStartDateStr })
+      .andWhere('m.mobStatus = :mobilized', { mobilized: MobStatus.MOBILIZED })
+      .andWhere('m.jobStatus IN (:...daySpecificStatuses)', {
+        daySpecificStatuses: [
+          JobStatus.ABSENT,
+          JobStatus.SICK_LEAVE,
+          JobStatus.CASUAL_LEAVE,
+          JobStatus.OFF,
+        ],
+      })
+      .getMany();
+
+    const superseded = [...priorStarts, ...priorDaySpecific];
+    if (superseded.length > 0) {
+      await this.mobilizationRepository.remove(superseded);
       this.logger.log(
-        `Removed ${priorStarts.length} superseded mobilization start(s) for employee ${employeeId} ` +
+        `Removed ${superseded.length} superseded mobilization row(s) for employee ${employeeId} ` +
           `on project ${projectId} before ${newStartDateStr}`,
       );
     }
