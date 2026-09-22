@@ -606,13 +606,13 @@ export class TimesheetsService {
     }
 
     const allMobilizations = await this.mobilizationRepository
-      .createQueryBuilder('mob')
+            .createQueryBuilder('mob')
       .leftJoinAndSelect('mob.employee', 'employee')
-      .leftJoinAndSelect('mob.mobilizedTrade', 'mobilizedTrade')
-      .leftJoinAndSelect('mob.project', 'project')
+            .leftJoinAndSelect('mob.mobilizedTrade', 'mobilizedTrade')
+            .leftJoinAndSelect('mob.project', 'project')
       .where('mob.actionDate <= :endDate', { endDate: endDateStr })
-      .orderBy('mob.actionDate', 'DESC')
-      .addOrderBy('mob.createdAt', 'DESC')
+            .orderBy('mob.actionDate', 'DESC')
+            .addOrderBy('mob.createdAt', 'DESC')
       .getMany();
 
     const mobilizationsByEmployee = new Map<number, Mobilization[]>();
@@ -955,7 +955,7 @@ export class TimesheetsService {
           ? JobStatus.ANNUAL_LEAVE
           : isUrgentLeaveDay
             ? JobStatus.URGENT_LEAVE
-            : JobStatus.IDLE;
+          : JobStatus.IDLE;
 
         const existingEntry = timesheet?.entries?.find(
           (e) =>
@@ -2456,12 +2456,12 @@ export class TimesheetsService {
 
         for (const [tradeName, supplierCounts] of projectData.trades) {
           for (const [supplierName, headCount] of supplierCounts) {
-            trades.push({
-              tradeInSite: tradeName,
+          trades.push({
+            tradeInSite: tradeName,
               supplier: supplierName,
-              headCount,
-            });
-            clientTotal += headCount;
+            headCount,
+          });
+          clientTotal += headCount;
           }
         }
 

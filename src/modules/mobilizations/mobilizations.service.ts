@@ -471,7 +471,7 @@ export class MobilizationsService {
 
     for (const [, mobilizations] of employeeMobilizationsMap.entries()) {
       const effective = await this.applySmartCarryForward(
-        mobilizations,
+      mobilizations,
         date,
         specialDayRatesCache,
       );
@@ -588,9 +588,9 @@ export class MobilizationsService {
     let specialDayRates = specialDayRatesCache?.get(projectKey);
     if (!specialDayRates) {
       specialDayRates = await this.specialDaysService.getSpecialDayRates(
-        targetDate,
-        latestMob.projectId ?? undefined,
-      );
+      targetDate,
+      latestMob.projectId ?? undefined,
+    );
       specialDayRatesCache?.set(projectKey, specialDayRates);
     }
 
