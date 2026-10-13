@@ -188,10 +188,137 @@ export class PayrollService {
    * Get payrolls for a specific month
    */
   async findByMonth(month: string): Promise<Payroll[]> {
-    return await this.createAdaaPayrollQueryBuilder('p')
+    const payrolls = await this.createAdaaPayrollQueryBuilder('p')
       .andWhere('p.month = :month', { month })
       .orderBy('p.employeeId', 'ASC')
       .getMany();
+
+    return this.attachPayrollAssignmentFields(payrolls, month);
+  }
+
+  private parseSiteFromPayrollNotes(notes: string | null | undefined): string {
+    if (!notes) {
+      return '';
+    }
+    const match = notes.match(/\(projects:\s*([^)]+)\)/i);
+    return match?.[1]?.trim() ?? '';
+  }
+
+  /** Site name(s) and mobilized trade from approved timesheets for the month. */
+  private async buildPayrollAssignmentByEmployee(
+    month: string,
+  ): Promise<Map<number, { siteName: string; laborTrade: string }>> {
+    const result = new Map<number, { siteName: string; laborTrade: string }>();
+    const sitesByEmployee = new Map<number, Set<string>>();
+    const tradeByEmployee = new Map<number, string>();
+
+    const projectIds = await this.getApprovedProjectIdsForMonth(month);
+    const sharedContext =
+      await this.timesheetsService.buildMonthlyMobilizationContext(month);
+
+    for (const projectId of projectIds) {
+      const data = await this.timesheetsService.getMonthlyProjectTimesheet(
+        projectId,
+        month,
+        sharedContext,
+      );
+      if (
+        !data.timesheet ||
+        data.timesheet.status !== TimesheetStatus.APPROVED
+      ) {
+        continue;
+      }
+
+      for (const emp of data.employees) {
+        let sites = sitesByEmployee.get(emp.employeeId);
+        if (!sites) {
+          sites = new Set<string>();
+          sitesByEmployee.set(emp.employeeId, sites);
+        }
+        sites.add(data.project.name);
+
+        if (!tradeByEmployee.has(emp.employeeId) && emp.trade) {
+          tradeByEmployee.set(emp.employeeId, emp.trade);
+        }
+      }
+    }
+
+    const idleData = await this.timesheetsService.getMonthlyIdleTimesheetData(
+      month,
+      sharedContext,
+    );
+    for (const emp of idleData.employees) {
+      if (!tradeByEmployee.has(emp.employeeId) && emp.trade) {
+        tradeByEmployee.set(emp.employeeId, emp.trade);
+      }
+      if (
+        emp.dailyHours.length > 0 &&
+        !sitesByEmployee.has(emp.employeeId)
+      ) {
+        sitesByEmployee.set(emp.employeeId, new Set(['Idle & annual leave']));
+      }
+    }
+
+    for (const [employeeId, sites] of sitesByEmployee) {
+      result.set(employeeId, {
+        siteName: [...sites].sort().join(', '),
+        laborTrade: tradeByEmployee.get(employeeId) ?? '',
+      });
+    }
+
+    return result;
+  }
+
+  private async attachPayrollAssignmentFields(
+    payrolls: Payroll[],
+    month: string,
+  ): Promise<Payroll[]> {
+    if (payrolls.length === 0) {
+      return payrolls;
+    }
+
+    const assignmentByEmployee =
+      await this.buildPayrollAssignmentByEmployee(month);
+
+    const missingTradeIds = payrolls
+      .filter((p) => {
+        const fromSheet = assignmentByEmployee.get(p.employeeId)?.laborTrade;
+        return !fromSheet;
+      })
+      .map((p) => p.employeeId);
+
+    const tradeFromSkills = new Map<number, string>();
+    if (missingTradeIds.length > 0) {
+      const employeeSkills = await this.employeeSkillRepository.find({
+        where: { employeeId: In(missingTradeIds) },
+        relations: ['skill'],
+        order: { id: 'ASC' },
+      });
+      for (const row of employeeSkills) {
+        if (
+          !tradeFromSkills.has(row.employeeId) &&
+          row.skill?.skill
+        ) {
+          tradeFromSkills.set(row.employeeId, row.skill.skill);
+        }
+      }
+    }
+
+    for (const payroll of payrolls) {
+      const fromTimesheet = assignmentByEmployee.get(payroll.employeeId);
+      const siteName =
+        fromTimesheet?.siteName ||
+        this.parseSiteFromPayrollNotes(payroll.notes) ||
+        '';
+      const laborTrade =
+        fromTimesheet?.laborTrade ||
+        tradeFromSkills.get(payroll.employeeId) ||
+        '';
+
+      Object.assign(payroll, { siteName, laborTrade });
+    }
+
+    return payrolls;
   }
 
   async getMonthTotals(month: string) {
