@@ -15,7 +15,7 @@ import { CreateSpecialDayDto } from './dto/create-special-day.dto';
 import { UpdateSpecialDayDto } from './dto/update-special-day.dto';
 import { SpecialDayFiltersDto } from './dto/special-day-filters.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { CurrentUser } from '../../common/decorators';
+import { CurrentUser, Permissions } from '../../common/decorators';
 import { User } from '../users/entities/user.entity';
 import { parseDateOnly } from '../../common/utils/date.util';
 
@@ -24,21 +24,25 @@ import { parseDateOnly } from '../../common/utils/date.util';
 export class SpecialDaysController {
   constructor(private readonly specialDaysService: SpecialDaysService) {}
 
+  @Permissions('special-day:create')
   @Post()
   create(@Body() createDto: CreateSpecialDayDto, @CurrentUser() user: User) {
     return this.specialDaysService.create(createDto, user.id);
   }
 
+  @Permissions('special-day:read', 'employee:read')
   @Get()
   findAll(@Query() filters: SpecialDayFiltersDto) {
     return this.specialDaysService.findAll(filters);
   }
 
+  @Permissions('special-day:read', 'employee:read')
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.specialDaysService.findOne(id);
   }
 
+  @Permissions('special-day:update')
   @Patch(':id')
   update(
     @Param('id', ParseIntPipe) id: number,
@@ -48,17 +52,20 @@ export class SpecialDaysController {
     return this.specialDaysService.update(id, updateDto, user.id);
   }
 
+  @Permissions('special-day:delete')
   @Delete(':id')
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.specialDaysService.remove(id);
   }
 
+  @Permissions('special-day:read', 'employee:read')
   @Get('check/:date')
   checkDate(@Param('date') date: string) {
     // Parse date as timezone-neutral
     return this.specialDaysService.isSpecialDay(parseDateOnly(date));
   }
 
+  @Permissions('special-day:read', 'employee:read')
   @Get('range/:startDate/:endDate')
   getRange(
     @Param('startDate') startDate: string,
@@ -71,6 +78,7 @@ export class SpecialDaysController {
     );
   }
 
+  @Permissions('special-day:read', 'employee:read')
   @Get('rates')
   async getRates(@Query('date') date: string) {
     // Parse date as timezone-neutral
@@ -78,6 +86,7 @@ export class SpecialDaysController {
     return this.specialDaysService.getSpecialDayRates(dateObj);
   }
 
+  @Permissions('special-day:read', 'employee:read')
   @Get('rates/range')
   async getRatesRange(
     @Query('startDate') startDate: string,

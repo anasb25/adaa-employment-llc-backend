@@ -16,12 +16,14 @@ export class RolesController {
   constructor(private readonly rolesService: RolesService) {}
 
   @Roles('admin')
+  @Permissions('role:read')
   @Get()
   findAll() {
     return this.rolesService.findAll();
   }
 
   @Roles('admin')
+  @Permissions('role:read')
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.rolesService.findOne(+id);

@@ -13,7 +13,7 @@ import { RateVariantsService } from './rate-variants.service';
 import { CreateRateVariantDto } from './dto/create-rate-variant.dto';
 import { UpdateRateVariantDto } from './dto/update-rate-variant.dto';
 import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
-import { CurrentUser } from '../../common/decorators';
+import { CurrentUser, Permissions } from '../../common/decorators';
 import { User } from '../users/entities/user.entity';
 
 @Controller('rate-variants')
@@ -21,21 +21,25 @@ import { User } from '../users/entities/user.entity';
 export class RateVariantsController {
   constructor(private readonly rateVariantsService: RateVariantsService) {}
 
+  @Permissions('rate-variant:create')
   @Post()
   create(@Body() createDto: CreateRateVariantDto, @CurrentUser() user: User) {
     return this.rateVariantsService.create(createDto, user.id);
   }
 
+  @Permissions('rate-variant:read', 'employee:read')
   @Get()
   findAll() {
     return this.rateVariantsService.findAll();
   }
 
+  @Permissions('rate-variant:read', 'employee:read')
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
     return this.rateVariantsService.findOne(id);
   }
 
+  @Permissions('rate-variant:update')
   @Patch(':id')
   update(
     @Param('id', ParseIntPipe) id: number,
@@ -45,6 +49,7 @@ export class RateVariantsController {
     return this.rateVariantsService.update(id, updateDto, user.id);
   }
 
+  @Permissions('rate-variant:delete')
   @Delete(':id')
   remove(@Param('id', ParseIntPipe) id: number) {
     return this.rateVariantsService.remove(id);

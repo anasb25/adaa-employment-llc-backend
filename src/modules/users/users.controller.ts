@@ -10,6 +10,8 @@ import {
 } from '@nestjs/common';
 import { UsersService } from './users.service';
 import { User } from './entities/user.entity';
+import { CreateUserDto } from './dto/create-user.dto';
+import { UpdateUserDto } from './dto/update-user.dto';
 import { CurrentUser, Roles, Permissions } from '../../common/decorators';
 import {
   PaginationUtil,
@@ -26,6 +28,7 @@ export class UsersController {
   }
 
   @Roles('admin')
+  @Permissions('user:read')
   @Get()
   async findAll(
     @Query('page') page?: number,
@@ -47,11 +50,12 @@ export class UsersController {
   @Roles('admin')
   @Permissions('user:create')
   @Post()
-  create(@Body() createUserDto: any) {
+  create(@Body() createUserDto: CreateUserDto) {
     return this.usersService.create(createUserDto);
   }
 
   @Roles('admin')
+  @Permissions('user:read')
   @Get('actions/search')
   async searchUsers(
     @Query('q') query: string,
@@ -64,6 +68,13 @@ export class UsersController {
     );
 
     return await this.usersService.searchUsers(query, paginationOptions);
+  }
+
+  @Roles('admin')
+  @Permissions('user:update')
+  @Put(':id')
+  update(@Param('id') id: string, @Body() updateUserDto: UpdateUserDto) {
+    return this.usersService.updateUser(+id, updateUserDto);
   }
 
   @Roles('admin')

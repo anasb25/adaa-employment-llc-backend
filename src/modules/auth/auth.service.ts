@@ -17,8 +17,10 @@ import {
   ChangePasswordDto,
 } from './dto/auth.dto';
 import { InvitationService } from '../invitations/invitation.service';
+import { Permission } from '../permissions/entities/permission.entity';
 import { EmailService } from '../../email/email.service';
 import { passwordResetEmailTemplate } from '../../email/templates/password-reset.template';
+import { attachUserPermissions } from '../../common/utils/role-access.util';
 
 export interface JwtPayload {
   sub: number;
@@ -135,6 +137,8 @@ export class AuthService {
         throw new UnauthorizedException('Invalid refresh token');
       }
 
+      await attachUserPermissions(this.userRepository, [user]);
+
       // Generate new tokens
       const tokens = await this.generateTokens(user);
 
@@ -232,11 +236,13 @@ export class AuthService {
   }
 
   async getUserWithPassword(email: string): Promise<User | null> {
-    return this.userRepository.findOne({
+    const user = await this.userRepository.findOne({
       where: { email: ILike(email) },
       select: ['id', 'email', 'password', 'isActive'],
       relations: ['role', 'role.permissions'],
     });
+    await attachUserPermissions(this.userRepository, [user]);
+    return user;
   }
 
   async validateUser(email: string, password: string): Promise<User | null> {
@@ -276,6 +282,7 @@ export class AuthService {
       throw new UnauthorizedException('User not found');
     }
 
+    await attachUserPermissions(this.userRepository, [user]);
     return this.sanitizeUser(user);
   }
 
@@ -294,10 +301,10 @@ export class AuthService {
   private async generateTokens(
     user: User,
   ): Promise<{ accessToken: string; refreshToken: string }> {
-    // Extract role and permissions from user's role
     const role = user.role?.name || '';
-    const permissions =
-      user.role?.permissions?.map((permission) => permission.name) || [];
+    const permissions = this.effectivePermissions(user).map(
+      (permission) => permission.name,
+    );
 
     const payload = {
       sub: user.id,
@@ -322,6 +329,10 @@ export class AuthService {
     });
 
     return { accessToken, refreshToken };
+  }
+
+  private effectivePermissions(user: User): Permission[] {
+    return user.role?.permissions || [];
   }
 
   private sanitizeUser(user: User): Omit<User, 'password'> {

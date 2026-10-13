@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import * as nodemailer from 'nodemailer';
 
@@ -46,9 +46,12 @@ export class EmailService {
       await this.transporter.sendMail(mailOptions);
       console.log(`Email sent successfully to ${to}`);
     } catch (error) {
-      console.error('Error sending email:', error);
-      //@ts-ignore
-      throw new Error(`Failed to send email: ${error.message}`);
+      const detail =
+        error instanceof Error ? error.message : 'Unknown mail error';
+      console.error('Error sending email:', detail);
+      throw new ServiceUnavailableException(
+        `Invitation email could not be sent. ${detail}`,
+      );
     }
   }
 }

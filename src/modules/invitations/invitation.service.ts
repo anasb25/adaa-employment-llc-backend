@@ -12,6 +12,7 @@ import { Role } from '../roles/entities/role.entity';
 import { CreateInvitationDto, AcceptInvitationDto } from './dto/invitation.dto';
 import { EmailService } from '../../email/email.service';
 import { invitationEmailTemplate } from '../../email/templates/invitation.template';
+import { UsersService } from '../users/users.service';
 import * as crypto from 'crypto';
 import * as bcrypt from 'bcrypt';
 
@@ -26,6 +27,7 @@ export class InvitationService {
     private roleRepository: Repository<Role>,
     private configService: ConfigService,
     private emailService: EmailService,
+    private usersService: UsersService,
   ) {}
 
   async createInvitation(
@@ -43,13 +45,19 @@ export class InvitationService {
       throw new BadRequestException('User with this email already exists');
     }
 
-    // Check if there's already a pending invitation
+    // Email is unique on the table, so a cancelled or expired row must be reused.
     const existingInvitation = await this.invitationRepository.findOne({
-      where: { email, status: InvitationStatus.PENDING },
+      where: { email },
     });
 
-    if (existingInvitation) {
+    if (existingInvitation?.status === InvitationStatus.PENDING) {
       throw new BadRequestException('Invitation already sent to this email');
+    }
+
+    if (existingInvitation?.status === InvitationStatus.ACCEPTED) {
+      throw new BadRequestException(
+        'This email has already accepted an invitation',
+      );
     }
 
     // Verify role exists
@@ -90,6 +98,17 @@ export class InvitationService {
     await this.sendInvitationEmail(invitationForEmail);
 
     // Only save to database AFTER email is sent successfully
+    if (existingInvitation) {
+      existingInvitation.roleId = roleId;
+      existingInvitation.token = token;
+      existingInvitation.expiresAt = expiresAt;
+      existingInvitation.inviterId = inviterId;
+      existingInvitation.status = InvitationStatus.PENDING;
+      existingInvitation.acceptedAt = null as unknown as Date;
+      existingInvitation.acceptedById = null as unknown as number;
+      return this.invitationRepository.save(existingInvitation);
+    }
+
     const invitation = this.invitationRepository.create({
       email,
       roleId,
@@ -99,9 +118,7 @@ export class InvitationService {
       status: InvitationStatus.PENDING,
     });
 
-    const savedInvitation = await this.invitationRepository.save(invitation);
-
-    return savedInvitation;
+    return this.invitationRepository.save(invitation);
   }
 
   private async hashPassword(password: string): Promise<string> {
@@ -159,6 +176,12 @@ export class InvitationService {
     });
 
     const savedUser = await this.userRepository.save(user);
+    if (invitation.roleId) {
+      await this.usersService.applyRolePermissions(
+        savedUser.id,
+        invitation.roleId,
+      );
+    }
 
     // Update invitation
     invitation.status = InvitationStatus.ACCEPTED;
