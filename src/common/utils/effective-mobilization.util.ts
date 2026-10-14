@@ -208,7 +208,6 @@ export function resolveCarriedMobilization(
 
     if (nonTemporaryMob) {
       // Same project: resume prior status after a one-day leave (e.g. absent then active).
-      // Different project: do not keep the leave day's project — revert to the prior stint.
       if (
         latestMob.projectId != null &&
         nonTemporaryMob.projectId === latestMob.projectId
@@ -218,6 +217,30 @@ export function resolveCarriedMobilization(
           jobStatus: nonTemporaryMob.jobStatus as JobStatus,
         };
       }
+
+      // Transferred to a new project, then absent/sick/off on that project: stay on the
+      // new project with a working status — do not revert to an older project stint.
+      if (
+        latestMob.projectId != null &&
+        latestMob.mobStatus === MobStatus.MOBILIZED
+      ) {
+        const onSameProject = mobilizationsUpToDate.filter(
+          (m) =>
+            m.projectId === latestMob.projectId &&
+            m.mobStatus === MobStatus.MOBILIZED,
+        );
+        const baselineOnProject = onSameProject.find(
+          (m) => !isDaySpecificJobStatus(m.jobStatus, m),
+        );
+        return {
+          ...latestMob,
+          projectId: latestMob.projectId,
+          mobStatus: MobStatus.MOBILIZED,
+          jobStatus: (baselineOnProject?.jobStatus ??
+            JobStatus.ACTIVE) as JobStatus,
+        };
+      }
+
       return nonTemporaryMob;
     }
 

@@ -2078,10 +2078,15 @@ export class TimesheetsService {
           shouldDemobilize && baseMob.mobStatus !== MobStatus.DEMOBILIZED;
 
         if (statusDiffers || needsDemobilization) {
+          const targetProjectId = shouldDemobilize
+            ? null
+            : projectId != null
+              ? projectId
+              : baseMob.projectId;
           const newMob = this.mobilizationRepository.create({
             employeeId: entry.employeeId,
             mobilizedTradeId: baseMob.mobilizedTradeId,
-            projectId: shouldDemobilize ? null : (projectId ?? baseMob.projectId),
+            projectId: targetProjectId,
             mobStatus: shouldDemobilize
               ? MobStatus.DEMOBILIZED
               : baseMob.mobStatus,

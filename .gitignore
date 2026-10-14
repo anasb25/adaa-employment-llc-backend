@@ -36,6 +36,10 @@ lerna-debug.log*
 !.vscode/launch.json
 !.vscode/extensions.json
 
+# Local DB dumps (may contain production data)
+adaa_prod.dump
+*.dump
+
 # dotenv environment variable files
 .env
 .env.development.local
