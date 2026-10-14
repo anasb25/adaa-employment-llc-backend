@@ -897,6 +897,73 @@ export class TimesheetsService {
    * Get monthly timesheets for ALL projects in a single call.
    * Fetches all active projects and processes them concurrently.
    */
+  /** Roster metadata for overview/search — no per-day grid. */
+  private buildProjectRosterForOverview(
+    projectId: number,
+    ctx: MonthlyMobilizationContext,
+    timesheet: Timesheet | null,
+  ): MonthlyProjectTimesheetData['employees'] {
+    const employeeIds =
+      ctx.employeeIdsByProjectForMonth.get(projectId) ?? new Set<number>();
+    if (employeeIds.size === 0) {
+      return [];
+    }
+
+    const pickRepresentativeMob = (
+      mobs: Mobilization[],
+      pid: number,
+    ): Mobilization | undefined => {
+      if (mobs.length === 0) return undefined;
+      return mobs.find((m) => m.projectId === pid) ?? mobs[0];
+    };
+
+    const employees: MonthlyProjectTimesheetData['employees'] = [];
+    let srNo = 1;
+
+    for (const employeeId of employeeIds) {
+      const employeeMobilizations =
+        ctx.mobilizationsByEmployee.get(employeeId) || [];
+      let hasDayOnProject = false;
+      for (const { dateStr } of ctx.dayInfo) {
+        const effectiveMob = getEffectiveMobilizationForDate(
+          employeeMobilizations,
+          dateStr,
+        );
+        if (isAssignedToProject(effectiveMob, projectId)) {
+          hasDayOnProject = true;
+          break;
+        }
+      }
+      if (!hasDayOnProject) {
+        continue;
+      }
+
+      const latestMob = pickRepresentativeMob(
+        employeeMobilizations,
+        projectId,
+      );
+      const entryEmployee = timesheet?.entries?.find(
+        (e) => e.employeeId === employeeId,
+      )?.employee;
+      const employeeEntity = latestMob?.employee ?? entryEmployee;
+      if (!employeeEntity) {
+        continue;
+      }
+
+      employees.push({
+        srNo: srNo++,
+        employeeId: employeeEntity.id,
+        idNo: employeeEntity.adaa_emp_code,
+        name: employeeEntity.name,
+        trade: latestMob?.mobilizedTrade?.skill || '',
+        skillId: latestMob?.mobilizedTradeId ?? 0,
+        dailyHours: [],
+      });
+    }
+
+    return employees;
+  }
+
   /**
    * Lightweight month index: project list, timesheet status, roster counts — no daily grid.
    */
@@ -912,6 +979,7 @@ export class TimesheetsService {
 
     const timesheets = await this.timesheetRepository.find({
       where: { month },
+      relations: ['entries', 'entries.employee'],
     });
     const timesheetByProjectId = new Map<number | null, Timesheet>();
     for (const sheet of timesheets) {
@@ -921,15 +989,18 @@ export class TimesheetsService {
     const overview: MonthlyProjectTimesheetData[] = [];
 
     for (const project of projects) {
-      const count =
-        sharedContext.employeeIdsByProjectForMonth.get(project.id)?.size ?? 0;
-      if (count === 0) {
+      const roster = this.buildProjectRosterForOverview(
+        project.id,
+        sharedContext,
+        timesheetByProjectId.get(project.id) ?? null,
+      );
+      if (roster.length === 0) {
         continue;
       }
       overview.push({
         timesheet: timesheetByProjectId.get(project.id) ?? null,
         project,
-        employees: [],
+        employees: roster,
       });
     }
 
