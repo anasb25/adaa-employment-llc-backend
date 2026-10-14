@@ -78,6 +78,8 @@ export interface MonthlyProjectTimesheetData {
       entryId: number | null;
     }>;
   }>;
+  /** Sum of display hours for the project month (matches grid totals). */
+  totalHours?: number;
 }
 
 type MonthlyDayInfo = {
@@ -682,6 +684,26 @@ export class TimesheetsService {
     return ctx;
   }
 
+  /** Hours counted in grid “Total Hrs” / employee totals (excludes demobilized / blank). */
+  private sumMonthlyProjectDisplayHours(
+    employees: MonthlyProjectTimesheetData['employees'],
+  ): number {
+    let total = 0;
+    for (const employee of employees) {
+      for (const dh of employee.dailyHours) {
+        if (
+          !dh.jobStatus ||
+          dh.jobStatus === 'demobilized' ||
+          dh.jobStatus === null
+        ) {
+          continue;
+        }
+        total += Number(dh.hoursWorked) || 0;
+      }
+    }
+    return Math.round(total * 100) / 100;
+  }
+
   /**
    * Get monthly project timesheet with carry-forward logic
    */
@@ -689,6 +711,7 @@ export class TimesheetsService {
     projectId: number,
     month: string, // Format: YYYY-MM
     sharedContext?: MonthlyMobilizationContext,
+    options?: { totalsOnly?: boolean },
   ): Promise<MonthlyProjectTimesheetData> {
     // Standalone project loads also heal inconsistent rows for the month.
     if (!sharedContext) {
@@ -745,6 +768,7 @@ export class TimesheetsService {
 
     const employees: any[] = [];
     let srNo = 1;
+    let projectTotalHours = 0;
 
     for (const employeeId of employeeIdsForProject) {
       const employeeMobilizations =
@@ -860,19 +884,33 @@ export class TimesheetsService {
         hours = calendarAdjusted.hoursWorked;
         jobStatus = calendarAdjusted.jobStatus;
 
-        dailyHours.push({
-          date: dateStr,
-          day,
-          hoursWorked: hours,
-          jobStatus: jobStatus,
-          isOffDay: isProjectOffDay,
-          notes: existingEntry?.notes || null,
-          entryId: existingEntry?.id || null,
-        });
+        const countsTowardTotal =
+          jobStatus &&
+          jobStatus !== 'demobilized' &&
+          jobStatus !== null;
+
+        if (options?.totalsOnly) {
+          if (countsTowardTotal) {
+            projectTotalHours += Number(hours) || 0;
+          }
+        } else {
+          dailyHours.push({
+            date: dateStr,
+            day,
+            hoursWorked: hours,
+            jobStatus: jobStatus,
+            isOffDay: isProjectOffDay,
+            notes: existingEntry?.notes || null,
+            entryId: existingEntry?.id || null,
+          });
+        }
       }
 
       // Include any employee who has at least one day of data during the month,
       // whether they are currently mobilized or were demobilized mid-month.
+      if (options?.totalsOnly) {
+        continue;
+      }
       if (dailyHours.length > 0) {
         employees.push({
           srNo: srNo++,
@@ -886,10 +924,20 @@ export class TimesheetsService {
       }
     }
 
+    if (options?.totalsOnly) {
+      return {
+        timesheet: timesheet || null,
+        project,
+        employees: [],
+        totalHours: Math.round(projectTotalHours * 100) / 100,
+      };
+    }
+
     return {
       timesheet: timesheet || null,
       project,
       employees,
+      totalHours: this.sumMonthlyProjectDisplayHours(employees),
     };
   }
 
@@ -986,7 +1034,11 @@ export class TimesheetsService {
       timesheetByProjectId.set(sheet.projectId ?? null, sheet);
     }
 
-    const overview: MonthlyProjectTimesheetData[] = [];
+    const overviewCandidates: Array<{
+      project: Project;
+      roster: MonthlyProjectTimesheetData['employees'];
+      timesheet: Timesheet | null;
+    }> = [];
 
     for (const project of projects) {
       const roster = this.buildProjectRosterForOverview(
@@ -997,12 +1049,32 @@ export class TimesheetsService {
       if (roster.length === 0) {
         continue;
       }
-      overview.push({
-        timesheet: timesheetByProjectId.get(project.id) ?? null,
+      overviewCandidates.push({
         project,
-        employees: roster,
+        roster,
+        timesheet: timesheetByProjectId.get(project.id) ?? null,
       });
     }
+
+    const projectTotals = await Promise.all(
+      overviewCandidates.map((candidate) =>
+        this.getMonthlyProjectTimesheet(
+          candidate.project.id,
+          month,
+          sharedContext,
+          { totalsOnly: true },
+        ),
+      ),
+    );
+
+    const overview: MonthlyProjectTimesheetData[] = overviewCandidates.map(
+      (candidate, index) => ({
+        timesheet: candidate.timesheet,
+        project: candidate.project,
+        employees: candidate.roster,
+        totalHours: projectTotals[index]?.totalHours ?? 0,
+      }),
+    );
 
     const idleEmployees = await this.getMonthlyIdleTimesheetData(
       month,
@@ -1175,6 +1247,7 @@ export class TimesheetsService {
       timesheet: timesheet || null,
       project: IDLE_PROJECT_VIRTUAL,
       employees,
+      totalHours: this.sumMonthlyProjectDisplayHours(employees),
     };
   }
 
