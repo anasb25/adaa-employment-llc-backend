@@ -27,7 +27,6 @@
     "assign-suppliers": "ts-node -r tsconfig-paths/register src/scripts/assign-employee-suppliers.ts"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
     "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.2",
@@ -46,6 +45,8 @@
     "bcrypt": "^6.0.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.2",
+    "compression": "^1.8.2",
+    "dotenv": "^16.4.5",
     "fs-extra": "^11.3.3",
     "html2pdf.js": "^0.14.0",
     "multer": "^2.0.2",
@@ -67,6 +68,7 @@
     "@nestjs/cli": "^11.0.0",
     "@nestjs/schematics": "^11.0.0",
     "@nestjs/testing": "^11.0.1",
+    "@types/compression": "^1.8.1",
     "@types/express": "^5.0.0",
     "@types/jest": "^30.0.0",
     "@types/node": "^22.10.7",

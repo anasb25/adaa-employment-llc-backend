@@ -44,6 +44,11 @@ export class TimesheetsController {
    * GET /timesheets/all-projects/month/:month
    * Example: /timesheets/all-projects/month/2026-02
    */
+  @Get('all-projects/month/:month/overview')
+  async getAllProjectTimesheetsOverview(@Param('month') month: string) {
+    return await this.timesheetsService.getAllProjectTimesheetsOverview(month);
+  }
+
   @Get('all-projects/month/:month')
   async getAllProjectTimesheets(@Param('month') month: string) {
     return await this.timesheetsService.getAllProjectTimesheets(month);

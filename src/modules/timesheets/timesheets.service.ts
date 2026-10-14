@@ -104,6 +104,14 @@ export interface MonthlyMobilizationContext {
 export class TimesheetsService {
   private readonly logger = new Logger(TimesheetsService.name);
 
+  /** Reuse mobilization context within a short window (bulk reads / payroll). */
+  private readonly mobilizationContextCache = new Map<
+    string,
+    { ctx: MonthlyMobilizationContext; expiresAt: number }
+  >();
+
+  private static readonly MOBILIZATION_CONTEXT_TTL_MS = 90_000;
+
   constructor(
     @InjectRepository(Timesheet)
     private readonly timesheetRepository: Repository<Timesheet>,
@@ -588,10 +596,25 @@ export class TimesheetsService {
     return repaired;
   }
 
+  invalidateMonthlyMobilizationContextCache(month?: string): void {
+    if (month) {
+      this.mobilizationContextCache.delete(month);
+      return;
+    }
+    this.mobilizationContextCache.clear();
+  }
+
   /** Load all mobilizations for a month once (avoids N×repeat per project). */
   async buildMonthlyMobilizationContext(
     month: string,
+    options?: { bypassCache?: boolean },
   ): Promise<MonthlyMobilizationContext> {
+    if (!options?.bypassCache) {
+      const cached = this.mobilizationContextCache.get(month);
+      if (cached && cached.expiresAt > Date.now()) {
+        return cached.ctx;
+      }
+    }
     const [year, monthNum] = month.split('-').map(Number);
     const { start: startDateStr, end: endDateStr } = getMonthDateRange(month);
     const startDate = parseDateOnly(startDateStr);
@@ -642,7 +665,7 @@ export class TimesheetsService {
       }
     }
 
-    return {
+    const ctx: MonthlyMobilizationContext = {
       endDateStr,
       startDate,
       endDate,
@@ -650,6 +673,13 @@ export class TimesheetsService {
       mobilizationsByEmployee,
       employeeIdsByProjectForMonth,
     };
+
+    this.mobilizationContextCache.set(month, {
+      ctx,
+      expiresAt: Date.now() + TimesheetsService.MOBILIZATION_CONTEXT_TTL_MS,
+    });
+
+    return ctx;
   }
 
   /**
@@ -867,14 +897,56 @@ export class TimesheetsService {
    * Get monthly timesheets for ALL projects in a single call.
    * Fetches all active projects and processes them concurrently.
    */
+  /**
+   * Lightweight month index: project list, timesheet status, roster counts — no daily grid.
+   */
+  async getAllProjectTimesheetsOverview(
+    month: string,
+  ): Promise<MonthlyProjectTimesheetData[]> {
+    const projects = await this.projectRepository.find({
+      relations: ['client'],
+      order: { name: 'ASC' },
+    });
+
+    const sharedContext = await this.buildMonthlyMobilizationContext(month);
+
+    const timesheets = await this.timesheetRepository.find({
+      where: { month },
+    });
+    const timesheetByProjectId = new Map<number | null, Timesheet>();
+    for (const sheet of timesheets) {
+      timesheetByProjectId.set(sheet.projectId ?? null, sheet);
+    }
+
+    const overview: MonthlyProjectTimesheetData[] = [];
+
+    for (const project of projects) {
+      const count =
+        sharedContext.employeeIdsByProjectForMonth.get(project.id)?.size ?? 0;
+      if (count === 0) {
+        continue;
+      }
+      overview.push({
+        timesheet: timesheetByProjectId.get(project.id) ?? null,
+        project,
+        employees: [],
+      });
+    }
+
+    const idleEmployees = await this.getMonthlyIdleTimesheetData(
+      month,
+      sharedContext,
+    );
+    if (idleEmployees.employees.length > 0) {
+      overview.push(idleEmployees);
+    }
+
+    return overview;
+  }
+
   async getAllProjectTimesheets(
     month: string,
   ): Promise<MonthlyProjectTimesheetData[]> {
-    await this.backfillMissingProjectOffDays();
-
-    // Heal inconsistent leave/off + hours rows for every employee in this month.
-    await this.repairInconsistentStatusHours(month);
-
     const projects = await this.projectRepository.find({
       relations: ['client'],
       order: { name: 'ASC' },
@@ -1253,6 +1325,19 @@ export class TimesheetsService {
         );
       }
     }
+
+    this.invalidateMonthlyMobilizationContextCache(timesheet.month);
+    void this.repairInconsistentStatusHours(timesheet.month)
+      .then((repaired) => {
+        if (repaired > 0) {
+          this.invalidateMonthlyMobilizationContextCache(timesheet.month);
+        }
+      })
+      .catch((error) => {
+        this.logger.warn(
+          `Post-save timesheet repair failed for ${timesheet.month}: ${this.getErrorMessage(error)}`,
+        );
+      });
 
     return savedEntries;
   }
@@ -2140,7 +2225,9 @@ export class TimesheetsService {
       timesheet.notes = submitDto.notes;
     }
 
-    return await this.timesheetRepository.save(timesheet);
+    const saved = await this.timesheetRepository.save(timesheet);
+    this.invalidateMonthlyMobilizationContextCache(saved.month);
+    return saved;
   }
 
   /**
@@ -2180,6 +2267,8 @@ export class TimesheetsService {
     if (approveDto.status === TimesheetStatus.APPROVED) {
       await this.reconcileAnnualLeaveDeductionOnApprove(savedTimesheet.id);
     }
+
+    this.invalidateMonthlyMobilizationContextCache(savedTimesheet.month);
 
     return savedTimesheet;
   }

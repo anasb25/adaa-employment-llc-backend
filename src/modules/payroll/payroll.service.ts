@@ -70,6 +70,23 @@ type PayrollComputationDay = {
 
 @Injectable()
 export class PayrollService {
+  private readonly payrollAssignmentCache = new Map<
+    string,
+    {
+      map: Map<number, { siteName: string; laborTrade: string }>;
+      expiresAt: number;
+    }
+  >();
+
+  private static readonly PAYROLL_ASSIGNMENT_CACHE_TTL_MS = 120_000;
+
+  invalidatePayrollAssignmentCache(month?: string): void {
+    if (month) {
+      this.payrollAssignmentCache.delete(month);
+      return;
+    }
+    this.payrollAssignmentCache.clear();
+  }
   /** Request-local caches for month calculate (avoid N× DB hits). Cleared after each run. */
   private activeSpecialDaysCache: SpecialDay[] | null = null;
   private disabledSpecialDaysByProject = new Map<number, Set<number>>();
@@ -269,6 +286,22 @@ export class PayrollService {
     return result;
   }
 
+  private async getPayrollAssignmentByEmployeeCached(
+    month: string,
+  ): Promise<Map<number, { siteName: string; laborTrade: string }>> {
+    const cached = this.payrollAssignmentCache.get(month);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.map;
+    }
+
+    const map = await this.buildPayrollAssignmentByEmployee(month);
+    this.payrollAssignmentCache.set(month, {
+      map,
+      expiresAt: Date.now() + PayrollService.PAYROLL_ASSIGNMENT_CACHE_TTL_MS,
+    });
+    return map;
+  }
+
   private async attachPayrollAssignmentFields(
     payrolls: Payroll[],
     month: string,
@@ -278,7 +311,7 @@ export class PayrollService {
     }
 
     const assignmentByEmployee =
-      await this.buildPayrollAssignmentByEmployee(month);
+      await this.getPayrollAssignmentByEmployeeCached(month);
 
     const missingTradeIds = payrolls
       .filter((p) => {
@@ -480,6 +513,8 @@ export class PayrollService {
    */
   async calculatePayrollForMonth(month: string): Promise<Payroll[]> {
     this.clearPayrollCalcCaches();
+    this.invalidatePayrollAssignmentCache(month);
+    this.timesheetsService.invalidateMonthlyMobilizationContextCache(month);
     try {
       // Heal leave/off entries that still have hours for all employees.
       await this.timesheetsService.repairInconsistentStatusHours(month);
