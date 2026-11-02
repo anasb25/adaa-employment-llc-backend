@@ -40,6 +40,10 @@ import {
   PaginationUtil,
 } from '../../common/utils/pagination.util';
 import { MobilizationExcelUtil } from './utils/mobilization-excel.util';
+import {
+  isReturnVisitToProject,
+  laterStartIsSeparateVisit,
+} from './utils/project-stint-boundary.util';
 import { SpecialDaysService } from '../special-days/special-days.service';
 import { SpecialDayType } from '../special-days/entities/special-day.entity';
 import { parseDateOnly, formatDateOnly, compareDateOnly } from '../../common/utils/date.util';
@@ -1421,15 +1425,33 @@ export class MobilizationsService {
       month,
       mob.id,
     );
+    const otherProjectDates = await this.findOtherProjectActionDatesInMonth(
+      mob.employeeId,
+      mob.projectId,
+      month,
+    );
 
-    if (laterStartDateStr) {
+    if (
+      laterStartDateStr &&
+      !laterStartIsSeparateVisit(
+        actionDateStr,
+        laterStartDateStr,
+        otherProjectDates,
+      )
+    ) {
       return this.minDateOnly(
         monthEnd,
         this.dayBeforeDateOnly(laterStartDateStr),
       );
     }
 
-    return monthEnd;
+    // Stop at the next real transfer (e.g. Binghatti 19 → GCL 27), not month-end
+    // and not the later return to the same site.
+    return this.timesheetsService.resolveTransferRangeEnd(
+      mob.employeeId,
+      mob.projectId,
+      actionDateStr,
+    );
   }
 
   /**
@@ -1466,16 +1488,35 @@ export class MobilizationsService {
       return;
     }
 
-    await this.mobilizationRepository.remove(stale);
+    const removable: Mobilization[] = [];
+    for (const row of stale) {
+      const returnDate = await this.findLaterSameProjectStintStart(
+        employeeId,
+        targetProjectId,
+        formatDateOnly(row.actionDate),
+        month,
+      );
+      // Binghatti 28 after GCL 27 is a real return — keep the GCL row.
+      if (returnDate) {
+        continue;
+      }
+      removable.push(row);
+    }
+
+    if (removable.length === 0) {
+      return;
+    }
+
+    await this.mobilizationRepository.remove(removable);
     if (this.importDeletedMobKeys) {
-      for (const mob of stale) {
+      for (const mob of removable) {
         this.importDeletedMobKeys.add(
           `${employeeId}|${formatDateOnly(mob.actionDate)}`,
         );
       }
     }
     this.logger.log(
-      `Removed ${stale.length} superseded later mobilization start(s) on other project(s) ` +
+      `Removed ${removable.length} superseded later mobilization start(s) on other project(s) ` +
         `for employee ${employeeId} after ${fromDateStr} (consolidated onto project ${targetProjectId})`,
     );
   }
@@ -1495,7 +1536,6 @@ export class MobilizationsService {
 
     const newStartDateStr = formatDateOnly(mob.actionDate);
     const month = newStartDateStr.slice(0, 7);
-    const { end: monthEnd } = getMonthDateRange(month);
 
     const laterStartDateStr = await this.findLaterSameProjectStintStart(
       mob.employeeId,
@@ -1505,14 +1545,7 @@ export class MobilizationsService {
       mob.id,
     );
 
-    let rangeEnd = monthEnd;
-
-    if (laterStartDateStr) {
-      rangeEnd = this.minDateOnly(
-        rangeEnd,
-        this.dayBeforeDateOnly(laterStartDateStr),
-      );
-    }
+    const rangeEnd = await this.resolveMobilizationShiftRangeEnd(mob);
 
     if (compareDateOnly(rangeEnd, newStartDateStr) < 0) {
       return;
@@ -1858,13 +1891,27 @@ export class MobilizationsService {
       })
       .getMany();
 
-    if (laterStarts.length === 0) {
+    const otherProjectDates = await this.findOtherProjectActionDatesInMonth(
+      employeeId,
+      projectId,
+      month,
+    );
+    const superseded = laterStarts.filter(
+      (row) =>
+        !laterStartIsSeparateVisit(
+          newStartDateStr,
+          formatDateOnly(row.actionDate),
+          otherProjectDates,
+        ),
+    );
+
+    if (superseded.length === 0) {
       return;
     }
 
-    await this.mobilizationRepository.remove(laterStarts);
+    await this.mobilizationRepository.remove(superseded);
     this.logger.log(
-      `Removed ${laterStarts.length} superseded later mobilization start(s) for employee ${employeeId} ` +
+      `Removed ${superseded.length} superseded later mobilization start(s) for employee ${employeeId} ` +
         `on project ${projectId} after ${newStartDateStr}`,
     );
   }
@@ -1932,14 +1979,36 @@ export class MobilizationsService {
       })
       .getMany();
 
-    const superseded = [...priorStarts, ...priorDaySpecific];
-    if (superseded.length > 0) {
-      await this.mobilizationRepository.remove(superseded);
-      this.logger.log(
-        `Removed ${superseded.length} superseded mobilization row(s) for employee ${employeeId} ` +
-          `on project ${projectId} before ${newStartDateStr}`,
-      );
+    const otherProjectDates = await this.findOtherProjectActionDatesInMonth(
+      employeeId,
+      projectId,
+      month,
+    );
+    if (
+      isReturnVisitToProject({
+        newStartDate: newStartDateStr,
+        priorSameProjectDates: priorStarts.map((row) =>
+          formatDateOnly(row.actionDate),
+        ),
+        otherProjectDates,
+      })
+    ) {
+      // Left and came back (Binghatti → GCL → Binghatti). Keep the earlier
+      // stint and its timesheet days.
+      return;
     }
+
+    const superseded = [...priorStarts, ...priorDaySpecific];
+    if (superseded.length === 0) {
+      // Already on this project via carry-forward. Do not wipe earlier days.
+      return;
+    }
+
+    await this.mobilizationRepository.remove(superseded);
+    this.logger.log(
+      `Removed ${superseded.length} superseded mobilization row(s) for employee ${employeeId} ` +
+        `on project ${projectId} before ${newStartDateStr}`,
+    );
 
     await this.timesheetsService.clearProjectTimesheetEntriesBeforeDate(
       employeeId,
@@ -1947,6 +2016,25 @@ export class MobilizationsService {
       month,
       newStartDateStr,
     );
+  }
+
+  private async findOtherProjectActionDatesInMonth(
+    employeeId: number,
+    projectId: number,
+    month: string,
+  ): Promise<string[]> {
+    const { start: monthStart, end: monthEnd } = getMonthDateRange(month);
+    const rows = await this.mobilizationRepository
+      .createQueryBuilder('m')
+      .where('m.employeeId = :employeeId', { employeeId })
+      .andWhere('m.projectId IS NOT NULL')
+      .andWhere('m.projectId != :projectId', { projectId })
+      .andWhere('m.actionDate >= :monthStart', { monthStart })
+      .andWhere('m.actionDate <= :monthEnd', { monthEnd })
+      .andWhere('m.mobStatus = :mobilized', { mobilized: MobStatus.MOBILIZED })
+      .getMany();
+
+    return rows.map((row) => formatDateOnly(row.actionDate));
   }
 
   /** Remove stale mobilizations left on the old project after a transfer. */
