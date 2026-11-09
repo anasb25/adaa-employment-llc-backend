@@ -22,13 +22,36 @@ import {
 import { DashboardStats } from './dashboard-stats.interface';
 import { ADAA_SUPPLIER_NAME } from '../../common/constants/supplier.constants';
 import { MobilizationExcelUtil } from '../mobilizations/utils/mobilization-excel.util';
-import { formatDateOnly } from '../../common/utils/date.util';
+import { formatDateOnly, parseDateOnly } from '../../common/utils/date.util';
 
 export interface ExpiringDocument {
   field: string;
   label: string;
   expiryDate: string;
   daysUntilExpiry: number;
+}
+
+export interface WorkforceInsightRow {
+  label: string;
+  count: number;
+  percent: number;
+}
+
+export interface ClientFatInsightRow {
+  client: string;
+  adaa: number;
+  clientFat: number;
+  total: number;
+}
+
+export interface WorkforceInsights {
+  asOf: string;
+  total: number;
+  fat: WorkforceInsightRow[];
+  trades: WorkforceInsightRow[];
+  clients: WorkforceInsightRow[];
+  clientsByFat: ClientFatInsightRow[];
+  fatTotals: { adaa: number; client: number };
 }
 
 export interface EmployeeWithExpiringDocs {
@@ -518,6 +541,82 @@ export class DashboardService {
         gross: Math.round((Number(row.gross) || 0) * 100) / 100,
         net: Math.round((Number(row.net) || 0) * 100) / 100,
       }));
+  }
+
+  async getWorkforceInsights(date?: string): Promise<WorkforceInsights> {
+    const asOf = date && /^\d{4}-\d{2}-\d{2}$/.test(date)
+      ? date
+      : formatDateOnly(new Date());
+    const effective =
+      await this.mobilizationsService.getEffectiveStatusForAllEmployeesOnDate(
+        parseDateOnly(asOf),
+        false,
+      );
+
+    const onSite = effective.filter(
+      (mob) => mob.projectId != null && mob.project != null,
+    );
+
+    const fatCounts = new Map<string, number>();
+    const tradeCounts = new Map<string, number>();
+    const clientCounts = new Map<string, number>();
+    const clientFat = new Map<
+      string,
+      { adaa: number; client: number; other: number }
+    >();
+
+    for (const mob of onSite) {
+      const fat = mob.project?.fat || 'UNSPECIFIED';
+      const trade = mob.mobilizedTrade?.skill?.trim() || 'Unspecified';
+      const clientName = mob.project?.client?.name?.trim() || 'Unknown';
+
+      fatCounts.set(fat, (fatCounts.get(fat) ?? 0) + 1);
+      tradeCounts.set(trade, (tradeCounts.get(trade) ?? 0) + 1);
+      clientCounts.set(clientName, (clientCounts.get(clientName) ?? 0) + 1);
+
+      const split = clientFat.get(clientName) ?? { adaa: 0, client: 0, other: 0 };
+      if (fat === 'ADAA') split.adaa += 1;
+      else if (fat === 'CLIENT') split.client += 1;
+      else split.other += 1;
+      clientFat.set(clientName, split);
+    }
+
+    const total = onSite.length;
+    const toRows = (map: Map<string, number>): WorkforceInsightRow[] =>
+      [...map.entries()]
+        .map(([label, count]) => ({
+          label,
+          count,
+          percent: total === 0 ? 0 : Math.round((count / total) * 10000) / 100,
+        }))
+        .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+
+    const fatOrder = ['ADAA', 'CLIENT', 'UNSPECIFIED'];
+    const fat = toRows(fatCounts).sort(
+      (a, b) => fatOrder.indexOf(a.label) - fatOrder.indexOf(b.label),
+    );
+
+    const clientsByFat = [...clientFat.entries()]
+      .map(([client, split]) => ({
+        client,
+        adaa: split.adaa,
+        clientFat: split.client,
+        total: split.adaa + split.client + split.other,
+      }))
+      .sort((a, b) => b.total - a.total || a.client.localeCompare(b.client));
+
+    return {
+      asOf,
+      total,
+      fat,
+      trades: toRows(tradeCounts),
+      clients: toRows(clientCounts),
+      clientsByFat,
+      fatTotals: {
+        adaa: fatCounts.get('ADAA') ?? 0,
+        client: fatCounts.get('CLIENT') ?? 0,
+      },
+    };
   }
 
   private formatDateToYYYYMMDD(date: Date): string {

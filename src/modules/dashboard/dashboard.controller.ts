@@ -1,6 +1,10 @@
 import { Controller, Get, Query, Res } from '@nestjs/common';
 import type { Response } from 'express';
-import { DashboardService, EmployeeWithExpiringDocs } from './dashboard.service';
+import {
+  DashboardService,
+  EmployeeWithExpiringDocs,
+  WorkforceInsights,
+} from './dashboard.service';
 import { DashboardStats } from './dashboard-stats.interface';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { Permissions } from '../../common/decorators/permissions.decorator';
@@ -12,6 +16,11 @@ export class DashboardController {
   @Get('stats')
   async getStats(@Query('month') month?: string): Promise<DashboardStats> {
     return this.dashboardService.getDashboardStats(month);
+  }
+
+  @Get('insights')
+  async getInsights(@Query('date') date?: string): Promise<WorkforceInsights> {
+    return this.dashboardService.getWorkforceInsights(date);
   }
 
   @Get('expiring-documents')
