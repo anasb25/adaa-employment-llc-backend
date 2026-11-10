@@ -13,6 +13,7 @@ import {
   Timesheet,
   TimesheetStatus,
 } from '../timesheets/entities/timesheet.entity';
+import { TimesheetEntry } from '../timesheets/entities/timesheet-entry.entity';
 import { Payroll } from '../payroll/entities/payroll.entity';
 import { Invoice, InvoiceStatus } from '../invoices/entities/invoice.entity';
 import {
@@ -35,23 +36,76 @@ export interface WorkforceInsightRow {
   label: string;
   count: number;
   percent: number;
+  hours: number;
+  hoursPercent: number;
 }
 
 export interface ClientFatInsightRow {
   client: string;
   adaa: number;
+  adaaHours: number;
   clientFat: number;
+  clientHours: number;
+  total: number;
+  totalHours: number;
+}
+
+export interface StatusInsightRow {
+  label: string;
+  count: number;
+  hours: number;
+}
+
+export interface IdleTradeInsightRow {
+  trade: string;
+  count: number;
+  hours: number;
+}
+
+export interface MonthlyHoursInsightRow {
+  month: string;
+  label: string;
+  headcount: number;
+  hours: number;
+}
+
+export interface MonthlyMoneyInsightRow {
+  month: string;
+  label: string;
+  headcount: number;
+  hours: number;
+  amount: number;
+}
+
+export interface ExpiryInsightBucket {
+  visa: number;
+  eid: number;
+  workPermit: number;
+  passport: number;
   total: number;
 }
 
 export interface WorkforceInsights {
   asOf: string;
+  periodStart: string;
+  periodEnd: string;
+  period: 'month' | 'year';
   total: number;
+  totalHours: number;
   fat: WorkforceInsightRow[];
   trades: WorkforceInsightRow[];
   clients: WorkforceInsightRow[];
   clientsByFat: ClientFatInsightRow[];
-  fatTotals: { adaa: number; client: number };
+  fatTotals: { adaa: number; client: number; adaaHours: number; clientHours: number };
+  idleByTrade: IdleTradeInsightRow[];
+  idleTotals: { count: number; hours: number };
+  status: StatusInsightRow[];
+  monthlyHours: MonthlyHoursInsightRow[];
+  monthlyPayroll: MonthlyMoneyInsightRow[];
+  expiry: {
+    next15: ExpiryInsightBucket;
+    oneMonth: ExpiryInsightBucket;
+  };
 }
 
 export interface EmployeeWithExpiringDocs {
@@ -75,6 +129,8 @@ export class DashboardService {
     private clientRepository: Repository<Client>,
     @InjectRepository(Timesheet)
     private timesheetRepository: Repository<Timesheet>,
+    @InjectRepository(TimesheetEntry)
+    private timesheetEntryRepository: Repository<TimesheetEntry>,
     @InjectRepository(Payroll)
     private payrollRepository: Repository<Payroll>,
     @InjectRepository(Invoice)
@@ -543,56 +599,179 @@ export class DashboardService {
       }));
   }
 
-  async getWorkforceInsights(date?: string): Promise<WorkforceInsights> {
-    const asOf = date && /^\d{4}-\d{2}-\d{2}$/.test(date)
-      ? date
-      : formatDateOnly(new Date());
-    const effective =
-      await this.mobilizationsService.getEffectiveStatusForAllEmployeesOnDate(
-        parseDateOnly(asOf),
-        false,
-      );
+  async getWorkforceInsights(
+    year?: string,
+    month?: string,
+  ): Promise<WorkforceInsights> {
+    const today = formatDateOnly(new Date());
+    const periodYear =
+      year && /^\d{4}$/.test(year) ? Number(year) : Number(today.slice(0, 4));
+    const periodMonth = this.parsePeriodMonth(month);
+    const periodStart = periodMonth
+      ? `${periodYear}-${this.pad2(periodMonth)}-01`
+      : `${periodYear}-01-01`;
+    const periodEnd = periodMonth
+      ? this.lastDateOfMonth(periodYear, periodMonth)
+      : `${periodYear}-12-31`;
+    const asOf = periodEnd > today ? today : periodEnd;
+
+    const [effective, hoursByEmployee, monthlyHours, monthlyPayroll, expiry] =
+      await Promise.all([
+        this.mobilizationsService.getEffectiveStatusForAllEmployeesOnDate(
+          parseDateOnly(asOf),
+          true,
+        ),
+        this.getHoursByEmployeeInRange(periodStart, periodEnd),
+        this.getMonthlyHoursTrend(periodYear),
+        this.getMonthlyPayrollTrend(periodYear),
+        this.getExpiryInsightBuckets(asOf),
+      ]);
+
+    const hoursOf = (employeeId: number) => hoursByEmployee.get(employeeId) ?? 0;
+    const roundHours = (value: number) => Math.round(value * 100) / 100;
+    const share = (part: number, whole: number) =>
+      whole === 0 ? 0 : Math.round((part / whole) * 10000) / 100;
 
     const onSite = effective.filter(
-      (mob) => mob.projectId != null && mob.project != null,
+      (mob) =>
+        mob.projectId != null &&
+        mob.project != null &&
+        mob.mobStatus !== 'demobilized',
     );
 
-    const fatCounts = new Map<string, number>();
-    const tradeCounts = new Map<string, number>();
-    const clientCounts = new Map<string, number>();
+    const fatMap = new Map<string, { count: number; hours: number }>();
+    const tradeMap = new Map<string, { count: number; hours: number }>();
+    const clientMap = new Map<string, { count: number; hours: number }>();
     const clientFat = new Map<
       string,
-      { adaa: number; client: number; other: number }
+      {
+        adaa: number;
+        adaaHours: number;
+        client: number;
+        clientHours: number;
+        other: number;
+        otherHours: number;
+      }
     >();
+    const idleByTrade = new Map<string, { count: number; hours: number }>();
+    const statusMap = new Map<string, { count: number; hours: number }>();
 
-    for (const mob of onSite) {
-      const fat = mob.project?.fat || 'UNSPECIFIED';
-      const trade = mob.mobilizedTrade?.skill?.trim() || 'Unspecified';
-      const clientName = mob.project?.client?.name?.trim() || 'Unknown';
+    const bump = (
+      map: Map<string, { count: number; hours: number }>,
+      key: string,
+      hours: number,
+    ) => {
+      const current = map.get(key) ?? { count: 0, hours: 0 };
+      current.count += 1;
+      current.hours += hours;
+      map.set(key, current);
+    };
 
-      fatCounts.set(fat, (fatCounts.get(fat) ?? 0) + 1);
-      tradeCounts.set(trade, (tradeCounts.get(trade) ?? 0) + 1);
-      clientCounts.set(clientName, (clientCounts.get(clientName) ?? 0) + 1);
+    const statusLabel = (jobStatus: string | null | undefined): string => {
+      const status = String(jobStatus || '').toLowerCase();
+      if (status === JobStatus.ACTIVE || status === JobStatus.NOTICE_PERIOD) {
+        return 'ACTIVE';
+      }
+      if (status === JobStatus.ABSENT) {
+        return 'ABSENT';
+      }
+      if (status === JobStatus.IDLE) {
+        return 'IDLE';
+      }
+      if (
+        status === JobStatus.OFF ||
+        status === JobStatus.ANNUAL_LEAVE ||
+        status === JobStatus.SICK_LEAVE ||
+        status === JobStatus.CASUAL_LEAVE ||
+        status === JobStatus.URGENT_LEAVE
+      ) {
+        return 'HOLD';
+      }
+      return '';
+    };
 
-      const split = clientFat.get(clientName) ?? { adaa: 0, client: 0, other: 0 };
-      if (fat === 'ADAA') split.adaa += 1;
-      else if (fat === 'CLIENT') split.client += 1;
-      else split.other += 1;
+    const effectiveByEmployee = new Map(
+      effective.map((mob) => [mob.employeeId, mob]),
+    );
+    const counted = new Set<number>();
+
+    const attributeMix = (employeeId: number, hours: number) => {
+      const mob = effectiveByEmployee.get(employeeId);
+      const fat = mob?.project?.fat || 'UNSPECIFIED';
+      const trade = mob?.mobilizedTrade?.skill?.trim() || 'Unspecified';
+      const clientName = mob?.project?.client?.name?.trim() || 'Unknown';
+
+      bump(fatMap, fat, hours);
+      bump(tradeMap, trade, hours);
+      bump(clientMap, clientName, hours);
+
+      const split = clientFat.get(clientName) ?? {
+        adaa: 0,
+        adaaHours: 0,
+        client: 0,
+        clientHours: 0,
+        other: 0,
+        otherHours: 0,
+      };
+      if (fat === 'ADAA') {
+        split.adaa += 1;
+        split.adaaHours += hours;
+      } else if (fat === 'CLIENT') {
+        split.client += 1;
+        split.clientHours += hours;
+      } else {
+        split.other += 1;
+        split.otherHours += hours;
+      }
       clientFat.set(clientName, split);
+      counted.add(employeeId);
+    };
+
+    for (const [employeeId, hours] of hoursByEmployee.entries()) {
+      attributeMix(employeeId, hours);
+    }
+    for (const mob of onSite) {
+      if (!counted.has(mob.employeeId)) {
+        attributeMix(mob.employeeId, 0);
+      }
     }
 
-    const total = onSite.length;
-    const toRows = (map: Map<string, number>): WorkforceInsightRow[] =>
+    for (const mob of effective) {
+      const hours = hoursOf(mob.employeeId);
+      const jobStatus = String(mob.jobStatus || '').toLowerCase();
+      if (jobStatus === JobStatus.IDLE) {
+        bump(
+          idleByTrade,
+          mob.mobilizedTrade?.skill?.trim() || 'Unspecified',
+          hours,
+        );
+      }
+      const label = statusLabel(mob.jobStatus);
+      if (label) {
+        bump(statusMap, label, hours);
+      }
+    }
+
+    const total = counted.size;
+    const totalHours = roundHours(
+      [...hoursByEmployee.values()].reduce((sum, hours) => sum + hours, 0),
+    );
+
+    const toRows = (
+      map: Map<string, { count: number; hours: number }>,
+    ): WorkforceInsightRow[] =>
       [...map.entries()]
-        .map(([label, count]) => ({
+        .map(([label, value]) => ({
           label,
-          count,
-          percent: total === 0 ? 0 : Math.round((count / total) * 10000) / 100,
+          count: value.count,
+          percent: share(value.count, total),
+          hours: roundHours(value.hours),
+          hoursPercent: share(value.hours, totalHours),
         }))
         .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
 
     const fatOrder = ['ADAA', 'CLIENT', 'UNSPECIFIED'];
-    const fat = toRows(fatCounts).sort(
+    const fat = toRows(fatMap).sort(
       (a, b) => fatOrder.indexOf(a.label) - fatOrder.indexOf(b.label),
     );
 
@@ -600,23 +779,263 @@ export class DashboardService {
       .map(([client, split]) => ({
         client,
         adaa: split.adaa,
+        adaaHours: roundHours(split.adaaHours),
         clientFat: split.client,
+        clientHours: roundHours(split.clientHours),
         total: split.adaa + split.client + split.other,
+        totalHours: roundHours(
+          split.adaaHours + split.clientHours + split.otherHours,
+        ),
       }))
       .sort((a, b) => b.total - a.total || a.client.localeCompare(b.client));
 
+    const idleRows = [...idleByTrade.entries()]
+      .map(([trade, value]) => ({
+        trade,
+        count: value.count,
+        hours: roundHours(value.hours),
+      }))
+      .sort((a, b) => b.count - a.count || a.trade.localeCompare(b.trade));
+
+    const statusOrder = ['ABSENT', 'ACTIVE', 'HOLD', 'IDLE'];
+    const status = statusOrder.map((label) => ({
+      label,
+      count: statusMap.get(label)?.count ?? 0,
+      hours: roundHours(statusMap.get(label)?.hours ?? 0),
+    }));
+
     return {
       asOf,
+      periodStart,
+      periodEnd,
+      period: periodMonth ? 'month' : 'year',
       total,
+      totalHours,
       fat,
-      trades: toRows(tradeCounts),
-      clients: toRows(clientCounts),
+      trades: toRows(tradeMap),
+      clients: toRows(clientMap),
       clientsByFat,
       fatTotals: {
-        adaa: fatCounts.get('ADAA') ?? 0,
-        client: fatCounts.get('CLIENT') ?? 0,
+        adaa: fatMap.get('ADAA')?.count ?? 0,
+        client: fatMap.get('CLIENT')?.count ?? 0,
+        adaaHours: roundHours(fatMap.get('ADAA')?.hours ?? 0),
+        clientHours: roundHours(fatMap.get('CLIENT')?.hours ?? 0),
       },
+      idleByTrade: idleRows,
+      idleTotals: {
+        count: idleRows.reduce((sum, row) => sum + row.count, 0),
+        hours: roundHours(idleRows.reduce((sum, row) => sum + row.hours, 0)),
+      },
+      status,
+      monthlyHours,
+      monthlyPayroll,
+      expiry,
     };
+  }
+
+  private async getHoursByEmployeeInRange(
+    from: string,
+    to: string,
+  ): Promise<Map<number, number>> {
+    const rows = await this.timesheetEntryRepository
+      .createQueryBuilder('entry')
+      .select('entry.employeeId', 'employeeId')
+      .addSelect('COALESCE(SUM(entry.hoursWorked), 0)', 'hours')
+      .where('entry.date BETWEEN :from AND :to', { from, to })
+      .andWhere('entry.deletedAt IS NULL')
+      .andWhere('entry.jobStatus NOT IN (:...skip)', {
+        skip: ['demobilized', 'cancelled', 'absconded', 'resigned'],
+      })
+      .groupBy('entry.employeeId')
+      .getRawMany<{ employeeId: string; hours: string }>();
+
+    return new Map(
+      rows.map((row) => [Number(row.employeeId), Number(row.hours) || 0]),
+    );
+  }
+
+  private pad2(value: number): string {
+    return String(value).padStart(2, '0');
+  }
+
+  private parsePeriodMonth(month?: string): number | null {
+    if (!month || month === 'all') {
+      return null;
+    }
+    const parsed = Number(month);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 12) {
+      return null;
+    }
+    return parsed;
+  }
+
+  private lastDateOfMonth(year: number, month: number): string {
+    const day = new Date(year, month, 0).getDate();
+    return `${year}-${this.pad2(month)}-${this.pad2(day)}`;
+  }
+
+  private monthLabel(month: string): string {
+    const [year, monthNum] = month.split('-');
+    const date = new Date(Number(year), Number(monthNum) - 1, 1);
+    const short = date.toLocaleString('en-US', { month: 'short' });
+    return `${short}-${String(year).slice(-2)}`;
+  }
+
+  private yearMonthKeys(year: number): string[] {
+    return Array.from(
+      { length: 12 },
+      (_, index) => `${year}-${String(index + 1).padStart(2, '0')}`,
+    );
+  }
+
+  private async getMonthlyHoursTrend(
+    year: number,
+  ): Promise<MonthlyHoursInsightRow[]> {
+    const start = `${year}-01-01`;
+    const end = `${year}-12-31`;
+    const rows = await this.timesheetEntryRepository
+      .createQueryBuilder('entry')
+      .select("TO_CHAR(entry.date, 'YYYY-MM')", 'month')
+      .addSelect('COUNT(DISTINCT entry.employeeId)', 'headcount')
+      .addSelect('COALESCE(SUM(entry.hoursWorked), 0)', 'hours')
+      .where('entry.deletedAt IS NULL')
+      .andWhere('entry.date BETWEEN :start AND :end', { start, end })
+      .andWhere('entry.hoursWorked > 0')
+      .andWhere('entry.jobStatus NOT IN (:...skip)', {
+        skip: ['demobilized', 'cancelled', 'absconded', 'resigned'],
+      })
+      .groupBy("TO_CHAR(entry.date, 'YYYY-MM')")
+      .orderBy("TO_CHAR(entry.date, 'YYYY-MM')", 'ASC')
+      .getRawMany<{ month: string; headcount: string; hours: string }>();
+
+    const byMonth = new Map(
+      rows.map((row) => [
+        row.month,
+        {
+          headcount: Number(row.headcount) || 0,
+          hours: Math.round((Number(row.hours) || 0) * 100) / 100,
+        },
+      ]),
+    );
+
+    return this.yearMonthKeys(year).map((month) => ({
+      month,
+      label: this.monthLabel(month),
+      headcount: byMonth.get(month)?.headcount ?? 0,
+      hours: byMonth.get(month)?.hours ?? 0,
+    }));
+  }
+
+  private async getMonthlyPayrollTrend(
+    year: number,
+  ): Promise<MonthlyMoneyInsightRow[]> {
+    const startMonth = `${year}-01`;
+    const endMonth = `${year}-12`;
+    const rows = await this.payrollRepository
+      .createQueryBuilder('p')
+      .innerJoin('p.employee', 'e')
+      .innerJoin('e.supplier', 's')
+      .select('p.month', 'month')
+      .addSelect('COUNT(*)', 'headcount')
+      .addSelect(
+        'COALESCE(SUM(p.totalHours + p.totalOtHours + p.totalOffdaysWorkedHours), 0)',
+        'hours',
+      )
+      .addSelect('COALESCE(SUM(p.totalGrossSalary), 0)', 'amount')
+      .where('p.deletedAt IS NULL')
+      .andWhere('s.name = :adaaSupplier', { adaaSupplier: ADAA_SUPPLIER_NAME })
+      .andWhere('p.month BETWEEN :startMonth AND :endMonth', {
+        startMonth,
+        endMonth,
+      })
+      .groupBy('p.month')
+      .orderBy('p.month', 'ASC')
+      .getRawMany<{
+        month: string;
+        headcount: string;
+        hours: string;
+        amount: string;
+      }>();
+
+    const byMonth = new Map(
+      rows.map((row) => [
+        row.month,
+        {
+          headcount: Number(row.headcount) || 0,
+          hours: Math.round((Number(row.hours) || 0) * 100) / 100,
+          amount: Math.round((Number(row.amount) || 0) * 100) / 100,
+        },
+      ]),
+    );
+
+    return this.yearMonthKeys(year).map((month) => ({
+      month,
+      label: this.monthLabel(month),
+      headcount: byMonth.get(month)?.headcount ?? 0,
+      hours: byMonth.get(month)?.hours ?? 0,
+      amount: byMonth.get(month)?.amount ?? 0,
+    }));
+  }
+
+  private async getExpiryInsightBuckets(
+    asOf: string,
+  ): Promise<WorkforceInsights['expiry']> {
+    const empty = (): ExpiryInsightBucket => ({
+      visa: 0,
+      eid: 0,
+      workPermit: 0,
+      passport: 0,
+      total: 0,
+    });
+    const next15 = empty();
+    const oneMonth = empty();
+    const asOfDate = parseDateOnly(asOf);
+
+    const employees = await this.employeesRepository
+      .createQueryBuilder('employee')
+      .select([
+        'employee.pp_expiry',
+        'employee.emirates_id_expiry',
+        'employee.visa_expiry',
+        'employee.work_permit_expiry',
+      ])
+      .where('employee.deletedAt IS NULL')
+      .getMany();
+
+    const daysUntil = (value: string | null | undefined): number | null => {
+      if (!value) return null;
+      const expiry = new Date(value);
+      if (Number.isNaN(expiry.getTime())) return null;
+      expiry.setUTCHours(0, 0, 0, 0);
+      return Math.ceil(
+        (expiry.getTime() - asOfDate.getTime()) / (1000 * 60 * 60 * 24),
+      );
+    };
+
+    const add = (
+      bucket: ExpiryInsightBucket,
+      key: keyof Omit<ExpiryInsightBucket, 'total'>,
+    ) => {
+      bucket[key] += 1;
+      bucket.total += 1;
+    };
+
+    for (const employee of employees) {
+      const docs: Array<[keyof Omit<ExpiryInsightBucket, 'total'>, number | null]> =
+        [
+          ['passport', daysUntil(employee.pp_expiry)],
+          ['eid', daysUntil(employee.emirates_id_expiry)],
+          ['visa', daysUntil(employee.visa_expiry)],
+          ['workPermit', daysUntil(employee.work_permit_expiry)],
+        ];
+      for (const [key, days] of docs) {
+        if (days == null) continue;
+        if (days <= 15) add(next15, key);
+        else if (days <= 30) add(oneMonth, key);
+      }
+    }
+
+    return { next15, oneMonth };
   }
 
   private formatDateToYYYYMMDD(date: Date): string {

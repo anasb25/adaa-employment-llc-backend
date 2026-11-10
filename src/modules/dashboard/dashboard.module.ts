@@ -8,6 +8,7 @@ import { MobilizationsModule } from '../mobilizations/mobilizations.module';
 import { Project } from '../projects/entities/project.entity';
 import { Client } from '../clients/entities/client.entity';
 import { Timesheet } from '../timesheets/entities/timesheet.entity';
+import { TimesheetEntry } from '../timesheets/entities/timesheet-entry.entity';
 import { Payroll } from '../payroll/entities/payroll.entity';
 import { Invoice } from '../invoices/entities/invoice.entity';
 import { Settlement } from '../settlements/entities/settlement.entity';
@@ -20,6 +21,7 @@ import { Settlement } from '../settlements/entities/settlement.entity';
       Project,
       Client,
       Timesheet,
+      TimesheetEntry,
       Payroll,
       Invoice,
       Settlement,

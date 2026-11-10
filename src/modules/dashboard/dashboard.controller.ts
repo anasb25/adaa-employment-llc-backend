@@ -19,8 +19,11 @@ export class DashboardController {
   }
 
   @Get('insights')
-  async getInsights(@Query('date') date?: string): Promise<WorkforceInsights> {
-    return this.dashboardService.getWorkforceInsights(date);
+  async getInsights(
+    @Query('year') year?: string,
+    @Query('month') month?: string,
+  ): Promise<WorkforceInsights> {
+    return this.dashboardService.getWorkforceInsights(year, month);
   }
 
   @Get('expiring-documents')
