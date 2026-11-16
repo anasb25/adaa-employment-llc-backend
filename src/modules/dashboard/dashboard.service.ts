@@ -23,6 +23,7 @@ import {
 import { DashboardStats } from './dashboard-stats.interface';
 import { ADAA_SUPPLIER_NAME } from '../../common/constants/supplier.constants';
 import { MobilizationExcelUtil } from '../mobilizations/utils/mobilization-excel.util';
+import { resolveCountryFromNationality } from './utils/nationality-country.util';
 import { formatDateOnly, parseDateOnly } from '../../common/utils/date.util';
 
 export interface ExpiringDocument {
@@ -62,11 +63,15 @@ export interface IdleTradeInsightRow {
   hours: number;
 }
 
-export interface MonthlyHoursInsightRow {
-  month: string;
-  label: string;
-  headcount: number;
+export interface CountryInsightRow {
+  country: string;
+  isoCode: string | null;
+  lat: number | null;
+  lng: number | null;
+  count: number;
+  percent: number;
   hours: number;
+  hoursPercent: number;
 }
 
 export interface MonthlyMoneyInsightRow {
@@ -100,7 +105,7 @@ export interface WorkforceInsights {
   idleByTrade: IdleTradeInsightRow[];
   idleTotals: { count: number; hours: number };
   status: StatusInsightRow[];
-  monthlyHours: MonthlyHoursInsightRow[];
+  countries: CountryInsightRow[];
   monthlyPayroll: MonthlyMoneyInsightRow[];
   expiry: {
     next15: ExpiryInsightBucket;
@@ -615,14 +620,13 @@ export class DashboardService {
       : `${periodYear}-12-31`;
     const asOf = periodEnd > today ? today : periodEnd;
 
-    const [effective, hoursByEmployee, monthlyHours, monthlyPayroll, expiry] =
+    const [effective, hoursByEmployee, monthlyPayroll, expiry] =
       await Promise.all([
         this.mobilizationsService.getEffectiveStatusForAllEmployeesOnDate(
           parseDateOnly(asOf),
           true,
         ),
         this.getHoursByEmployeeInRange(periodStart, periodEnd),
-        this.getMonthlyHoursTrend(periodYear),
         this.getMonthlyPayrollTrend(periodYear),
         this.getExpiryInsightBuckets(asOf),
       ]);
@@ -827,7 +831,14 @@ export class DashboardService {
         hours: roundHours(idleRows.reduce((sum, row) => sum + row.hours, 0)),
       },
       status,
-      monthlyHours,
+      countries: await this.getCountryInsightRows(
+        [...counted],
+        hoursOf,
+        total,
+        totalHours,
+        roundHours,
+        share,
+      ),
       monthlyPayroll,
       expiry,
     };
@@ -888,42 +899,65 @@ export class DashboardService {
     );
   }
 
-  private async getMonthlyHoursTrend(
-    year: number,
-  ): Promise<MonthlyHoursInsightRow[]> {
-    const start = `${year}-01-01`;
-    const end = `${year}-12-31`;
-    const rows = await this.timesheetEntryRepository
-      .createQueryBuilder('entry')
-      .select("TO_CHAR(entry.date, 'YYYY-MM')", 'month')
-      .addSelect('COUNT(DISTINCT entry.employeeId)', 'headcount')
-      .addSelect('COALESCE(SUM(entry.hoursWorked), 0)', 'hours')
-      .where('entry.deletedAt IS NULL')
-      .andWhere('entry.date BETWEEN :start AND :end', { start, end })
-      .andWhere('entry.hoursWorked > 0')
-      .andWhere('entry.jobStatus NOT IN (:...skip)', {
-        skip: ['demobilized', 'cancelled', 'absconded', 'resigned'],
-      })
-      .groupBy("TO_CHAR(entry.date, 'YYYY-MM')")
-      .orderBy("TO_CHAR(entry.date, 'YYYY-MM')", 'ASC')
-      .getRawMany<{ month: string; headcount: string; hours: string }>();
+  private async getCountryInsightRows(
+    employeeIds: number[],
+    hoursOf: (employeeId: number) => number,
+    total: number,
+    totalHours: number,
+    roundHours: (value: number) => number,
+    share: (part: number, whole: number) => number,
+  ): Promise<CountryInsightRow[]> {
+    if (employeeIds.length === 0) {
+      return [];
+    }
 
-    const byMonth = new Map(
-      rows.map((row) => [
-        row.month,
-        {
-          headcount: Number(row.headcount) || 0,
-          hours: Math.round((Number(row.hours) || 0) * 100) / 100,
-        },
-      ]),
-    );
+    const employees = await this.employeesRepository
+      .createQueryBuilder('employee')
+      .select(['employee.id', 'employee.nationality'])
+      .where('employee.id IN (:...ids)', { ids: employeeIds })
+      .getMany();
 
-    return this.yearMonthKeys(year).map((month) => ({
-      month,
-      label: this.monthLabel(month),
-      headcount: byMonth.get(month)?.headcount ?? 0,
-      hours: byMonth.get(month)?.hours ?? 0,
-    }));
+    const byCountry = new Map<
+      string,
+      {
+        country: string;
+        isoCode: string | null;
+        lat: number | null;
+        lng: number | null;
+        count: number;
+        hours: number;
+      }
+    >();
+
+    for (const employee of employees) {
+      const resolved = resolveCountryFromNationality(employee.nationality);
+      const country = resolved?.name || employee.nationality?.trim() || 'Unspecified';
+      const key = resolved?.iso || country.toLowerCase();
+      const current = byCountry.get(key) ?? {
+        country,
+        isoCode: resolved?.iso ?? null,
+        lat: resolved?.lat ?? null,
+        lng: resolved?.lng ?? null,
+        count: 0,
+        hours: 0,
+      };
+      current.count += 1;
+      current.hours += hoursOf(employee.id);
+      byCountry.set(key, current);
+    }
+
+    return [...byCountry.values()]
+      .map((value) => ({
+        country: value.country,
+        isoCode: value.isoCode,
+        lat: value.lat,
+        lng: value.lng,
+        count: value.count,
+        percent: share(value.count, total),
+        hours: roundHours(value.hours),
+        hoursPercent: share(value.hours, totalHours),
+      }))
+      .sort((a, b) => b.count - a.count || a.country.localeCompare(b.country));
   }
 
   private async getMonthlyPayrollTrend(
