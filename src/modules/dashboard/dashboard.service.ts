@@ -7,6 +7,10 @@ import {
   JobStatus,
 } from '../mobilizations/entities/mobilization.entity';
 import { MobilizationsService } from '../mobilizations/mobilizations.service';
+import {
+  TimesheetsService,
+  TimesheetInsightMixRow,
+} from '../timesheets/timesheets.service';
 import { Project } from '../projects/entities/project.entity';
 import { Client } from '../clients/entities/client.entity';
 import {
@@ -143,6 +147,7 @@ export class DashboardService {
     @InjectRepository(Settlement)
     private settlementRepository: Repository<Settlement>,
     private mobilizationsService: MobilizationsService,
+    private timesheetsService: TimesheetsService,
   ) {}
 
   async getEmployeesWithExpiringDocuments(): Promise<
@@ -620,16 +625,52 @@ export class DashboardService {
       : `${periodYear}-12-31`;
     const asOf = periodEnd > today ? today : periodEnd;
 
-    const [effective, hoursByEmployee, monthlyPayroll, expiry] =
-      await Promise.all([
-        this.mobilizationsService.getEffectiveStatusForAllEmployeesOnDate(
-          parseDateOnly(asOf),
-          true,
-        ),
-        this.getHoursByEmployeeInRange(periodStart, periodEnd),
-        this.getMonthlyPayrollTrend(periodYear),
-        this.getExpiryInsightBuckets(asOf),
-      ]);
+    const monthKeys = this.insightMonthKeys(periodYear, periodMonth, today);
+    const [effective, monthlyPayroll, expiry] = await Promise.all([
+      this.mobilizationsService.getEffectiveStatusForAllEmployeesOnDate(
+        parseDateOnly(asOf),
+        true,
+      ),
+      this.getMonthlyPayrollTrend(periodYear),
+      this.getExpiryInsightBuckets(asOf),
+    ]);
+    const hourParts: Awaited<
+      ReturnType<TimesheetsService['getDisplayedHoursAttributionForMonth']>
+    >[] = [];
+    for (const key of monthKeys) {
+      hourParts.push(
+        await this.timesheetsService.getDisplayedHoursAttributionForMonth(key),
+      );
+    }
+
+    const hoursByEmployee = new Map<number, number>();
+    const mixRows: TimesheetInsightMixRow[] = [];
+    const idleHoursByEmployee = new Map<number, number>();
+    const timesheetStatusHours = new Map<string, number>();
+
+    for (const part of hourParts) {
+      for (const [employeeId, hours] of part.employeeHours) {
+        hoursByEmployee.set(
+          employeeId,
+          (hoursByEmployee.get(employeeId) ?? 0) + hours,
+        );
+      }
+      mixRows.push(...part.mix);
+      for (const [employeeId, hours] of part.idleHoursByEmployee) {
+        idleHoursByEmployee.set(
+          employeeId,
+          (idleHoursByEmployee.get(employeeId) ?? 0) + hours,
+        );
+      }
+      for (const [, byStatus] of part.statusHoursByEmployee) {
+        for (const [jobStatus, hours] of byStatus) {
+          timesheetStatusHours.set(
+            jobStatus,
+            (timesheetStatusHours.get(jobStatus) ?? 0) + hours,
+          );
+        }
+      }
+    }
 
     const hoursOf = (employeeId: number) => hoursByEmployee.get(employeeId) ?? 0;
     const roundHours = (value: number) => Math.round(value * 100) / 100;
@@ -660,15 +701,28 @@ export class DashboardService {
     const idleByTrade = new Map<string, { count: number; hours: number }>();
     const statusMap = new Map<string, { count: number; hours: number }>();
 
-    const bump = (
+    const ensureMix = (
+      map: Map<string, { count: number; hours: number }>,
+      key: string,
+    ) => {
+      const current = map.get(key) ?? { count: 0, hours: 0 };
+      map.set(key, current);
+      return current;
+    };
+
+    const bumpCount = (
+      map: Map<string, { count: number; hours: number }>,
+      key: string,
+    ) => {
+      ensureMix(map, key).count += 1;
+    };
+
+    const bumpHours = (
       map: Map<string, { count: number; hours: number }>,
       key: string,
       hours: number,
     ) => {
-      const current = map.get(key) ?? { count: 0, hours: 0 };
-      current.count += 1;
-      current.hours += hours;
-      map.set(key, current);
+      ensureMix(map, key).hours += hours;
     };
 
     const statusLabel = (jobStatus: string | null | undefined): string => {
@@ -699,15 +753,18 @@ export class DashboardService {
     );
     const counted = new Set<number>();
 
-    const attributeMix = (employeeId: number, hours: number) => {
+    const attributeHeadcount = (employeeId: number) => {
+      if (counted.has(employeeId)) {
+        return;
+      }
       const mob = effectiveByEmployee.get(employeeId);
       const fat = mob?.project?.fat || 'UNSPECIFIED';
       const trade = mob?.mobilizedTrade?.skill?.trim() || 'Unspecified';
       const clientName = mob?.project?.client?.name?.trim() || 'Unknown';
 
-      bump(fatMap, fat, hours);
-      bump(tradeMap, trade, hours);
-      bump(clientMap, clientName, hours);
+      bumpCount(fatMap, fat);
+      bumpCount(tradeMap, trade);
+      bumpCount(clientMap, clientName);
 
       const split = clientFat.get(clientName) ?? {
         adaa: 0,
@@ -719,46 +776,73 @@ export class DashboardService {
       };
       if (fat === 'ADAA') {
         split.adaa += 1;
-        split.adaaHours += hours;
       } else if (fat === 'CLIENT') {
         split.client += 1;
-        split.clientHours += hours;
       } else {
         split.other += 1;
-        split.otherHours += hours;
       }
       clientFat.set(clientName, split);
       counted.add(employeeId);
     };
 
-    for (const [employeeId, hours] of hoursByEmployee.entries()) {
-      attributeMix(employeeId, hours);
+    for (const employeeId of hoursByEmployee.keys()) {
+      attributeHeadcount(employeeId);
     }
     for (const mob of onSite) {
-      if (!counted.has(mob.employeeId)) {
-        attributeMix(mob.employeeId, 0);
+      attributeHeadcount(mob.employeeId);
+    }
+
+    for (const row of mixRows) {
+      bumpHours(tradeMap, row.trade, row.hours);
+      if (row.isIdle) {
+        bumpHours(idleByTrade, row.trade, row.hours);
+        continue;
       }
+      bumpHours(fatMap, row.fat, row.hours);
+      bumpHours(clientMap, row.clientName, row.hours);
+
+      const split = clientFat.get(row.clientName) ?? {
+        adaa: 0,
+        adaaHours: 0,
+        client: 0,
+        clientHours: 0,
+        other: 0,
+        otherHours: 0,
+      };
+      if (row.fat === 'ADAA') {
+        split.adaaHours += row.hours;
+      } else if (row.fat === 'CLIENT') {
+        split.clientHours += row.hours;
+      } else {
+        split.otherHours += row.hours;
+      }
+      clientFat.set(row.clientName, split);
     }
 
     for (const mob of effective) {
-      const hours = hoursOf(mob.employeeId);
       const jobStatus = String(mob.jobStatus || '').toLowerCase();
       if (jobStatus === JobStatus.IDLE) {
-        bump(
+        bumpCount(
           idleByTrade,
           mob.mobilizedTrade?.skill?.trim() || 'Unspecified',
-          hours,
         );
       }
       const label = statusLabel(mob.jobStatus);
       if (label) {
-        bump(statusMap, label, hours);
+        bumpCount(statusMap, label);
+      }
+    }
+
+    for (const [jobStatus, hours] of timesheetStatusHours) {
+      const label = statusLabel(jobStatus);
+      if (label) {
+        bumpHours(statusMap, label, hours);
       }
     }
 
     const total = counted.size;
     const totalHours = roundHours(
-      [...hoursByEmployee.values()].reduce((sum, hours) => sum + hours, 0),
+      hourParts.reduce((sum, part) => sum + (part.totalHours || 0), 0),
     );
 
     const toRows = (
@@ -828,7 +912,12 @@ export class DashboardService {
       idleByTrade: idleRows,
       idleTotals: {
         count: idleRows.reduce((sum, row) => sum + row.count, 0),
-        hours: roundHours(idleRows.reduce((sum, row) => sum + row.hours, 0)),
+        hours: roundHours(
+          [...idleHoursByEmployee.values()].reduce(
+            (sum, hours) => sum + hours,
+            0,
+          ),
+        ),
       },
       status,
       countries: await this.getCountryInsightRows(
@@ -844,24 +933,21 @@ export class DashboardService {
     };
   }
 
-  private async getHoursByEmployeeInRange(
-    from: string,
-    to: string,
-  ): Promise<Map<number, number>> {
-    const rows = await this.timesheetEntryRepository
-      .createQueryBuilder('entry')
-      .select('entry.employeeId', 'employeeId')
-      .addSelect('COALESCE(SUM(entry.hoursWorked), 0)', 'hours')
-      .where('entry.date BETWEEN :from AND :to', { from, to })
-      .andWhere('entry.deletedAt IS NULL')
-      .andWhere('entry.jobStatus NOT IN (:...skip)', {
-        skip: ['demobilized', 'cancelled', 'absconded', 'resigned'],
-      })
-      .groupBy('entry.employeeId')
-      .getRawMany<{ employeeId: string; hours: string }>();
-
-    return new Map(
-      rows.map((row) => [Number(row.employeeId), Number(row.hours) || 0]),
+  private insightMonthKeys(
+    year: number,
+    month: number | null,
+    today: string,
+  ): string[] {
+    if (month) {
+      return [`${year}-${this.pad2(month)}`];
+    }
+    const todayYear = Number(today.slice(0, 4));
+    const todayMonth = Number(today.slice(5, 7));
+    const lastMonth =
+      year > todayYear ? 0 : year === todayYear ? todayMonth : 12;
+    return Array.from(
+      { length: lastMonth },
+      (_, index) => `${year}-${this.pad2(index + 1)}`,
     );
   }
 
@@ -931,7 +1017,8 @@ export class DashboardService {
 
     for (const employee of employees) {
       const resolved = resolveCountryFromNationality(employee.nationality);
-      const country = resolved?.name || employee.nationality?.trim() || 'Unspecified';
+      const country =
+        resolved?.name || employee.nationality?.trim() || 'No nationality';
       const key = resolved?.iso || country.toLowerCase();
       const current = byCountry.get(key) ?? {
         country,

@@ -5,6 +5,7 @@ import { DashboardService } from './dashboard.service';
 import { Employee } from '../employees/entities/employee.entity';
 import { Mobilization } from '../mobilizations/entities/mobilization.entity';
 import { MobilizationsModule } from '../mobilizations/mobilizations.module';
+import { TimesheetsModule } from '../timesheets/timesheets.module';
 import { Project } from '../projects/entities/project.entity';
 import { Client } from '../clients/entities/client.entity';
 import { Timesheet } from '../timesheets/entities/timesheet.entity';
@@ -27,6 +28,7 @@ import { Settlement } from '../settlements/entities/settlement.entity';
       Settlement,
     ]),
     MobilizationsModule,
+    TimesheetsModule,
   ],
   controllers: [DashboardController],
   providers: [DashboardService],
