@@ -95,12 +95,27 @@ export type TimesheetInsightMixRow = {
   isIdle: boolean;
 };
 
+export type TimesheetInsightOnSiteAttr = {
+  fat: string;
+  clientName: string;
+  trade: string;
+  /** Project hours used to pick primary site when an employee moved mid-month. */
+  hours: number;
+};
+
 /** Hours that match monthly timesheet grids for a YYYY-MM. */
 export type TimesheetInsightHours = {
   totalHours: number;
   employeeHours: Map<number, number>;
   mix: TimesheetInsightMixRow[];
   idleHoursByEmployee: Map<number, number>;
+  /** Distinct employees who appeared on the idle sheet during the month. */
+  idleByEmployee: Map<number, { trade: string }>;
+  /**
+   * Distinct employees assigned to a project on at least one day in the month,
+   * attributed to their primary (most hours) project for headcount mix.
+   */
+  onSiteByEmployee: Map<number, TimesheetInsightOnSiteAttr>;
   statusHoursByEmployee: Map<number, Map<string, number>>;
 };
 
@@ -801,8 +816,10 @@ export class TimesheetsService {
 
     const employeeHours = new Map<number, number>();
     const idleHoursByEmployee = new Map<number, number>();
+    const idleByEmployee = new Map<number, { trade: string }>();
     const statusHoursByEmployee = new Map<number, Map<string, number>>();
     const mix: TimesheetInsightMixRow[] = [];
+    const onSiteByEmployee = new Map<number, TimesheetInsightOnSiteAttr>();
 
     const projectSheets = await Promise.all(
       projects.map(async (project) => {
@@ -827,11 +844,18 @@ export class TimesheetsService {
       }),
     );
 
+    const projectById = new Map(projects.map((project) => [project.id, project]));
+    const sheetByProjectId = new Map<
+      number,
+      NonNullable<(typeof projectSheets)[number]>
+    >();
+
     for (const sheet of projectSheets) {
       if (!sheet) {
         continue;
       }
       const project = sheet.project as Project;
+      sheetByProjectId.set(project.id, sheet);
       const fat = project.fat || 'UNSPECIFIED';
       const clientName = project.client?.name?.trim() || 'Unknown';
       for (const [employeeId, hours] of sheet.hoursByEmployee ?? []) {
@@ -855,6 +879,30 @@ export class TimesheetsService {
       this.mergeStatusHours(statusHoursByEmployee, sheet.statusHoursByEmployee);
     }
 
+    // Period on-site headcount: anyone assigned to a project on ≥1 day this month.
+    // Attribute each employee to the project where they logged the most hours.
+    for (const [projectId, roster] of sharedContext.employeeIdsByProjectForMonth) {
+      const project = projectById.get(projectId);
+      if (!project || roster.size === 0) {
+        continue;
+      }
+      const fat = project.fat || 'UNSPECIFIED';
+      const clientName = project.client?.name?.trim() || 'Unknown';
+      const sheet = sheetByProjectId.get(projectId);
+      for (const employeeId of roster) {
+        const hours = Number(sheet?.hoursByEmployee?.get(employeeId) ?? 0) || 0;
+        const trade = this.tradeForEmployeeOnProject(
+          sharedContext,
+          employeeId,
+          projectId,
+        );
+        const existing = onSiteByEmployee.get(employeeId);
+        if (!existing || hours > existing.hours) {
+          onSiteByEmployee.set(employeeId, { fat, clientName, trade, hours });
+        }
+      }
+    }
+
     let totalHours = 0;
     for (const sheet of projectSheets) {
       if (sheet) {
@@ -870,6 +918,9 @@ export class TimesheetsService {
       totalHours += idleData.totalHours ?? 0;
     }
     for (const employee of idleData.employees) {
+      const trade = employee.trade?.trim() || 'Unspecified';
+      idleByEmployee.set(employee.employeeId, { trade });
+
       let hours = 0;
       for (const day of employee.dailyHours) {
         if (
@@ -898,7 +949,7 @@ export class TimesheetsService {
         hours,
         fat: 'UNSPECIFIED',
         clientName: 'Unknown',
-        trade: employee.trade?.trim() || 'Unspecified',
+        trade,
         isIdle: true,
       });
     }
@@ -908,6 +959,8 @@ export class TimesheetsService {
       employeeHours,
       mix,
       idleHoursByEmployee,
+      idleByEmployee,
+      onSiteByEmployee,
       statusHoursByEmployee,
     };
   }

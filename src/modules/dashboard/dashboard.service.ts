@@ -150,6 +150,48 @@ export class DashboardService {
     private timesheetsService: TimesheetsService,
   ) {}
 
+  /**
+   * Employees whose effective (non day-specific) job status is cancelled or
+   * absconded must not appear in document expiry alerts / insight buckets.
+   * Day-specific rows (absent, sick leave, etc.) must not override a prior
+   * cancelled/absconded status for this purpose.
+   */
+  private async getExpiryAlertExcludedEmployeeIds(): Promise<number[]> {
+    const daySpecificStatuses = [
+      JobStatus.ABSENT,
+      JobStatus.SICK_LEAVE,
+      JobStatus.CASUAL_LEAVE,
+      JobStatus.URGENT_LEAVE,
+      JobStatus.OFF,
+    ];
+    const excludedStatuses = new Set<string>([
+      JobStatus.CANCELLED,
+      JobStatus.ABSCONDED,
+    ]);
+
+    const rows = await this.mobilizationRepository
+      .createQueryBuilder('mob')
+      .select('mob.employeeId', 'employeeId')
+      .addSelect('mob.jobStatus', 'jobStatus')
+      .distinctOn(['mob.employeeId'])
+      .where('mob.deletedAt IS NULL')
+      .andWhere('mob.jobStatus NOT IN (:...daySpecificStatuses)', {
+        daySpecificStatuses,
+      })
+      .orderBy('mob.employeeId', 'ASC')
+      .addOrderBy('mob.actionDate', 'DESC')
+      .addOrderBy('mob.id', 'DESC')
+      .getRawMany<{ employeeId?: number; employeeid?: number; jobStatus?: string; jobstatus?: string }>();
+
+    return rows
+      .filter((row) => {
+        const status = String(row.jobStatus ?? row.jobstatus ?? '').toLowerCase();
+        return excludedStatuses.has(status);
+      })
+      .map((row) => Number(row.employeeId ?? row.employeeid))
+      .filter((id) => Number.isFinite(id) && id > 0);
+  }
+
   async getEmployeesWithExpiringDocuments(): Promise<
     EmployeeWithExpiringDocs[]
   > {
@@ -161,35 +203,9 @@ export class DashboardService {
     fifteenDaysFromNow.setDate(fifteenDaysFromNow.getDate() + 15);
     fifteenDaysFromNow.setHours(23, 59, 59, 999); // End of the 15th day
 
-    // Statuses that should be excluded from expiry alerts
-    const excludedStatuses = [JobStatus.CANCELLED, JobStatus.ABSCONDED];
+    const excludedIds = await this.getExpiryAlertExcludedEmployeeIds();
 
-    // Get employee IDs whose latest mobilization has a cancelled or absconded status.
-    // The latest mobilization is determined by actionDate DESC, then id DESC.
-    const excludedEmployeeIds = await this.mobilizationRepository
-      .createQueryBuilder('mob')
-      .select('mob.employeeId', 'employeeId')
-      .where((qb) => {
-        // Subquery: for each employee, find the latest mobilization record
-        const subQuery = qb
-          .subQuery()
-          .select('m2.id')
-          .from(Mobilization, 'm2')
-          .where('m2.employeeId = mob.employeeId')
-          .andWhere('m2.deletedAt IS NULL')
-          .orderBy('m2.actionDate', 'DESC')
-          .addOrderBy('m2.id', 'DESC')
-          .limit(1)
-          .getQuery();
-        return `mob.id = ${subQuery}`;
-      })
-      .andWhere('mob.deletedAt IS NULL')
-      .andWhere('mob.jobStatus IN (:...excludedStatuses)', { excludedStatuses })
-      .getRawMany();
-
-    const excludedIds = excludedEmployeeIds.map((r) => r.employeeId);
-
-    // Get all employees, excluding those with cancelled/absconded latest mobilization
+    // Get all employees, excluding cancelled/absconded (effective status)
     const queryBuilder = this.employeesRepository
       .createQueryBuilder('employee')
       .select([
@@ -646,6 +662,11 @@ export class DashboardService {
     const hoursByEmployee = new Map<number, number>();
     const mixRows: TimesheetInsightMixRow[] = [];
     const idleHoursByEmployee = new Map<number, number>();
+    const idleByEmployee = new Map<number, { trade: string }>();
+    const onSiteByEmployee = new Map<
+      number,
+      { fat: string; clientName: string; trade: string; hours: number }
+    >();
     const timesheetStatusHours = new Map<string, number>();
 
     for (const part of hourParts) {
@@ -662,6 +683,17 @@ export class DashboardService {
           (idleHoursByEmployee.get(employeeId) ?? 0) + hours,
         );
       }
+      for (const [employeeId, attr] of part.idleByEmployee) {
+        if (!idleByEmployee.has(employeeId)) {
+          idleByEmployee.set(employeeId, attr);
+        }
+      }
+      for (const [employeeId, attr] of part.onSiteByEmployee) {
+        const existing = onSiteByEmployee.get(employeeId);
+        if (!existing || attr.hours > existing.hours) {
+          onSiteByEmployee.set(employeeId, { ...attr });
+        }
+      }
       for (const [, byStatus] of part.statusHoursByEmployee) {
         for (const [jobStatus, hours] of byStatus) {
           timesheetStatusHours.set(
@@ -676,13 +708,6 @@ export class DashboardService {
     const roundHours = (value: number) => Math.round(value * 100) / 100;
     const share = (part: number, whole: number) =>
       whole === 0 ? 0 : Math.round((part / whole) * 10000) / 100;
-
-    const onSite = effective.filter(
-      (mob) =>
-        mob.projectId != null &&
-        mob.project != null &&
-        mob.mobStatus !== 'demobilized',
-    );
 
     const fatMap = new Map<string, { count: number; hours: number }>();
     const tradeMap = new Map<string, { count: number; hours: number }>();
@@ -748,20 +773,11 @@ export class DashboardService {
       return '';
     };
 
-    const effectiveByEmployee = new Map(
-      effective.map((mob) => [mob.employeeId, mob]),
-    );
-    const counted = new Set<number>();
-
-    const attributeHeadcount = (employeeId: number) => {
-      if (counted.has(employeeId)) {
-        return;
-      }
-      const mob = effectiveByEmployee.get(employeeId);
-      const fat = mob?.project?.fat || 'UNSPECIFIED';
-      const trade = mob?.mobilizedTrade?.skill?.trim() || 'Unspecified';
-      const clientName = mob?.project?.client?.name?.trim() || 'Unknown';
-
+    // Period on-site headcount (FAT / trade / client): people assigned to a
+    // project on at least one day in the selected period — not an end-of-month
+    // snapshot mixed with anyone who logged hours.
+    for (const [, attr] of onSiteByEmployee) {
+      const { fat, trade, clientName } = attr;
       bumpCount(fatMap, fat);
       bumpCount(tradeMap, trade);
       bumpCount(clientMap, clientName);
@@ -782,14 +798,6 @@ export class DashboardService {
         split.other += 1;
       }
       clientFat.set(clientName, split);
-      counted.add(employeeId);
-    };
-
-    for (const employeeId of hoursByEmployee.keys()) {
-      attributeHeadcount(employeeId);
-    }
-    for (const mob of onSite) {
-      attributeHeadcount(mob.employeeId);
     }
 
     for (const row of mixRows) {
@@ -819,14 +827,13 @@ export class DashboardService {
       clientFat.set(row.clientName, split);
     }
 
+    // Period idle headcount by trade (people who appeared on the idle sheet).
+    for (const [, attr] of idleByEmployee) {
+      bumpCount(idleByTrade, attr.trade);
+    }
+
+    // Status cards: workforce snapshot at period end (excludes cancelled/absconded).
     for (const mob of effective) {
-      const jobStatus = String(mob.jobStatus || '').toLowerCase();
-      if (jobStatus === JobStatus.IDLE) {
-        bumpCount(
-          idleByTrade,
-          mob.mobilizedTrade?.skill?.trim() || 'Unspecified',
-        );
-      }
       const label = statusLabel(mob.jobStatus);
       if (label) {
         bumpCount(statusMap, label);
@@ -840,6 +847,7 @@ export class DashboardService {
       }
     }
 
+    const counted = new Set(onSiteByEmployee.keys());
     const total = counted.size;
     const totalHours = roundHours(
       hourParts.reduce((sum, part) => sum + (part.totalHours || 0), 0),
@@ -911,7 +919,7 @@ export class DashboardService {
       },
       idleByTrade: idleRows,
       idleTotals: {
-        count: idleRows.reduce((sum, row) => sum + row.count, 0),
+        count: idleByEmployee.size,
         hours: roundHours(
           [...idleHoursByEmployee.values()].reduce(
             (sum, hours) => sum + hours,
@@ -1112,7 +1120,8 @@ export class DashboardService {
     const oneMonth = empty();
     const asOfDate = parseDateOnly(asOf);
 
-    const employees = await this.employeesRepository
+    const excludedIds = await this.getExpiryAlertExcludedEmployeeIds();
+    const employeeQuery = this.employeesRepository
       .createQueryBuilder('employee')
       .select([
         'employee.pp_expiry',
@@ -1120,8 +1129,15 @@ export class DashboardService {
         'employee.visa_expiry',
         'employee.work_permit_expiry',
       ])
-      .where('employee.deletedAt IS NULL')
-      .getMany();
+      .where('employee.deletedAt IS NULL');
+
+    if (excludedIds.length > 0) {
+      employeeQuery.andWhere('employee.id NOT IN (:...excludedIds)', {
+        excludedIds,
+      });
+    }
+
+    const employees = await employeeQuery.getMany();
 
     const daysUntil = (value: string | null | undefined): number | null => {
       if (!value) return null;

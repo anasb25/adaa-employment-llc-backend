@@ -64,7 +64,9 @@ import mailConfig from './config/mail.config';
         password: configService.get('database.password'),
         database: configService.get('database.database'),
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
-        synchronize: false,
+        // Local bootstrap: set TYPEORM_SYNC=true when the DB has no schema yet
+        // (base migrations are commented out in this repo). Keep false otherwise.
+        synchronize: process.env.TYPEORM_SYNC === 'true',
         // logging: configService.get('app.nodeEnv') === 'development',
         logging: false,
       }),
