@@ -773,9 +773,8 @@ export class DashboardService {
       return '';
     };
 
-    // Period on-site headcount (FAT / trade / client): people assigned to a
-    // project on at least one day in the selected period — not an end-of-month
-    // snapshot mixed with anyone who logged hours.
+    // Period on-site headcount. FAT uses employee supplier (same as Overview):
+    // ADAA supplier → ADAA, otherwise → CLIENT.
     for (const [, attr] of onSiteByEmployee) {
       const { fat, trade, clientName } = attr;
       bumpCount(fatMap, fat);
@@ -792,10 +791,8 @@ export class DashboardService {
       };
       if (fat === 'ADAA') {
         split.adaa += 1;
-      } else if (fat === 'CLIENT') {
-        split.client += 1;
       } else {
-        split.other += 1;
+        split.client += 1;
       }
       clientFat.set(clientName, split);
     }
@@ -819,10 +816,8 @@ export class DashboardService {
       };
       if (row.fat === 'ADAA') {
         split.adaaHours += row.hours;
-      } else if (row.fat === 'CLIENT') {
-        split.clientHours += row.hours;
       } else {
-        split.otherHours += row.hours;
+        split.clientHours += row.hours;
       }
       clientFat.set(row.clientName, split);
     }
@@ -866,10 +861,10 @@ export class DashboardService {
         }))
         .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
 
-    const fatOrder = ['ADAA', 'CLIENT', 'UNSPECIFIED'];
-    const fat = toRows(fatMap).sort(
-      (a, b) => fatOrder.indexOf(a.label) - fatOrder.indexOf(b.label),
-    );
+    const fatOrder = ['ADAA', 'CLIENT'];
+    const fat = toRows(fatMap)
+      .filter((row) => row.label === 'ADAA' || row.label === 'CLIENT')
+      .sort((a, b) => fatOrder.indexOf(a.label) - fatOrder.indexOf(b.label));
 
     const clientsByFat = [...clientFat.entries()]
       .map(([client, split]) => ({
