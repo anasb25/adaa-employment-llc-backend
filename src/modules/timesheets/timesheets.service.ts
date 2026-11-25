@@ -122,7 +122,10 @@ export type TimesheetInsightHours = {
   employeeHours: Map<number, number>;
   mix: TimesheetInsightMixRow[];
   idleHoursByEmployee: Map<number, number>;
-  /** Distinct employees who appeared on the idle sheet during the month. */
+  /**
+   * Distinct employees with actual IDLE status (≥1 day) in the period.
+   * Excludes annual_leave / urgent_leave-only rows on the idle sheet.
+   */
   idleByEmployee: Map<number, { trade: string }>;
   /**
    * Distinct ACTIVE employees (active/notice_period ≥1 day), one primary site
@@ -964,9 +967,9 @@ export class TimesheetsService {
     }
     for (const employee of idleData.employees) {
       const trade = employee.trade?.trim() || 'Unspecified';
-      idleByEmployee.set(employee.employeeId, { trade });
+      let idleHours = 0;
+      let hadIdleStatusDay = false;
 
-      let hours = 0;
       for (const day of employee.dailyHours) {
         if (
           !day.jobStatus ||
@@ -975,8 +978,8 @@ export class TimesheetsService {
         ) {
           continue;
         }
+        const status = String(day.jobStatus).toLowerCase();
         const value = Number(day.hoursWorked) || 0;
-        hours += value;
         this.addDisplayedHour(
           employeeHours,
           statusHoursByEmployee,
@@ -984,14 +987,26 @@ export class TimesheetsService {
           value,
           day.jobStatus,
         );
+
+        // Insights idle card: only true IDLE status (not annual/urgent leave).
+        if (status === JobStatus.IDLE) {
+          hadIdleStatusDay = true;
+          idleHours += value;
+        }
       }
-      if (!hours) {
+
+      if (!hadIdleStatusDay) {
         continue;
       }
-      this.addEmployeeHours(idleHoursByEmployee, employee.employeeId, hours);
+
+      idleByEmployee.set(employee.employeeId, { trade });
+      if (!idleHours) {
+        continue;
+      }
+      this.addEmployeeHours(idleHoursByEmployee, employee.employeeId, idleHours);
       mix.push({
         employeeId: employee.employeeId,
-        hours,
+        hours: idleHours,
         fat: 'CLIENT',
         clientName: 'Unknown',
         trade,

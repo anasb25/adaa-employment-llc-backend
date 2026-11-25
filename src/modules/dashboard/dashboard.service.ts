@@ -831,7 +831,7 @@ export class DashboardService {
       clientFat.set(row.clientName, split);
     }
 
-    // Period idle headcount by trade (people who appeared on the idle sheet).
+    // Period idle headcount by trade (actual IDLE status only).
     for (const [, attr] of idleByEmployee) {
       bumpCount(idleByTrade, attr.trade);
     }
