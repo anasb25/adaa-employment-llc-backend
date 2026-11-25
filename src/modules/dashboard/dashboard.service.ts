@@ -195,13 +195,10 @@ export class DashboardService {
   async getEmployeesWithExpiringDocuments(): Promise<
     EmployeeWithExpiringDocs[]
   > {
-    // Get current date and date 15 days from now
+    // Alert window: already expired or expiring within 60 days
+    const EXPIRY_ALERT_DAYS = 60;
     const today = new Date();
-    today.setHours(0, 0, 0, 0); // Start of today
-
-    const fifteenDaysFromNow = new Date(today);
-    fifteenDaysFromNow.setDate(fifteenDaysFromNow.getDate() + 15);
-    fifteenDaysFromNow.setHours(23, 59, 59, 999); // End of the 15th day
+    today.setHours(0, 0, 0, 0);
 
     const excludedIds = await this.getExpiryAlertExcludedEmployeeIds();
 
@@ -275,8 +272,8 @@ export class DashboardService {
             (expiryDate.getTime() - today.getTime()) / (1000 * 60 * 60 * 24),
           );
 
-          // Include documents that are expired or expiring within the next 15 days
-          if (daysUntilExpiry <= 15) {
+          // Include documents that are expired or expiring within the next 60 days
+          if (daysUntilExpiry <= EXPIRY_ALERT_DAYS) {
             expiringDocuments.push({
               field: doc.field,
               label: doc.label,
@@ -667,6 +664,7 @@ export class DashboardService {
       number,
       { fat: string; clientName: string; trade: string; hours: number }
     >();
+    const activeEmployeeIds = new Set<number>();
     const timesheetStatusHours = new Map<string, number>();
 
     for (const part of hourParts) {
@@ -693,6 +691,9 @@ export class DashboardService {
         if (!existing || attr.hours > existing.hours) {
           onSiteByEmployee.set(employeeId, { ...attr });
         }
+      }
+      for (const employeeId of part.activeEmployeeIds ?? []) {
+        activeEmployeeIds.add(employeeId);
       }
       for (const [, byStatus] of part.statusHoursByEmployee) {
         for (const [jobStatus, hours] of byStatus) {
@@ -773,9 +774,12 @@ export class DashboardService {
       return '';
     };
 
-    // Period on-site headcount. FAT uses employee supplier (same as Overview):
-    // ADAA supplier → ADAA, otherwise → CLIENT.
-    for (const [, attr] of onSiteByEmployee) {
+    // Headcount: ACTIVE/NOTICE_PERIOD only, one count per employee (no multi-site
+    // duplicates). Primary site = most hours. FAT = project Client FAT (projects.fat).
+    for (const [employeeId, attr] of onSiteByEmployee) {
+      if (!activeEmployeeIds.has(employeeId)) {
+        continue;
+      }
       const { fat, trade, clientName } = attr;
       bumpCount(fatMap, fat);
       bumpCount(tradeMap, trade);
@@ -797,12 +801,17 @@ export class DashboardService {
       clientFat.set(clientName, split);
     }
 
+    // Hours: all sites for those active employees (not primary-only).
     for (const row of mixRows) {
-      bumpHours(tradeMap, row.trade, row.hours);
       if (row.isIdle) {
         bumpHours(idleByTrade, row.trade, row.hours);
+        bumpHours(tradeMap, row.trade, row.hours);
         continue;
       }
+      if (!activeEmployeeIds.has(row.employeeId)) {
+        continue;
+      }
+      bumpHours(tradeMap, row.trade, row.hours);
       bumpHours(fatMap, row.fat, row.hours);
       bumpHours(clientMap, row.clientName, row.hours);
 
@@ -842,7 +851,9 @@ export class DashboardService {
       }
     }
 
-    const counted = new Set(onSiteByEmployee.keys());
+    const counted = new Set(
+      [...onSiteByEmployee.keys()].filter((id) => activeEmployeeIds.has(id)),
+    );
     const total = counted.size;
     const totalHours = roundHours(
       hourParts.reduce((sum, part) => sum + (part.totalHours || 0), 0),
@@ -873,11 +884,10 @@ export class DashboardService {
         adaaHours: roundHours(split.adaaHours),
         clientFat: split.client,
         clientHours: roundHours(split.clientHours),
-        total: split.adaa + split.client + split.other,
-        totalHours: roundHours(
-          split.adaaHours + split.clientHours + split.otherHours,
-        ),
+        total: split.adaa + split.client,
+        totalHours: roundHours(split.adaaHours + split.clientHours),
       }))
+      .filter((row) => row.total > 0 || row.totalHours > 0)
       .sort((a, b) => b.total - a.total || a.client.localeCompare(b.client));
 
     const idleRows = [...idleByTrade.entries()]

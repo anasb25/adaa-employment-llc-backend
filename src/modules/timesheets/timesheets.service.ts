@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, LessThanOrEqual } from 'typeorm';
+import { Repository, LessThanOrEqual, In } from 'typeorm';
 import { Timesheet, TimesheetStatus } from './entities/timesheet.entity';
 import { TimesheetEntry } from './entities/timesheet-entry.entity';
 import {
@@ -24,6 +24,7 @@ import {
   DEFAULT_PROJECT_OFF_DAYS,
   getEffectiveProjectOffDays,
   Project,
+  ProjectFAT,
 } from '../projects/entities/project.entity';
 import { Skill } from '../skills/entities/skill.entity';
 import {
@@ -44,7 +45,6 @@ import {
   parseDateOnly,
   compareDateOnly,
 } from '../../common/utils/date.util';
-import { ADAA_SUPPLIER_NAME } from '../../common/constants/supplier.constants';
 import {
   DailyUtilizationReport,
   ClientUtilization,
@@ -90,7 +90,7 @@ export interface MonthlyProjectTimesheetData {
 export type TimesheetInsightMixRow = {
   employeeId: number;
   hours: number;
-  /** Same split as Overview: ADAA supplier vs everyone else (CLIENT). */
+  /** Project FAT (Client FAT): ADAA vs CLIENT from the project record. */
   fat: 'ADAA' | 'CLIENT';
   clientName: string;
   trade: string;
@@ -98,7 +98,7 @@ export type TimesheetInsightMixRow = {
 };
 
 export type TimesheetInsightOnSiteAttr = {
-  /** Same split as Overview: ADAA supplier vs everyone else (CLIENT). */
+  /** Project FAT (Client FAT) of the employee's primary site this month. */
   fat: 'ADAA' | 'CLIENT';
   clientName: string;
   trade: string;
@@ -106,13 +106,14 @@ export type TimesheetInsightOnSiteAttr = {
   hours: number;
 };
 
-/** Overview-style split: employee supplier ADAA → ADAA, otherwise CLIENT. */
-export function insightFatFromSupplier(
-  supplierName: string | null | undefined,
+/** Insights FAT from project Client FAT (`projects.fat`). Null → CLIENT. */
+export function insightFatFromProjectFat(
+  projectFat: string | null | undefined,
 ): 'ADAA' | 'CLIENT' {
-  return String(supplierName || '').trim() === ADAA_SUPPLIER_NAME
-    ? 'ADAA'
-    : 'CLIENT';
+  const normalized = String(projectFat || '')
+    .trim()
+    .toUpperCase();
+  return normalized === ProjectFAT.ADAA ? 'ADAA' : 'CLIENT';
 }
 
 /** Hours that match monthly timesheet grids for a YYYY-MM. */
@@ -124,10 +125,12 @@ export type TimesheetInsightHours = {
   /** Distinct employees who appeared on the idle sheet during the month. */
   idleByEmployee: Map<number, { trade: string }>;
   /**
-   * Distinct employees assigned to a project on at least one day in the month,
-   * attributed to their primary (most hours) project for headcount mix.
+   * Distinct ACTIVE employees (active/notice_period ≥1 day), one primary site
+   * (most hours). Multi-site workers count once for headcount.
    */
   onSiteByEmployee: Map<number, TimesheetInsightOnSiteAttr>;
+  /** Employee IDs that were active on a project ≥1 day this month. */
+  activeEmployeeIds: Set<number>;
   statusHoursByEmployee: Map<number, Map<string, number>>;
 };
 
@@ -149,6 +152,10 @@ export interface MonthlyMobilizationContext {
    * Supports mid-month transfers (same employee on multiple project sheets).
    */
   employeeIdsByProjectForMonth: Map<number, Set<number>>;
+  /**
+   * Per project: employees with ACTIVE / NOTICE_PERIOD on ≥1 day (insights headcount).
+   */
+  activeEmployeeIdsByProjectForMonth: Map<number, Set<number>>;
 }
 
 @Injectable()
@@ -692,6 +699,7 @@ export class TimesheetsService {
 
     const mobilizationsByEmployee = new Map<number, Mobilization[]>();
     const employeeIdsByProjectForMonth = new Map<number, Set<number>>();
+    const activeEmployeeIdsByProjectForMonth = new Map<number, Set<number>>();
 
     for (const mob of allMobilizations) {
       let list = mobilizationsByEmployee.get(mob.employeeId);
@@ -714,6 +722,24 @@ export class TimesheetsService {
           employeeIdsByProjectForMonth.set(effective.projectId, onProject);
         }
         onProject.add(employeeId);
+
+        const status = String(effective.jobStatus || '').toLowerCase();
+        if (
+          status === JobStatus.ACTIVE ||
+          status === JobStatus.NOTICE_PERIOD
+        ) {
+          let activeOnProject = activeEmployeeIdsByProjectForMonth.get(
+            effective.projectId,
+          );
+          if (!activeOnProject) {
+            activeOnProject = new Set();
+            activeEmployeeIdsByProjectForMonth.set(
+              effective.projectId,
+              activeOnProject,
+            );
+          }
+          activeOnProject.add(employeeId);
+        }
       }
     }
 
@@ -724,6 +750,7 @@ export class TimesheetsService {
       dayInfo,
       mobilizationsByEmployee,
       employeeIdsByProjectForMonth,
+      activeEmployeeIdsByProjectForMonth,
     };
 
     this.mobilizationContextCache.set(month, {
@@ -814,15 +841,6 @@ export class TimesheetsService {
     return match?.mobilizedTrade?.skill?.trim() || 'Unspecified';
   }
 
-  /** FAT insight bucket from employee supplier (same rule as Overview). */
-  private insightFatForEmployee(
-    ctx: MonthlyMobilizationContext,
-    employeeId: number,
-  ): 'ADAA' | 'CLIENT' {
-    const mobs = ctx.mobilizationsByEmployee.get(employeeId) || [];
-    return insightFatFromSupplier(mobs[0]?.employee?.supplier?.name);
-  }
-
   /**
    * Display hours for Insights — same totals as monthly timesheet grids
    * (saved entries + carry-forward + calendar off-day rules).
@@ -879,6 +897,7 @@ export class TimesheetsService {
       const project = sheet.project as Project;
       sheetByProjectId.set(project.id, sheet);
       const clientName = project.client?.name?.trim() || 'Unknown';
+      const fat = insightFatFromProjectFat(project.fat);
       for (const [employeeId, hours] of sheet.hoursByEmployee ?? []) {
         if (!hours) {
           continue;
@@ -887,7 +906,7 @@ export class TimesheetsService {
         mix.push({
           employeeId,
           hours,
-          fat: this.insightFatForEmployee(sharedContext, employeeId),
+          fat,
           clientName,
           trade: this.tradeForEmployeeOnProject(
             sharedContext,
@@ -900,24 +919,28 @@ export class TimesheetsService {
       this.mergeStatusHours(statusHoursByEmployee, sheet.statusHoursByEmployee);
     }
 
-    // Period on-site headcount: anyone assigned to a project on ≥1 day this month.
-    // Attribute each employee to the project where they logged the most hours.
-    // FAT bucket uses employee supplier (Overview logic), not project.fat.
-    for (const [projectId, roster] of sharedContext.employeeIdsByProjectForMonth) {
+    // Headcount: ACTIVE / NOTICE_PERIOD on ≥1 day only; each employee once on
+    // the project/client with the most hours. FAT from project Client FAT.
+    const activeEmployeeIds = new Set<number>();
+    for (const [
+      projectId,
+      roster,
+    ] of sharedContext.activeEmployeeIdsByProjectForMonth ?? []) {
       const project = projectById.get(projectId);
       if (!project || roster.size === 0) {
         continue;
       }
       const clientName = project.client?.name?.trim() || 'Unknown';
+      const fat = insightFatFromProjectFat(project.fat);
       const sheet = sheetByProjectId.get(projectId);
       for (const employeeId of roster) {
+        activeEmployeeIds.add(employeeId);
         const hours = Number(sheet?.hoursByEmployee?.get(employeeId) ?? 0) || 0;
         const trade = this.tradeForEmployeeOnProject(
           sharedContext,
           employeeId,
           projectId,
         );
-        const fat = this.insightFatForEmployee(sharedContext, employeeId);
         const existing = onSiteByEmployee.get(employeeId);
         if (!existing || hours > existing.hours) {
           onSiteByEmployee.set(employeeId, { fat, clientName, trade, hours });
@@ -969,7 +992,7 @@ export class TimesheetsService {
       mix.push({
         employeeId: employee.employeeId,
         hours,
-        fat: this.insightFatForEmployee(sharedContext, employee.employeeId),
+        fat: 'CLIENT',
         clientName: 'Unknown',
         trade,
         isIdle: true,
@@ -983,6 +1006,7 @@ export class TimesheetsService {
       idleHoursByEmployee,
       idleByEmployee,
       onSiteByEmployee,
+      activeEmployeeIds,
       statusHoursByEmployee,
     };
   }
